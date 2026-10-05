@@ -23,7 +23,7 @@ that are not listed there unless the owner asks. The README covers run instructi
 - Tests fake only the network (`tests/fakes.py`: loopback HL REST + WS + Telegram). Never mock our own code.
   Parsers are tested against real recorded responses in `tests/fixtures` (re-record with
   `tools/record_samples.py`).
-- Run `uv run pytest` after every change (about 1.5 minutes, 157 tests at the time of writing, including real-process
+- Run `uv run pytest` after every change (about 1.5 minutes, 159 tests at the time of writing, including real-process
   kill -9 restarts).
 
 ## Layout (`src/copybot/`)

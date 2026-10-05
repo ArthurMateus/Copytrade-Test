@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import hmac
+import http.client
 import json
 import queue
 import threading
@@ -48,6 +49,9 @@ class TgApi:
             raise TgError(e.code, body.get("description", ""), ra) from None
         except urllib.error.URLError as e:
             raise TgError(0, f"network: {e.reason}") from None
+        except (OSError, http.client.HTTPException, ValueError) as e:
+            # a read timeout, a dropped connection or a broken reply: a network error like any other
+            raise TgError(0, f"network: {type(e).__name__}: {e}") from None
         if not body.get("ok"):
             raise TgError(int(body.get("error_code", 0)), body.get("description", ""))
         return body["result"]
@@ -220,9 +224,17 @@ class TelegramUI:
                 time.sleep(backoff)
                 backoff = min(60.0, backoff * 2)
                 continue
+            except Exception:   # never let the command thread die: /flatten must keep working
+                log.exception("telegram_poll_crash")
+                time.sleep(backoff)
+                backoff = min(60.0, backoff * 2)
+                continue
             for u in ups:
                 self.offset = max(self.offset, u["update_id"] + 1)
-                self.handle_update(u)
+                try:
+                    self.handle_update(u)
+                except Exception:
+                    log.exception("telegram_update_error")
 
     def handle_update(self, u: dict) -> None:
         msg = u.get("message") or {}

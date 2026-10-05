@@ -239,3 +239,19 @@ def test_a_finished_review_publishes_a_ranking_even_with_few_scored(scorer_env):
     sc2.maybe_cycle()
     rankings = [m for m in list(out.queue) if m[0] == "ranking"]
     assert sc2.ready() and rankings and rankings[-1][2] < 50 and rankings[-1][1]
+
+
+def test_a_restart_does_not_push_the_hourly_cycle_back(scorer_env):
+    fake, cfg, info, tmp, good, bad = scorer_env
+    out = queue.Queue()
+    sc = Scorer(cfg, info, out, tmp / "cache")
+    sc.review(weekly=True)
+    last = sc.now() - 20 * 60_000                  # the last real cycle was 20 minutes ago
+    sc.meta["last_cycle"] = last
+    sc._save()
+    sc2 = Scorer(cfg, info, out, tmp / "cache")    # restart: republishes the ranking at once ...
+    sc2.maybe_cycle(force=True)
+    assert sc2.meta["last_cycle"] == last          # ... but the next cycle stays 40 minutes away, not 60
+    sc2.meta["last_cycle"] = sc2.now() - 2 * HOUR
+    sc2.maybe_cycle(force=True)                    # long overdue: the forced cycle is the real one
+    assert sc2.meta["last_cycle"] >= sc2.now() - 60_000

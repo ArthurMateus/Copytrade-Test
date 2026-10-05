@@ -166,3 +166,43 @@ def test_trades_and_traders_cards():
     assert "2 trades · 1W/1L (50%)" in tr and "+1.50$" in tr and "backs 1" in tr
     assert "+3.45$" in tr                                 # 1.50 closed + 1.95 open, all from copying
     assert "None followed" in tgfmt.traders_card(State(equity0=300), {}, {}, {}, 0)
+
+
+def test_a_read_timeout_is_a_network_error_and_polling_survives_it():
+    """Real failure (2026-10-05): Telegram accepted the connection but did not answer in time; the read timeout
+    escaped as TimeoutError and killed the command thread."""
+    import socket
+    import threading as th
+    from copybot.tg import TgApi, TgError
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(8)
+    conns = []
+    stop = th.Event()
+
+    def accept_and_hang():
+        while not stop.is_set():
+            try:
+                conns.append(srv.accept()[0])   # never answers
+            except OSError:
+                return
+    th.Thread(target=accept_and_hang, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.getsockname()[1]}"
+    try:
+        with pytest.raises(TgError) as e:
+            TgApi(base, "t").call("getUpdates", {}, timeout=0.3)
+        assert e.value.code == 0 and "network" in e.value.desc
+        cfg = config.load("config", env={"TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_CHAT_ID": "1"})
+        cfg.telegram.api_base, cfg.telegram.poll_timeout_s = base, 0
+        ui = TelegramUI(cfg, lambda c: None, lambda k, m: None)
+        ui.api.call = lambda *a, **k: (_ for _ in ()).throw(TimeoutError("boom"))   # anything unexpected
+        t = th.Thread(target=ui._poll_loop, daemon=True)
+        t.start()
+        time.sleep(1.5)
+        assert t.is_alive()        # still polling: commands keep working
+        ui.stop.set()
+    finally:
+        stop.set()
+        srv.close()
+        for c in conns:
+            c.close()

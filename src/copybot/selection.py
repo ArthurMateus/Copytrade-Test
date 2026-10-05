@@ -264,6 +264,9 @@ class Scorer:
                 self.score(a)
             except Exception as e:
                 log.warn("rescore_failed", addr=a, err=str(e))
-        self.meta["last_cycle"] = now
+        # a forced cycle (restart) that comes early is not a new hourly cycle: keep the schedule, so restarts
+        # do not push the next selection cycle back
+        if not force or now - self.meta["last_cycle"] >= self.cfg.selection.rescore_minutes * 60_000:
+            self.meta["last_cycle"] = now
         self._save()
         self.out.put(("ranking", self.ranking(), len(self.scores), dict(self.scores)))
