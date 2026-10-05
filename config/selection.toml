@@ -1,0 +1,12 @@
+# Leader selection and hysteresis.
+rescore_minutes = 60.0        # one selection cycle                          [0.05, 1440]
+min_scored_to_start = 12      # start following once this many candidates are fully scored
+join_rank = 8                 # join when rank <= this ...                  [1, 8]
+drop_rank = 15                # drop when rank > this ...                   [8, 15]
+confirm_cycles = 2            # ... for this many consecutive cycles         [2, 10]
+min_follow_hours = 24.0       # never drop a leader followed for less than this (paused leaders excepted)
+swaps_per_cycle = 1           #                                              [1, 1]
+history_days = 180            # fills history used for scoring               [60, 180]
+max_candidates = 400          # prescreened wallets that get fill-screened per review (~6 s each; most top
+                              # wallets are rejected as too fast, so this must be generous)
+dropped_cooldown_days = 7.0   # a dropped or paused leader cannot rejoin for this long

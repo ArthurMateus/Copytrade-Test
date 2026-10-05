@@ -1,0 +1,12 @@
+# Endpoints, folders and timing.
+info_url = "https://api.hyperliquid.xyz/info"
+ws_url = "wss://api.hyperliquid.xyz/ws"
+leaderboard_url = "https://stats-data.hyperliquid.xyz/Mainnet/leaderboard"
+data_dir = "data"             # ledger.jsonl + download cache
+log_dir = "logs"
+tick_s = 0.25                 # trading loop period
+trading_timeout_s = 2.0       # hard timeout of any request on the trading path  [0.1, 2]
+weight_per_min = 1200         # Hyperliquid info rate limit per IP            [1, 1200]
+critical_reserve_weight = 300 # budget that scoring/backfill can never use (kept for exits, stops, books)
+reconcile_s = 60.0            # check leaders' real positions against our copies
+clock_refresh_s = 60.0

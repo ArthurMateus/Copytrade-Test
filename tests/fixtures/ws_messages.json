@@ -1,0 +1,715 @@
+[
+ {
+  "channel": "subscriptionResponse",
+  "data": {
+   "method": "subscribe",
+   "subscription": {
+    "type": "userFills",
+    "user": "0xf84d8d3863043d578b17c1f76dded6655d1f05fc",
+    "aggregateByTime": false
+   }
+  }
+ },
+ {
+  "channel": "userFills",
+  "data": {
+   "isSnapshot": true,
+   "user": "0xf84d8d3863043d578b17c1f76dded6655d1f05fc",
+   "fills": [
+    {
+     "coin": "BTC",
+     "px": "80067.0",
+     "sz": "0.02261",
+     "side": "B",
+     "time": 1778269290537,
+     "startPosition": "0.16255",
+     "dir": "Open Long",
+     "closedPnl": "0.0",
+     "hash": "0x35a3d95154e4fc10371d043af3488f02014b0036efe81ae2d96c84a413e8d5fa",
+     "oid": 417137650034,
+     "crossed": true,
+     "fee": "0.814641",
+     "tid": 1115333535957175,
+     "feeToken": "USDC",
+     "twapId": null
+    },
+    {
+     "coin": "BTC",
+     "px": "80067.0",
+     "sz": "0.02892",
+     "side": "B",
+     "time": 1778269290537,
+     "startPosition": "0.18516",
+     "dir": "Open Long",
+     "closedPnl": "0.0",
+     "hash": "0x35a3d95154e4fc10371d043af3488f02014b0036efe81ae2d96c84a413e8d5fa",
+     "oid": 417137650034,
+     "crossed": true,
+     "fee": "1.041991",
+     "tid": 1093142860641333,
+     "feeToken": "USDC",
+     "twapId": null
+    },
+    {
+     "coin": "BTC",
+     "px": "80067.0",
+     "sz": "0.19406",
+     "side": "B",
+     "time": 1778269290537,
+     "startPosition": "0.21408",
+     "dir": "Open Long",
+     "closedPnl": "0.0",
+     "hash": "0x35a3d95154e4fc10371d043af3488f02014b0036efe81ae2d96c84a413e8d5fa",
+     "oid": 417137650034,
+     "crossed": true,
+     "fee": "6.99201",
+     "tid": 226107104724109,
+     "feeToken": "USDC",
+     "twapId": null
+    },
+    {
+     "coin": "BTC",
+     "px": "80067.0",
+     "sz": "0.22258",
+     "side": "B",
+     "time": 1778269290537,
+     "startPosition": "0.40814",
+     "dir": "Open Long",
+     "closedPnl": "0.0",
+     "hash": "0x35a3d95154e4fc10371d043af3488f02014b0036efe81ae2d96c84a413e8d5fa",
+     "oid": 417137650034,
+     "crossed": true,
+     "fee": "8.01959",
+     "tid": 522518939279885,
+     "feeToken": "USDC",
+     "twapId": null
+    },
+    {
+     "coin": "BTC",
+     "px": "80066.0",
+     "sz": "0.01781",
+     "side": "A",
+     "time": 1778269293050,
+     "startPosition": "0.63072",
+     "dir": "Close Long",
+     "closedPnl": "-0.01781",
+     "hash": "0x0df2baee39fe0d840f6c043af348b302071000d3d4f12c56b1bb6640f8f1e76e",
+     "oid": 417137677627,
+     "crossed": true,
+     "fee": "0.641688",
+     "tid": 664820827626487,
+     "feeToken": "USDC",
+     "twapId": null
+    },
+    {
+     "coin": "BTC",
+     "px": "80066.0",
+     "sz": "0.00017",
+     "side": "A",
+     "time": 1778269293050,
+     "startPosition": "0.61291",
+     "dir": "Close Long",
+     "closedPnl": "-0.00017",
+     "hash": "0x0df2baee39fe0d840f6c043af348b302071000d3d4f12c56b1bb6640f8f1e76e",
+     "oid": 417137677627,
+     "crossed": true,
+     "fee": "0.006125",
+     "tid": 299222603258782,
+     "feeToken": "USDC",
+     "twapId": null
+    },
+    {
+     "coin": "BTC",
+     "px": "80066.0",
+     "sz": "0.31224",
+     "side": "A",
+     "time": 1778269293050,
+     "startPosition": "0.61274",
+     "dir": "Close Long",
+     "closedPnl": "-0.31224",
+     "hash": "0x0df2baee39fe0d840f6c043af348b302071000d3d4f12c56b1bb6640f8f1e76e",
+     "oid": 417137677627,
+     "crossed": true,
+     "fee": "11.249913",
+     "tid": 6756243136090,
+     "feeToken": "USDC",
+     "twapId": null
+    },
+    {
+     "coin": "BTC",
+     "px": "80066.0",
+     "sz": "0.08",
+     "side": "A",
+     "time": 1778269293050,
+     "startPosition": "0.3005",
+     "dir": "Close Long",
+     "closedPnl": "-0.08",
+     "hash": "0x0df2baee39fe0d840f6c043af348b302071000d3d4f12c56b1bb6640f8f1e76e",
+     "oid": 417137677627,
+     "crossed": true,
+     "fee": "2.882376",
+     "tid": 893632494821242,
+     "feeToken": "USDC",
+     "twapId": null
+    },
+    {
+     "coin": "BTC",
+     "px": "80065.0",
+     "sz": "0.00017",
+     "side": "A",
+     "time": 1778269293050,
+     "startPosition": "0.2205",
+     "dir": "Close Long",
+     "closedPnl": "-0.00034",
+     "hash": "0x0df2baee39fe0d840f6c043af348b302071000d3d4f12c56b1bb6640f8f1e76e",
+     "oid": 417137677627,
+     "crossed": true,
+     "fee": "0.006124",
+     "tid": 807819343089370,
+     "feeToken": "USDC",
+     "twapId": null
+    },
+    {
+     "coin": "BTC",
+     "px": "80064.0",
+     "sz": "0.00017",
+     "side": "A",
+     "time": 1778269293050,
+     "startPosition": "0.22033",
+     "dir": "Close Long",
+     "closedPnl": "-0.00051",
+     "hash": "0x0df2baee39fe0d840f6c043af348b302071000d3d4f12c56b1bb6640f8f1e76e",
+     "oid": 417137677627,
+     "crossed": true,
+     "fee": "0.006124",
+     "tid": 1079051221066770,
+     "feeToken": "USDC",
+     "twapId": null
+    },
+    {
+     "coin": "BTC",
+     "px": "80063.0",
+     "sz": "0.00017",
+     "side": "A",
+     "time": 1778269293050,
+     "startPosition": "0.22016",
+     "dir": "Close Long",
+     "closedPnl": "-0.00068",
+     "hash": "0x0df2baee39fe0d840f6c043af348b302071000d3d4f12c56b1bb6640f8f1e76e",
+     "oid": 417137677627,
+     "crossed": true,
+     "fee": "0.006124",
+     "tid": 1092817330052604,
+     "feeToken": "USDC",
+     "twapId": null
+    },
+    {
+     "coin": "BTC",
+     "px": "80063.0",
+     "sz": "0.05017",
+     "side": "A",
+     "time": 1778269293050,
+     "startPosition": "0.21999",
+     "dir": "Close Long",
+     "closedPnl": "-0.20068",
+     "hash": "0x0df2baee39fe0d840f6c043af348b302071000d3d4f12c56b1bb6640f8f1e76e",
+     "oid": 417137677627,
+     "crossed": true,
+     "fee": "1.807542",
+     "tid": 600919663005594,
+     "feeToken": "USDC",
+     "twapId": null
+    },
+    {
+     "coin": "BTC",
+     "px": "80062.0",
+     "sz": "0.00017",
+     "side": "A",
+     "time": 1778269293050,
+     "startPosition": "0.16982",
+     "dir": "Close Long",
+     "closedPnl": "-0.00085",
+     "hash": "0x0df2baee39fe0d840f6c043af348b302071000d3d4f12c56b1bb6640f8f1e76e",
+     "oid": 417137677627,
+     "crossed": true,
+     "fee": "0.006124",
+     "tid": 721590220673890,
+     "feeToken": "USDC",
+     "twapId": null
+    },
+    {
+     "coin": "BTC",
+     "px": "80062.0",
+     "sz": "0.003",
+     "side": "A",
+     "time": 1778269293050,
+     "startPosition": "0.16965",
+     "dir": "Close Long",
+     "closedPnl": "-0.015",
+     "hash": "0x0df2baee39fe0d840f6c043af348b302071000d3d4f12c56b1bb6640f8f1e76e",
+     "oid": 417137677627,
+     "crossed": true,
+     "fee": "0.108083",
+     "tid": 54635341839939,
+     "feeToken": "USDC",
+     "twapId": null
+    },
+    {
+     "coin": "BTC",
+     "px": "80062.0",
+     "sz": "0.0003",
+     "side": "A",
+     "time": 1778269293050,
+     "startPosition": "0.16665",
+     "dir": "Close Long",
+     "closedPnl": "-0.0015",
+     "hash": "0x0df2baee39fe0d840f6c043af348b302071000d3d4f12c56b1bb6640f8f1e76e",
+     "oid": 417137677627,
+     "crossed": true,
+     "fee": "0.010808",
+     "tid": 102571720781838,
+     "feeToken": "USDC",
+     "twapId": null
+    },
+    {
+     "coin": "BTC",
+     "px": "80062.0",
+     "sz": "0.03075",
+     "side": "A",
+     "time": 1778269293050,
+     "startPosition": "0.16635",
+     "dir": "Close Long",
+     "closedPnl": "-0.15375",
+     "hash": "0x0df2baee39fe0d840f6c043af348b302071000d3d4f12c56b1bb6640f8f1e76e",
+     "oid": 417137677627,
+     "crossed": true,
+     "fee": "1.107857",
+     "tid": 42704548538512,
+     "feeToken": "USDC",
+     "twapId": null
+    },
+    {
+     "coin": "BTC",
+     "px": "80061.0",
+     "sz": "0.00014",
+     "side": "A",
+     "time": 1778269293050,
+     "startPosition": "0.1356",
+     "dir": "Close Long",
+     "closedPnl": "-0.00084",
+     "hash": "0x0df2baee39fe0d840f6c043af348b302071000d3d4f12c56b1bb6640f8f1e76e",
+     "oid": 417137677627,
+     "crossed": true,
+     "fee": "0.005043",
+     "tid": 242031700445125,
+     "feeToken": "USDC",
+     "twapId": null
+    },
+    {
+     "coin": "BTC",
+     "px": "80061.0",
+     "sz": "0.00017",
+     "side": "A",
+     "time": 1778269293050,
+     "startPosition": "0.13546",
+     "dir": "Close Long",
+     "closedPnl": "-0.00102",
+     "hash": "0x0df2baee39fe0d840f6c043af348b302071000d3d4f12c56b1bb6640f8f1e76e",
+     "oid": 417137677627,
+     "crossed": true,
+     "fee": "0.006124",
+     "tid": 232995060888510,
+     "feeToken": "USDC",
+     "twapId": null
+    },
+    {
+     "coin": "BTC",
+     "px": "80061.0",
+     "sz": "0.0123",
+     "side": "A",
+     "time": 1778269293050,
+     "startPosition": "0.13529",
+     "dir": "Close Long",
+     "closedPnl": "-0.0738",
+     "hash": "0x0df2baee39fe0d840f6c043af348b302071000d3d4f12c56b1bb6640f8f1e76e",
+     "oid": 417137677627,
+     "crossed": true,
+     "fee": "0.443137",
+     "tid": 691665932373538,
+     "feeToken": "USDC",
+     "twapId": null
+    },
+    {
+     "coin": "BTC",
+     "px": "80061.0",
+     "sz": "0.0003",
+     "side": "A",
+     "time": 1778269293050,
+     "startPosition": "0.12299",
+     "dir": "Close Long",
+     "closedPnl": "-0.0018",
+     "hash": "0x0df2baee39fe0d840f6c043af348b302071000d3d4f12c56b1bb6640f8f1e76e",
+     "oid": 417137677627,
+     "crossed": true,
+     "fee": "0.010808",
+     "tid": 132067925157371,
+     "feeToken": "USDC",
+     "twapId": null
+    }
+   ]
+  }
+ },
+ {
+  "channel": "subscriptionResponse",
+  "data": {
+   "method": "subscribe",
+   "subscription": {
+    "type": "userFills",
+    "user": "0xe4c6ae25959d7fc66cf2dd5965fb78c5e09c4048",
+    "aggregateByTime": false
+   }
+  }
+ },
+ {
+  "channel": "subscriptionResponse",
+  "data": {
+   "method": "subscribe",
+   "subscription": {
+    "type": "userFills",
+    "user": "0xad8be12a452b5b8f9ad9883f6e8e67536627db4b",
+    "aggregateByTime": false
+   }
+  }
+ },
+ {
+  "channel": "subscriptionResponse",
+  "data": {
+   "method": "subscribe",
+   "subscription": {
+    "type": "userFills",
+    "user": "0xbeccae9ffcb69e9d42a1d4e744abf8056149562d",
+    "aggregateByTime": false
+   }
+  }
+ },
+ {
+  "channel": "subscriptionResponse",
+  "data": {
+   "method": "subscribe",
+   "subscription": {
+    "type": "userFills",
+    "user": "0x04dbde5c9d1e6a3239c8ff8ee3fca386a4a3c605",
+    "aggregateByTime": false
+   }
+  }
+ },
+ {
+  "channel": "subscriptionResponse",
+  "data": {
+   "method": "subscribe",
+   "subscription": {
+    "type": "userFills",
+    "user": "0xb48e45c76e7442d9944790085399e26b7d89b1ed",
+    "aggregateByTime": false
+   }
+  }
+ },
+ {
+  "channel": "subscriptionResponse",
+  "data": {
+   "method": "subscribe",
+   "subscription": {
+    "type": "userFills",
+    "user": "0x6db7204f8783dfddf80b957ba5e40e24251e304d",
+    "aggregateByTime": false
+   }
+  }
+ },
+ {
+  "channel": "subscriptionResponse",
+  "data": {
+   "method": "subscribe",
+   "subscription": {
+    "type": "userFills",
+    "user": "0xb67c4c91728e6865b216e11d54b50c75bbd3fd5f",
+    "aggregateByTime": false
+   }
+  }
+ },
+ {
+  "channel": "subscriptionResponse",
+  "data": {
+   "method": "subscribe",
+   "subscription": {
+    "type": "userFills",
+    "user": "0xfe0589b070c1095b75dc5891d7408cc3cf3b3e8a",
+    "aggregateByTime": false
+   }
+  }
+ },
+ {
+  "channel": "subscriptionResponse",
+  "data": {
+   "method": "subscribe",
+   "subscription": {
+    "type": "userFills",
+    "user": "0x885327357a8d005c9dfb670583899df6e21f8249",
+    "aggregateByTime": false
+   }
+  }
+ },
+ {
+  "channel": "subscriptionResponse",
+  "data": {
+   "method": "subscribe",
+   "subscription": {
+    "type": "userFills",
+    "user": "0x66f889094739dbb7d20aa60f645acd88feba75a9",
+    "aggregateByTime": false
+   }
+  }
+ },
+ {
+  "channel": "subscriptionResponse",
+  "data": {
+   "method": "subscribe",
+   "subscription": {
+    "type": "userFills",
+    "user": "0xd7b8209d95d4c05faaa505671211058d51529f55",
+    "aggregateByTime": false
+   }
+  }
+ },
+ {
+  "channel": "subscriptionResponse",
+  "data": {
+   "method": "subscribe",
+   "subscription": {
+    "type": "userFills",
+    "user": "0xaeaab54bbf65bfd6efed7d2eb68372298e3c2416",
+    "aggregateByTime": false
+   }
+  }
+ },
+ {
+  "channel": "subscriptionResponse",
+  "data": {
+   "method": "subscribe",
+   "subscription": {
+    "type": "userFills",
+    "user": "0x09f15dacf13c0fcb64594452506b52393fb13c39",
+    "aggregateByTime": false
+   }
+  }
+ },
+ {
+  "channel": "subscriptionResponse",
+  "data": {
+   "method": "subscribe",
+   "subscription": {
+    "type": "userFills",
+    "user": "0xd0f9337179d095d744be87b33d569e5c1aa8ce0b",
+    "aggregateByTime": false
+   }
+  }
+ },
+ {
+  "channel": "error",
+  "data": "Cannot track more than 15 total users."
+ },
+ {
+  "channel": "error",
+  "data": "Cannot track more than 15 total users."
+ },
+ {
+  "channel": "error",
+  "data": "Cannot track more than 15 total users."
+ },
+ {
+  "channel": "error",
+  "data": "Cannot track more than 15 total users."
+ },
+ {
+  "channel": "error",
+  "data": "Cannot track more than 15 total users."
+ },
+ {
+  "channel": "error",
+  "data": "Cannot track more than 15 total users."
+ },
+ {
+  "channel": "error",
+  "data": "Cannot track more than 15 total users."
+ },
+ {
+  "channel": "error",
+  "data": "Cannot track more than 15 total users."
+ },
+ {
+  "channel": "error",
+  "data": "Cannot track more than 15 total users."
+ },
+ {
+  "channel": "error",
+  "data": "Cannot track more than 15 total users."
+ },
+ {
+  "channel": "error",
+  "data": "Cannot track more than 15 total users."
+ },
+ {
+  "channel": "error",
+  "data": "Cannot track more than 15 total users."
+ },
+ {
+  "channel": "error",
+  "data": "Cannot track more than 15 total users."
+ },
+ {
+  "channel": "error",
+  "data": "Cannot track more than 15 total users."
+ },
+ {
+  "channel": "error",
+  "data": "Cannot track more than 15 total users."
+ },
+ {
+  "channel": "error",
+  "data": "Cannot track more than 15 total users."
+ },
+ {
+  "channel": "error",
+  "data": "Cannot track more than 15 total users."
+ },
+ {
+  "channel": "error",
+  "data": "Cannot track more than 15 total users."
+ },
+ {
+  "channel": "error",
+  "data": "Cannot track more than 15 total users."
+ },
+ {
+  "channel": "error",
+  "data": "Cannot track more than 15 total users."
+ },
+ {
+  "channel": "error",
+  "data": "Cannot track more than 15 total users."
+ },
+ {
+  "channel": "error",
+  "data": "Cannot track more than 15 total users."
+ },
+ {
+  "channel": "error",
+  "data": "Cannot track more than 15 total users."
+ },
+ {
+  "channel": "error",
+  "data": "Cannot track more than 15 total users."
+ },
+ {
+  "channel": "error",
+  "data": "Cannot track more than 15 total users."
+ },
+ {
+  "channel": "pong"
+ },
+ {
+  "channel": "userFills",
+  "data": {
+   "user": "0xbeccae9ffcb69e9d42a1d4e744abf8056149562d",
+   "fills": [
+    {
+     "coin": "NEAR",
+     "px": "4.8757",
+     "sz": "11.0",
+     "side": "B",
+     "time": 1791171590002,
+     "startPosition": "-23929.0",
+     "dir": "Close Short",
+     "closedPnl": "0.67859",
+     "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+     "oid": 565434450765,
+     "crossed": false,
+     "fee": "-0.000536",
+     "tid": 368997130956903,
+     "cloid": "0x5468976174684344b08d556962bac46d",
+     "feeToken": "USDC",
+     "twapId": null
+    }
+   ]
+  }
+ },
+ {
+  "channel": "userFills",
+  "data": {
+   "user": "0xbeccae9ffcb69e9d42a1d4e744abf8056149562d",
+   "fills": [
+    {
+     "coin": "BTC",
+     "px": "86324.0",
+     "sz": "0.00494",
+     "side": "B",
+     "time": 1791171591707,
+     "startPosition": "-2.30402",
+     "dir": "Close Short",
+     "closedPnl": "1.23994",
+     "hash": "0xa2cb9bb438601f69a4450445de15e60201500099d3633e3b46944706f763f954",
+     "oid": 565434428158,
+     "crossed": false,
+     "fee": "-0.004264",
+     "tid": 348339424011870,
+     "cloid": "0xebae708e27b145adbfcd5489e8225af7",
+     "feeToken": "USDC",
+     "twapId": null
+    }
+   ]
+  }
+ },
+ {
+  "channel": "userFills",
+  "data": {
+   "user": "0xbeccae9ffcb69e9d42a1d4e744abf8056149562d",
+   "fills": [
+    {
+     "coin": "ZEC",
+     "px": "1332.8",
+     "sz": "0.06",
+     "side": "A",
+     "time": 1791171592041,
+     "startPosition": "-13.3",
+     "dir": "Open Short",
+     "closedPnl": "0.0",
+     "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+     "oid": 565434467609,
+     "crossed": false,
+     "fee": "-0.000799",
+     "tid": 386572608922513,
+     "cloid": "0x169360a84a514f90a37ad59719a666d0",
+     "feeToken": "USDC",
+     "twapId": null
+    },
+    {
+     "coin": "ETH",
+     "px": "2725.4",
+     "sz": "0.0052",
+     "side": "B",
+     "time": 1791171592041,
+     "startPosition": "-11.7115",
+     "dir": "Close Short",
+     "closedPnl": "-0.014144",
+     "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+     "oid": 565434390127,
+     "crossed": false,
+     "fee": "-0.000141",
+     "tid": 479215854570367,
+     "cloid": "0xe0e8cb19584c45e2ae9d2df144025b56",
+     "feeToken": "USDC",
+     "twapId": null
+    }
+   ]
+  }
+ }
+]

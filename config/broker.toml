@@ -1,0 +1,4 @@
+# Paper broker. Fills walk the real Hyperliquid L2 book at the moment of the order.
+taker_fee_pct = 0.045         # Hyperliquid base taker fee                   [0.045, 1]
+extra_slippage_bps = 1.0      # added on top of the book walk                [0, 100]
+no_book_slippage_bps = 20.0   # exits only: if the book cannot be fetched, fill at mid +/- this  [5, 500]

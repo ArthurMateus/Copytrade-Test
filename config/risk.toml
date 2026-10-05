@@ -1,0 +1,23 @@
+# Risk limits. Every order passes through copybot/risk.py, which enforces these.
+# Allowed ranges (hard ceilings, checked at start; out of range = the bot refuses to start) in brackets.
+
+start_equity = 300.0          # simulated wallet, USD                        [10, 1e6]
+risk_per_trade_pct = 1.0      # stop distance x size, % of equity            [1, 2]
+stop_pct = 3.0                # stop distance from entry, % of price         [0.2, 20]
+daily_loss_pct = 5.0          # equity down this much today -> no new entries until 00:00 UTC   [0.1, 5]
+weekly_loss_pct = 10.0        # same for the ISO week (Monday 00:00 UTC)    [0.1, 10]
+max_leverage = 10.0           # per position                                 [1, 10]
+liq_buffer_mult = 3.0         # liquidation distance >= this x stop distance [3, 100]
+max_leaders = 7               #                                              [0, 7]
+max_positions = 10            #                                              [0, 10]
+max_total_risk_pct = 10.0     # sum of (stop distance x size) over open positions, % of equity  [0, 10]
+max_symbol_risk_pct = 1.5     # same, per coin                               [0, 1.5]
+max_orders_per_min = 30       # entries are refused above this; exits are never refused  [1, 30]
+min_notional_usd = 10.0       # Hyperliquid minimum order; smaller copies are skipped and logged  [10, 1e6]
+max_entry_age_s = 10.0        # do not OPEN on a leader fill older than this [0.5, 60]
+clock_tolerance_ms = 500.0    # exchange-clock uncertainty above this = in doubt -> no entries  [0, 500]
+max_clock_age_s = 300.0       # clock estimate older than this = in doubt    [5, 3600]
+max_mids_age_s = 10.0         # price feed older than this = stale           [1, 120]
+max_leader_feed_age_s = 90.0  # websocket silent longer than this = leader data in doubt  [5, 600]
+leader_pause_dd_pct = 10.0    # pause a leader when its copy drawdown exceeds this % of (equity / max_leaders)  [0.1, 10]
+leader_pause_losses = 5       # ... or after this many consecutive losing copies  [1, 5]

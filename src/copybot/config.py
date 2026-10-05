@@ -1,0 +1,183 @@
+"""Config: TOML files in one folder, one file per section, validated against hard ceilings at start.
+
+Unknown keys are an error (typos must not silently fall back to defaults).
+Secrets (Telegram token, chat id, PIN) come from environment variables ONLY.
+"""
+from __future__ import annotations
+
+import os
+import tomllib
+from dataclasses import asdict, dataclass, field, fields
+from pathlib import Path
+
+
+@dataclass
+class Risk:
+    start_equity: float = 300.0
+    risk_per_trade_pct: float = 1.0       # stop distance x size, % of wallet
+    stop_pct: float = 3.0                 # stop distance from entry, % of price
+    daily_loss_pct: float = 5.0
+    weekly_loss_pct: float = 10.0
+    max_leverage: float = 10.0
+    liq_buffer_mult: float = 3.0          # liquidation distance >= this x stop distance
+    max_leaders: int = 7
+    max_positions: int = 10
+    max_total_risk_pct: float = 10.0
+    max_symbol_risk_pct: float = 1.5
+    max_orders_per_min: int = 30
+    min_notional_usd: float = 10.0
+    max_entry_age_s: float = 10.0         # refuse to OPEN on a leader fill older than this
+    clock_tolerance_ms: float = 500.0     # clock uncertainty above this = in doubt -> no entries
+    max_clock_age_s: float = 300.0
+    max_mids_age_s: float = 10.0
+    max_leader_feed_age_s: float = 90.0   # websocket silent longer than this = leader data in doubt
+    leader_pause_dd_pct: float = 10.0     # copy drawdown, % of the per-leader allocation (equity / max_leaders)
+    leader_pause_losses: int = 5
+
+
+@dataclass
+class Broker:
+    taker_fee_pct: float = 0.045
+    extra_slippage_bps: float = 1.0       # on top of walking the real book
+    no_book_slippage_bps: float = 20.0    # exit fallback when the book cannot be fetched
+
+
+@dataclass
+class Selection:
+    rescore_minutes: float = 60.0
+    min_scored_to_start: int = 12
+    join_rank: int = 8
+    drop_rank: int = 15
+    confirm_cycles: int = 2
+    min_follow_hours: float = 24.0
+    swaps_per_cycle: int = 1
+    history_days: int = 180
+    max_candidates: int = 400             # prescreened wallets sent to fill screening per review
+    dropped_cooldown_days: float = 7.0
+
+
+@dataclass
+class Telegram:
+    api_base: str = "https://api.telegram.org"
+    edit_min_interval_s: float = 5.0      # per message
+    min_send_interval_s: float = 1.1      # all API writes to the chat, globally
+    poll_timeout_s: int = 25
+
+
+@dataclass
+class Runtime:
+    info_url: str = "https://api.hyperliquid.xyz/info"
+    ws_url: str = "wss://api.hyperliquid.xyz/ws"
+    leaderboard_url: str = "https://stats-data.hyperliquid.xyz/Mainnet/leaderboard"
+    data_dir: str = "data"
+    log_dir: str = "logs"
+    tick_s: float = 0.25
+    trading_timeout_s: float = 2.0
+    weight_per_min: int = 1200
+    critical_reserve_weight: int = 300    # scoring/backfill can never use this part of the budget
+    reconcile_s: float = 60.0
+    clock_refresh_s: float = 60.0
+
+
+@dataclass
+class Config:
+    risk: Risk = field(default_factory=Risk)
+    broker: Broker = field(default_factory=Broker)
+    selection: Selection = field(default_factory=Selection)
+    telegram: Telegram = field(default_factory=Telegram)
+    runtime: Runtime = field(default_factory=Runtime)
+    # secrets (env only, never logged)
+    tg_token: str = field(default="", repr=False)
+    tg_chat_id: str = field(default="", repr=False)
+    pin: str = field(default="", repr=False)
+
+
+SECTIONS = ("risk", "broker", "selection", "telegram", "runtime")
+
+# (section, key) -> (min, max). The documented hard ceilings; a config outside them refuses to start.
+CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
+    ("risk", "start_equity"): (10, 1_000_000),
+    ("risk", "risk_per_trade_pct"): (1.0, 2.0),
+    ("risk", "stop_pct"): (0.2, 20.0),
+    ("risk", "daily_loss_pct"): (0.1, 5.0),
+    ("risk", "weekly_loss_pct"): (0.1, 10.0),
+    ("risk", "max_leverage"): (1, 10),
+    ("risk", "liq_buffer_mult"): (3.0, 100.0),
+    ("risk", "max_leaders"): (0, 7),
+    ("risk", "max_positions"): (0, 10),
+    ("risk", "max_total_risk_pct"): (0, 10.0),
+    ("risk", "max_symbol_risk_pct"): (0, 1.5),
+    ("risk", "max_orders_per_min"): (1, 30),
+    ("risk", "min_notional_usd"): (10.0, 1_000_000),
+    ("risk", "max_entry_age_s"): (0.5, 60),
+    ("risk", "clock_tolerance_ms"): (0, 500),
+    ("risk", "max_clock_age_s"): (5, 3600),
+    ("risk", "max_mids_age_s"): (1, 120),
+    ("risk", "max_leader_feed_age_s"): (5, 600),
+    ("risk", "leader_pause_dd_pct"): (0.1, 10.0),
+    ("risk", "leader_pause_losses"): (1, 5),
+    ("broker", "taker_fee_pct"): (0.045, 1.0),
+    ("broker", "extra_slippage_bps"): (0, 100),
+    ("broker", "no_book_slippage_bps"): (5, 500),
+    ("selection", "rescore_minutes"): (0.05, 24 * 60),
+    ("selection", "join_rank"): (1, 8),
+    ("selection", "drop_rank"): (8, 15),
+    ("selection", "confirm_cycles"): (2, 10),
+    ("selection", "min_follow_hours"): (0, 24 * 30),
+    ("selection", "swaps_per_cycle"): (1, 1),
+    ("selection", "history_days"): (60, 180),
+    ("telegram", "edit_min_interval_s"): (0.05, 600),
+    ("telegram", "min_send_interval_s"): (0.0, 60),
+    ("runtime", "trading_timeout_s"): (0.1, 2.0),
+    ("runtime", "weight_per_min"): (1, 1200),
+    ("runtime", "tick_s"): (0.01, 1.0),
+}
+
+
+class ConfigError(ValueError):
+    pass
+
+
+def load(config_dir: str | os.PathLike, env: dict | None = None) -> Config:
+    env = os.environ if env is None else env
+    cfg = Config()
+    cdir = Path(config_dir)
+    for sec in SECTIONS:
+        path = cdir / f"{sec}.toml"
+        if not path.exists():
+            continue
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+        obj = getattr(cfg, sec)
+        known = {f.name for f in fields(obj)}
+        for k, v in data.items():
+            if k not in known:
+                raise ConfigError(f"{path.name}: unknown key {k!r}")
+            default = getattr(obj, k)
+            ok = isinstance(v, type(default)) or (isinstance(default, float) and isinstance(v, int))
+            if isinstance(v, bool) or not ok:
+                raise ConfigError(f"{path.name}: {k} must be {type(default).__name__}")
+            setattr(obj, k, type(default)(v))
+    validate(cfg)
+    cfg.tg_token = env.get("TELEGRAM_BOT_TOKEN", "")
+    cfg.tg_chat_id = env.get("TELEGRAM_CHAT_ID", "")
+    cfg.pin = env.get("COPYBOT_PIN", "")
+    return cfg
+
+
+def validate(cfg: Config) -> None:
+    for (sec, key), (lo, hi) in CEILINGS.items():
+        v = getattr(getattr(cfg, sec), key)
+        if not (lo <= v <= hi):
+            raise ConfigError(f"{sec}.{key}={v} outside allowed range [{lo}, {hi}]")
+    if cfg.selection.drop_rank <= cfg.selection.join_rank:
+        raise ConfigError("selection.drop_rank must be > join_rank")
+    if cfg.risk.stop_pct / 100 * cfg.risk.liq_buffer_mult >= 0.9:
+        raise ConfigError("risk.stop_pct x liq_buffer_mult leaves no room before liquidation")
+
+
+def public_dict(cfg: Config) -> dict:
+    """Config without secrets, safe to log."""
+    d = asdict(cfg)
+    for k in ("tg_token", "tg_chat_id", "pin"):
+        d.pop(k)
+    return d
