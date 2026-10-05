@@ -35,13 +35,13 @@ def run(cycles, followed=None, paused=(), dropped=None, sel=None, start=NOW, ste
 R = [f"0x{i:02d}" for i in range(1, 30)]
 
 
-def test_join_needs_two_consecutive_cycles_at_rank_8_or_better():
+def test_join_needs_two_consecutive_cycles_in_the_top_7():
     f, plans, _ = run([R[:10]])
     assert f == {}
     f, plans, _ = run([R[:10], R[:10]])
     assert set(f) == set(R[:7])           # max 7 leaders, free slots fill in one cycle
     f, _, _ = run([R[:10], list(reversed(R[:10]))])
-    assert set(f) == set(R[2:8])         # only wallets at rank <= 8 in BOTH cycles
+    assert set(f) == set(R[3:7])         # only wallets at rank <= 7 in BOTH cycles
 
 
 def test_zero_eligible_follows_nobody():
@@ -182,3 +182,36 @@ def test_scorer_rejects_hash_coin_candles_gracefully(scorer_env):
     fake, cfg, info, tmp, good, bad = scorer_env
     sc = Scorer(cfg, info, queue.Queue(), tmp / "cache")
     assert sc.candles("#140", NOW - 40 * 86_400_000, NOW) == []
+
+
+def test_scorer_stops_at_the_pool_size(scorer_env):
+    fake, cfg, info, tmp, good, bad = scorer_env
+    cfg.selection.pool_size = 7
+    sc = Scorer(cfg, info, queue.Queue(), tmp / "cache")
+    sc.review(weekly=True)
+    assert len(sc.scores) == 7 and set(sc.scores) <= set(good)
+    assert all(1 <= d["score"] <= 100 for d in sc.scores.values() if d["eligible"])
+
+
+def test_scorer_redoes_results_of_an_older_version(scorer_env):
+    fake, cfg, info, tmp, good, bad = scorer_env
+    sc = Scorer(cfg, info, queue.Queue(), tmp / "cache")
+    sc.screened = {good[0]: {"ok": False, "reason": "round_trips<150", "ts": sc.now(), "v": 1}}
+    sc.scores = {good[1]: {"address": good[1], "eligible": True, "score": 0.5, "v": 1}}
+    sc._save()
+    sc2 = Scorer(cfg, info, queue.Queue(), tmp / "cache")
+    assert sc2.screened == {} and sc2.scores == {}
+
+
+def test_scorer_scores_main_coins_only_unless_diversified(scorer_env):
+    fake, cfg, info, tmp, good, bad = scorer_env
+    cfg.selection.main_coins = ["BTC", "ETH"]
+    cfg.selection.alt_min_coins = 1000           # no wallet can unlock the alts
+    sc = Scorer(cfg, info, queue.Queue(), tmp / "cache")
+    sc.screen_and_score(good[0], 200_000)
+    d = sc.scores[good[0]]
+    assert d["eligible"] and not d["diversified"] and set(d["coin_pnl"]) == {"BTC", "ETH", "SOL"}
+    cfg.selection.alt_min_coins = 3              # profitable in BTC, ETH and SOL: unlocked, scored on all three
+    sc2 = Scorer(cfg, info, queue.Queue(), tmp / "cache2")
+    sc2.screen_and_score(good[0], 200_000)
+    assert sc2.scores[good[0]]["diversified"] and sc2.scores[good[0]]["trades"] > d["trades"]

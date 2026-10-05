@@ -10,6 +10,11 @@ import tomllib
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
+from copybot.hl import is_core_perp
+
+
+MAIN_COINS = ("BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "ADA", "AVAX", "LINK", "LTC")
+
 
 @dataclass
 class Risk:
@@ -33,6 +38,7 @@ class Risk:
     max_leader_feed_age_s: float = 90.0   # websocket silent longer than this = leader data in doubt
     leader_pause_dd_pct: float = 10.0     # copy drawdown, % of the per-leader allocation (equity / max_leaders)
     leader_pause_losses: int = 5
+    consensus_risk_pct: float = 0.5       # extra risk when a 2nd followed leader opens the same side (symbol cap still applies)
 
 
 @dataclass
@@ -53,7 +59,13 @@ class Selection:
     swaps_per_cycle: int = 1
     history_days: int = 180
     max_candidates: int = 400             # prescreened wallets sent to fill screening per review
+    pool_size: int = 100                  # a review stops screening once this many wallets are fully scored
     dropped_cooldown_days: float = 7.0
+    main_coins: list = field(default_factory=lambda: list(MAIN_COINS))   # only these are scored and copied
+    # ... unless the wallet is diversified: net profitable in >= alt_min_coins coins, none > alt_max_coin_share of
+    # its profit. Such a wallet is scored on, and copied in, every perp it trades (memecoins included).
+    alt_min_coins: int = 3
+    alt_max_coin_share: float = 0.5
 
 
 @dataclass
@@ -116,6 +128,7 @@ CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
     ("risk", "max_leader_feed_age_s"): (5, 600),
     ("risk", "leader_pause_dd_pct"): (0.1, 10.0),
     ("risk", "leader_pause_losses"): (1, 5),
+    ("risk", "consensus_risk_pct"): (0, 1.0),
     ("broker", "taker_fee_pct"): (0.045, 1.0),
     ("broker", "extra_slippage_bps"): (0, 100),
     ("broker", "no_book_slippage_bps"): (5, 500),
@@ -126,6 +139,9 @@ CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
     ("selection", "min_follow_hours"): (0, 24 * 30),
     ("selection", "swaps_per_cycle"): (1, 1),
     ("selection", "history_days"): (60, 180),
+    ("selection", "pool_size"): (7, 400),
+    ("selection", "alt_min_coins"): (2, 1000),
+    ("selection", "alt_max_coin_share"): (0.1, 1.0),
     ("telegram", "edit_min_interval_s"): (0.05, 600),
     ("telegram", "min_send_interval_s"): (0.0, 60),
     ("runtime", "trading_timeout_s"): (0.1, 2.0),
@@ -171,6 +187,9 @@ def validate(cfg: Config) -> None:
             raise ConfigError(f"{sec}.{key}={v} outside allowed range [{lo}, {hi}]")
     if cfg.selection.drop_rank <= cfg.selection.join_rank:
         raise ConfigError("selection.drop_rank must be > join_rank")
+    coins = cfg.selection.main_coins
+    if not coins or not all(isinstance(c, str) and is_core_perp(c) for c in coins):
+        raise ConfigError("selection.main_coins must be a non-empty list of perp names like \"BTC\"")
     if cfg.risk.stop_pct / 100 * cfg.risk.liq_buffer_mult >= 0.9:
         raise ConfigError("risk.stop_pct x liq_buffer_mult leaves no room before liquidation")
 

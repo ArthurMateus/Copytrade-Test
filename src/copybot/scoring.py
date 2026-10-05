@@ -1,6 +1,14 @@
 """Deterministic wallet scoring. Pure functions over leaderboard rows, VERIFIED fills and 1h candles.
 
 Leaderboard numbers are only used for the cheap pre-screen; the final rank comes from fills.
+Only the configured main coins count: a wallet is screened and scored on its main-coin trades alone, unless
+it is DIVERSIFIED (net profitable in several coins, none dominating its profit): then every core perp it trades
+counts (memecoins included) and the bot may copy all of them. What we score is what we copy.
+
+Hard rejects are kept for wallets we cannot copy (too fast/HFT, mostly spot or maker, almost never closes a
+main-coin trade, trades too small to mirror, no edge after our costs). Everything about quality (trade count, win rate,
+profit factor, consistency, drawdowns, concentration) becomes points of a 0-100 score; eligible wallets score
+1-100 and the best ones are followed.
 """
 from __future__ import annotations
 
@@ -9,6 +17,8 @@ import statistics
 from dataclasses import asdict, dataclass, field
 
 from copybot.hl import Candle, Fill, LbRow, is_core_perp
+
+VERSION = 3   # bump when the screen or the score changes: cached results of another version are redone
 
 DAY = 86_400_000
 EPS = 1e-12
@@ -117,6 +127,20 @@ def round_trips(fills: list[Fill]) -> list[Trip]:
     return trips
 
 
+def diversification(trips: list[Trip], min_coins: int, max_share: float) -> tuple[bool, dict]:
+    """(diversified, {coin: net pnl} of the 5 biggest contributors). Diversified = profitable overall, net
+    profitable in at least `min_coins` coins and no coin above `max_share` of the profitable coins' total."""
+    by: dict[str, float] = {}
+    for t in trips:
+        by[t.coin] = by.get(t.coin, 0.0) + t.net
+    pos = {c: v for c, v in by.items() if v > 0}
+    total = sum(pos.values())
+    ok = (sum(by.values()) > 0 and len(pos) >= min_coins and total > 0
+          and max(pos.values()) / total <= max_share)
+    top = dict(sorted(((c, round(v, 2)) for c, v in by.items()), key=lambda x: (-abs(x[1]), x[0]))[:5])
+    return ok, top
+
+
 # ---- 2. screen of the first page of fills ---------------------------------------------------------
 @dataclass
 class Screen:
@@ -126,7 +150,11 @@ class Screen:
 
 
 def fill_screen(page: list[Fill], now_ms: int, our_notional: float, min_notional: float = 10.0,
-                page_size: int = 2000) -> Screen:
+                page_size: int = 2000, coins=None, min_trips: int = 30, alt_min_coins: int = 3,
+                alt_max_share: float = 0.5) -> Screen:
+    """Copyability gates on the first page of fills. Speed is judged on ALL fills (it is how the wallet
+    behaves); everything else only on the `coins` we copy: the main coins (all core perps when None), or every
+    core perp when the page shows a diversified wallet."""
     if not page:
         return Screen(False, "no_fills")
     page = sorted(page, key=lambda f: (f.time, f.tid))
@@ -140,11 +168,21 @@ def fill_screen(page: list[Fill], now_ms: int, our_notional: float, min_notional
         if len(page) / span_days >= 56:
             return Screen(False, "too_fast", m)
     total = sum(f.notional for f in page)
-    core = [f for f in page if is_core_perp(f.coin)]
-    core_n = sum(f.notional for f in core)
+    core_n = sum(f.notional for f in page if is_core_perp(f.coin))
     m["core_share"] = round(core_n / total, 3) if total else 0
     if not total or core_n / total < 0.5:
         return Screen(False, "core_perp_share<50%", m)
+    # we only copy the main coins (or everything, for a diversified wallet): the rest is ignored, not held against it
+    if coins is not None:
+        div, _ = diversification(round_trips(page), alt_min_coins, alt_max_share)
+        m["diversified"] = div
+        if div:
+            coins = None
+    core = [f for f in page if is_core_perp(f.coin) and (coins is None or f.coin in coins)]
+    core_n = sum(f.notional for f in core)
+    m["main_share"] = round(core_n / total, 3)
+    if not core_n:
+        return Screen(False, "no_main_coin_trades", m)
     maker = sum(f.notional for f in core if not f.crossed) / core_n
     m["maker_share"] = round(maker, 3)
     if maker > 0.7:
@@ -153,10 +191,10 @@ def fill_screen(page: list[Fill], now_ms: int, our_notional: float, min_notional
     m["history_days"] = round(hist, 1)
     if hist < 60:
         return Screen(False, "history<60d", m)
-    trips = round_trips(page)
+    trips = round_trips(core)
     m["round_trips"] = len(trips)
-    if len(trips) < 150:
-        return Screen(False, "round_trips<150", m)
+    if len(trips) < min_trips:   # holds a core position and almost never goes flat: nothing to copy
+        return Screen(False, f"round_trips<{min_trips}", m)
     med = statistics.median(t.close_ms - t.open_ms for t in trips) / 60_000
     m["median_hold_min"] = round(med, 1)
     if med < 15:
@@ -206,9 +244,13 @@ class Score:
     max_dd: float = 0.0
     cur_dd: float = 0.0
     concentration: float = 0.0
+    diversified: bool = False                    # profitable across coins: copied in every perp, not only main coins
+    coin_pnl: dict = field(default_factory=dict)  # biggest net pnl contributors, all core perps
     copy_edge_bps: float = 0.0
     shrink: float = 0.0
     scored_ms: int = 0
+    points: dict = field(default_factory=dict)   # component -> points; they add up to `score` (0-100)
+    v: int = VERSION
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -219,13 +261,40 @@ class ScoreParams:
     stop_pct: float = 3.0
     cost_bps: float = 13.0         # our round trip: 2 x (taker 4.5 + slippage 1 + extra 1) bps
     shrink_n0: float = 50.0
-    min_trades: int = 150
+    min_trades: int = 30           # hard floor: fewer closed trips is too little evidence
+    full_trades: int = 150         # trips needed for the full sample-size points
     blocks: int = 6
     block_days: int = 30
-    min_positive_blocks: int = 4
-    max_dd: float = 0.35
-    max_cur_dd: float = 0.20
+    max_dd: float = 0.35           # the max drawdown at which its points are halved
+    max_cur_dd: float = 0.20       # same for the current drawdown
     max_concentration: float = 0.25
+    coins: tuple | None = None     # only trades in these coins count (None = all core perps) ...
+    alt_min_coins: int = 3         # ... unless the wallet is diversified (see `diversification`)
+    alt_max_share: float = 0.5
+
+
+# component -> weight; the weights add up to 100
+WEIGHTS = {"edge": 25, "profit_factor": 15, "consistency": 15, "trades": 15, "win_rate": 10, "max_dd": 10,
+           "cur_dd": 5, "concentration": 5}
+
+
+def _clamp(x: float) -> float:
+    return min(max(x, 0.0), 1.0)
+
+
+def points(s: Score, p: ScoreParams) -> dict:
+    """Each component earns 0..1 of its weight. Linear, capped, deterministic."""
+    q = {
+        "edge": s.copy_edge_bps / 50.0,                                       # 50 bps after costs = full
+        "profit_factor": (s.profit_factor - 1.0) / 2.0,                       # PF 1 = none, PF 3 = full
+        "consistency": s.positive_blocks / p.blocks,                          # 6 of 6 positive months = full
+        "trades": (s.trades - p.min_trades) / max(1, p.full_trades - p.min_trades),
+        "win_rate": (s.win_rate - 0.40) / 0.30,                               # 40% = none, 70% = full
+        "max_dd": 1.0 - s.max_dd / (2 * p.max_dd),                            # 0% = full, 35% = half, 70% = none
+        "cur_dd": 1.0 - s.cur_dd / (2 * p.max_cur_dd),                        # 0% = full, 20% = half, 40% = none
+        "concentration": 1.0 - (s.concentration - p.max_concentration) / 0.5,   # <= 25% = full, 75% = none
+    }
+    return {k: round(WEIGHTS[k] * _clamp(v), 2) for k, v in q.items()}
 
 
 def copy_return(t: Trip, candles: list[Candle] | None, stop: float) -> float:
@@ -296,6 +365,10 @@ def full_score(address: str, fills: list[Fill], candles: dict[str, list[Candle]]
     fl = [f for f in fills if f.time >= start]
     trips = [t for t in round_trips(fl) if t.close_ms >= start]
     s = Score(address, False, scored_ms=now_ms)
+    s.diversified, s.coin_pnl = diversification(trips, p.alt_min_coins, p.alt_max_share)
+    if p.coins is not None and not s.diversified:
+        fl = [f for f in fl if f.coin in p.coins]
+        trips = [t for t in trips if t.coin in p.coins]
     s.trades = n = len(trips)
     if n == 0:
         s.reasons = ["no_round_trips"]
@@ -317,24 +390,23 @@ def full_score(address: str, fills: list[Fill], candles: dict[str, list[Candle]]
     rets = [copy_return(t, candles.get(t.coin), p.stop_pct / 100) for t in trips]
     s.copy_edge_bps = sum(rets) / n * 1e4 - p.cost_bps
     s.shrink = n / (n + p.shrink_n0)
+    # hard gates: only what makes a wallet useless to copy; quality is scored, not gated
     checks = [
         (n >= p.min_trades, f"trades<{p.min_trades}"),
         (s.pnl > 0, "pnl<=0"),
         (s.profit_factor > 1, "profit_factor<=1"),
-        (s.positive_blocks >= p.min_positive_blocks, f"positive_blocks<{p.min_positive_blocks}"),
-        (s.max_dd <= p.max_dd, "max_drawdown>35%"),
-        (s.cur_dd <= p.max_cur_dd, "current_drawdown>20%"),
-        (s.concentration <= p.max_concentration, "one_trade>25%_of_pnl"),
         (s.copy_edge_bps > 0, "copy_edge<=0"),
     ]
     s.reasons = [why for ok, why in checks if not ok]
     s.eligible = not s.reasons
-    s.score = (s.shrink * min(max(s.copy_edge_bps, 0.0), 50.0) * min(s.profit_factor, 3.0) / 3.0
-               * s.positive_blocks / p.blocks * (1 - s.max_dd))
+    s.points = points(s, p)
+    # an eligible wallet scores 1-100; a rejected one scores 0 and is never ranked
+    s.score = round(min(100.0, max(1.0, sum(s.points.values()))), 2) if s.eligible else 0.0
     return s
 
 
 def ranking(scores: list[Score]) -> list[str]:
-    """Eligible wallets, best first; ties broken by address so the order is fully deterministic."""
-    el = [s for s in scores if s.eligible]
+    """Eligible wallets of the current scoring version, best first; ties broken by address so the order is
+    fully deterministic."""
+    el = [s for s in scores if s.eligible and s.v == VERSION]
     return [s.address for s in sorted(el, key=lambda s: (-round(s.score, 9), s.address))]

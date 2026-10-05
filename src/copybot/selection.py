@@ -103,12 +103,17 @@ class Scorer:
         self.cfg, self.info, self.out, self.now = cfg, info, out, now
         self.cache = Cache(cache_dir)
         self.meta = self.cache.get("meta.json", {"last_daily": 0, "last_weekly": 0, "last_cycle": 0})
-        self.screened: dict = self.cache.get("screened.json", {})
-        self.scores: dict = self.cache.get("scores.json", {})
+        # results of an older screen/score version are dropped, so those wallets are screened again
+        v = scoring.VERSION
+        self.screened: dict = {a: d for a, d in self.cache.get("screened.json", {}).items() if d.get("v") == v}
+        self.scores: dict = {a: d for a, d in self.cache.get("scores.json", {}).items() if d.get("v") == v}
         self.stop = threading.Event()
         self.focus: set[str] = set()   # followed leaders: always rescored (set by the trading loop)
+        self.coins = tuple(cfg.selection.main_coins)
         self.params = scoring.ScoreParams(stop_pct=cfg.risk.stop_pct,
-                                          cost_bps=2 * (cfg.broker.taker_fee_pct * 100 + cfg.broker.extra_slippage_bps + 1))
+                                          cost_bps=2 * (cfg.broker.taker_fee_pct * 100 + cfg.broker.extra_slippage_bps + 1),
+                                          coins=self.coins, alt_min_coins=cfg.selection.alt_min_coins,
+                                          alt_max_share=cfg.selection.alt_max_coin_share)
         self.our_notional = cfg.risk.start_equity * cfg.risk.risk_per_trade_pct / cfg.risk.stop_pct
 
     # ---- thread ---------------------------------------------------------------------------------
@@ -143,9 +148,12 @@ class Scorer:
         ranked = scoring.rank_prescreened(lb)
         log.info("prescreen_done", rows=len(lb), passed=len(ranked))
         cands = ranked[: self.cfg.selection.max_candidates]
+        pool = 0   # wallets of this review that are fully scored: stop at the top `pool_size`
         for r, pre in cands:
             if self.stop.is_set():
                 return
+            if pool >= self.cfg.selection.pool_size:
+                break
             a = r.address
             done = self.screened.get(a)
             # a screen result is kept for a week (rejected wallets then get a new chance); a restart in the
@@ -156,14 +164,16 @@ class Scorer:
                     self.score(a)
                     self._save()
                     self.maybe_cycle()
+                pool += a in self.scores
                 continue
             self.screen_and_score(a, r.account_value)
+            pool += a in self.scores
             self.maybe_cycle()
         self.meta["last_daily"] = self.now()
         if weekly:
             self.meta["last_weekly"] = self.now()
         self._save()
-        log.info("review_done", screened=len(self.screened), scored=len(self.scores),
+        log.info("review_done", pool=pool, screened=len(self.screened), scored=len(self.scores),
                  eligible=sum(1 for s in self.scores.values() if s["eligible"]))
         self.out.put(("review", weekly, len(ranked), len(self.scores),
                       sum(1 for s in self.scores.values() if s["eligible"])))
@@ -176,9 +186,11 @@ class Scorer:
         except Exception as e:
             log.warn("screen_fetch_failed", addr=a, err=str(e))
             return
-        sc = scoring.fill_screen(page, now, self.our_notional, self.cfg.risk.min_notional_usd)
+        sc = scoring.fill_screen(page, now, self.our_notional, self.cfg.risk.min_notional_usd, coins=self.coins,
+                                 min_trips=self.params.min_trades, alt_min_coins=self.params.alt_min_coins,
+                                 alt_max_share=self.params.alt_max_share)
         self.screened[a] = {"ok": sc.ok, "reason": sc.reason, "metrics": sc.metrics, "ts": now,
-                            "account_value": account_value}
+                            "account_value": account_value, "v": scoring.VERSION}
         log.info("screen", addr=a, ok=sc.ok, reason=sc.reason, **{k: v for k, v in sc.metrics.items()})
         if sc.ok:
             self.score(a, prior_page=page)
@@ -217,14 +229,15 @@ class Scorer:
         now = self.now()
         fills = self.fills(a, prior_page)
         start = now - self.cfg.selection.history_days * DAY
+        # every core perp: whether the wallet is diversified (and so scored on all of them) is decided by the score
         coins = sorted({f.coin for f in fills if hl.is_core_perp(f.coin)})
         cs = {c: self.candles(c, start, now) for c in coins}
         av = self.screened.get(a, {}).get("account_value", 0.0)
         s = scoring.full_score(a, fills, cs, av, now, self.params)
         self.scores[a] = s.to_dict()
-        log.info("scored", addr=a, eligible=s.eligible, score=round(s.score, 3), trades=s.trades,
+        log.info("scored", addr=a, eligible=s.eligible, score=round(s.score, 1), trades=s.trades,
                  win=round(s.win_rate, 3), pf=round(s.profit_factor, 2), edge_bps=round(s.copy_edge_bps, 1),
-                 mdd=round(s.max_dd, 3), why=",".join(s.reasons))
+                 mdd=round(s.max_dd, 3), diversified=s.diversified, why=",".join(s.reasons))
 
     # ---- hourly cycle ------------------------------------------------------------------------------
     def ranking(self) -> list[str]:

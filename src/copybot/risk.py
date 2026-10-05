@@ -2,7 +2,9 @@
 approve an order.
 
 Exits (reduce/close) are never refused: they are counted against the order rate but always pass.
-Entries (open/add) fail closed: any stale or doubtful input refuses them.
+Entries (open/add/boost) fail closed: any stale or doubtful input refuses them. Entries are only allowed on
+the configured main coins. A boost is the extra size added when a second followed leader opens the same side
+of a coin we already hold (consensus).
 """
 from __future__ import annotations
 
@@ -10,18 +12,19 @@ import collections
 import math
 import time
 from dataclasses import dataclass, field
+from typing import Callable
 
 from copybot.config import Config
-from copybot.hl import Asset, round_size
+from copybot.hl import Asset, is_core_perp, round_size
 from copybot.ledger import State
 
-ENTRY = ("open", "add")
+ENTRY = ("open", "add", "boost")
 EXIT = ("reduce", "close")
 
 
 @dataclass
 class Order:
-    kind: str            # open | add | reduce | close
+    kind: str            # open | add | boost | reduce | close
     coin: str
     side: int            # +1 / -1 of the POSITION (not of the trade)
     size: float          # coins; for open/add a request (may be clamped), for exits what we want to remove
@@ -70,6 +73,11 @@ class RiskGate:
     cfg: Config
     clock: callable = time.time
     order_times: collections.deque = field(default_factory=collections.deque)
+    # leader -> diversified wallet? (then every core perp may be copied from it, not only the main coins)
+    alts_ok: Callable[[str], bool] = field(default_factory=lambda: (lambda leader: False))
+
+    def coin_allowed(self, leader: str, coin: str) -> bool:
+        return coin in self.cfg.selection.main_coins or (is_core_perp(coin) and self.alts_ok(leader))
 
     # ---- sizing (from OUR risk limits, never from the leader's size) ---------------------------
     def stop_for(self, side: int, entry: float) -> float:
@@ -126,6 +134,8 @@ class RiskGate:
             return Decision(False, "leader_not_followed")
         if o.leader in st.paused_leaders:
             return Decision(False, "leader_paused")
+        if not self.coin_allowed(o.leader, o.coin):
+            return Decision(False, "not_main_coin")
         # ---- fail closed on stale/doubtful inputs
         if h.mids_age_s > r.max_mids_age_s:
             return Decision(False, f"stale_prices:{h.mids_age_s:.1f}s")
@@ -160,6 +170,10 @@ class RiskGate:
                 return Decision(False, "max_positions")
             lev = self.leverage_for(asset)
             stop = self.stop_for(o.side, o.px)
+        elif o.kind == "boost":
+            if pos is None or pos.leader == o.leader or pos.side != o.side:
+                return Decision(False, "boost_without_position")
+            lev, stop = pos.leverage, pos.stop_px
         else:
             if pos is None or pos.leader != o.leader or pos.side != o.side:
                 return Decision(False, "add_without_position")
@@ -167,7 +181,7 @@ class RiskGate:
         if lev < 1:
             return Decision(False, "no_safe_leverage")
         stop_dist = abs(o.px - stop) / o.px
-        if o.kind == "add" and (o.side > 0 and o.px <= stop or o.side < 0 and o.px >= stop):
+        if o.kind != "open" and (o.side > 0 and o.px <= stop or o.side < 0 and o.px >= stop):
             return Decision(False, "price_beyond_stop")
         if liq_distance(lev, asset.max_leverage) < r.liq_buffer_mult * stop_dist - 1e-12:
             return Decision(False, "stop_too_close_to_liquidation")
@@ -177,6 +191,8 @@ class RiskGate:
         caps = [o.size]
         if o.kind == "open":
             caps.append(eq * r.risk_per_trade_pct / 100 / per_unit)
+        elif o.kind == "boost":
+            caps.append(eq * r.consensus_risk_pct / 100 / per_unit)
         sym_now = pos.risk_usd() if pos else 0.0
         caps.append((eq * r.max_symbol_risk_pct / 100 - sym_now) / per_unit)
         caps.append((eq * r.max_total_risk_pct / 100 - st.total_risk()) / per_unit)

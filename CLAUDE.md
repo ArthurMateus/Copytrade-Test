@@ -23,7 +23,7 @@ that are not listed there unless the owner asks. The README covers run instructi
 - Tests fake only the network (`tests/fakes.py`: loopback HL REST + WS + Telegram). Never mock our own code.
   Parsers are tested against real recorded responses in `tests/fixtures` (re-record with
   `tools/record_samples.py`).
-- Run `uv run pytest` after every change (about 1 minute, 131 tests at the time of writing, including real-process
+- Run `uv run pytest` after every change (about 1.5 minutes, 155 tests at the time of writing, including real-process
   kill -9 restarts).
 
 ## Layout (`src/copybot/`)
@@ -33,11 +33,11 @@ that are not listed there unless the owner asks. The README covers run instructi
 | `log.py` | key=value logs, rotating file, secret redaction |
 | `ledger.py` | `Ledger` (append-only JSONL, fsync), `State`, `Position` and the event fold. Unresolved intents, torn tail lines and stop-less positions go into `state.uncertain` |
 | `hl.py` | Data contracts/parsers, `RateBudget` (CRITICAL vs BULK classes, BULK can't touch the reserve), `Info` client with a hard timeout, fill paging |
-| `risk.py` | The gate. Sizing: 1% risk at a 3% stop, about $100 notional. Leverage = highest ≤10x that keeps liquidation ≥ 3× the stop distance away |
+| `risk.py` | The gate. Sizing: 1% risk at a 3% stop, about $100 notional. Leverage = highest ≤10x that keeps liquidation ≥ 3× the stop distance away. Entries only on `selection.main_coins`; `boost` = consensus extra size |
 | `broker.py` | Paper fills that walk the real L2 book plus slippage; taker fee 0.045%; funding helper |
 | `detector.py` | Websocket fills → leader `Move`s (open/add/reduce/close/flip) from `startPosition`; dedupe by tid; snapshots never trade |
-| `positions.py` | Mirrors moves using `k = our size / leader position`; stop at entry; reconcile against `clearinghouseState`; leader pause rules |
-| `scoring.py` | Pure, deterministic: `prescreen` → `fill_screen` (first 2,000 fills) → `full_score` (180 d fills + 1h candles) → `ranking` |
+| `positions.py` | Mirrors moves using `k = our size / leader position`; stop at entry; reconcile against `clearinghouseState`; leader pause rules; consensus (backers, boost, handover) and conflicts |
+| `scoring.py` | Pure, deterministic: `prescreen` → `fill_screen` (first 2,000 fills) → `full_score` (180 d fills + 1h candles, 0–100 points) → `ranking`. `VERSION` invalidates cached results |
 | `selection.py` | Pure `select()` hysteresis; `Scorer` thread with a disk cache in `data/cache` (resumes after a restart) |
 | `feed.py` | Websocket (allMids + userFills, max 15 users) and the exchange `Clock` offset estimate |
 | `tg.py`, `tgfmt.py` | Telegram: owner-only commands, outbox; cards edited in place, rate-limited; renderers |
@@ -48,7 +48,14 @@ Runtime state: `data/ledger.jsonl` (the source of truth), `data/cache/`, `data/b
 instances on the same wallet.
 
 ## Decisions made where the spec was open
-- One net position per coin (as on the exchange). If a second leader trades a coin we already hold, that trade is skipped.
+- One net position per coin (as on the exchange), owned by one leader. Owner decision (2026-10-05):
+  - **Agreement:** a second followed leader opening the SAME side becomes a *backer*; we add `risk.consensus_risk_pct`
+    (0.5%) extra risk, still capped by the 1.5% per-symbol limit. Backer adds/reduces only refresh its size; its
+    close/flip trims its share (`frac`). If the OWNER exits while a backer holds, the position is handed over to
+    the best-scored backer and trimmed back to a normal 1% copy (`handover` event) instead of closing.
+  - **Conflict:** a followed leader opening the OPPOSITE side wins only if its wallet score is strictly higher than
+    every leader on our side: we close (`conflict_better_leader`) and copy it. Otherwise (and on ties) it is skipped.
+  - A handed-over position's whole P&L is credited to the new owner's leader stats.
 - Fills of the order that opened a copy only re-anchor `k`; they never add. An add with no copy of ours is skipped.
 - A partial mirror under $10 is skipped. A reduce that would leave under $10 becomes a full close.
 - Missed websocket fills are caught by reconcile every 60 s and right after any reconnect.
@@ -58,6 +65,8 @@ instances on the same wallet.
 - Lag = exchange-clock time of our paper fill minus the leader's fill time.
 
 ## Findings from the real API (2026-10-05)
+- `tests/test_telegram.py::test_card_is_edited_in_place_rate_limited_and_skips_unchanged` is timing-based and can
+  fail rarely under load; rerun before suspecting a bug.
 - One websocket can track at most 15 users. Live `userFills` messages have no `isSnapshot`, and `hash` can be all zeros.
 - Spot fills (`@107`) have `dir` = `Buy`/`Sell`. Builder perps (`xyz:TSLA`) appear in fills and are ignored. `#140` candles return HTTP 500.
 - The owner's PC clock runs about 1.4–1.7 s ahead of the exchange (±0.15 s). It is corrected via the `Clock` offset.
@@ -69,9 +78,17 @@ instances on the same wallet.
 - Built and tested; the live smoke runs against real Hyperliquid were fine. Telegram has not been tested against
   the real API yet (only the fake). No leader had been followed yet when this was written: the first review was
   still screening.
-- **Open proposal, waiting for the owner's decision:** if too few wallets pass, keep the copyability gates hard
-  (too fast/HFT, never closes, maker/spot share, copy edge after costs ≤ 0). Turn the quality cutoffs into score
-  penalties: 150 round trips (keep a floor of about 30), 4/6 positive blocks, drawdown limits, 25% concentration.
-  Then follow the top 7 of whatever remains. This differs from the spec, so only change it if the owner agrees.
-  Check `review_done` / `event=scored` in the log first.
+- **Scoring (owner decision 2026-10-05, differs from the spec on purpose):** only `selection.main_coins` (BTC, ETH,
+  SOL, XRP, BNB, DOGE, ADA, AVAX, LINK, LTC) are screened, scored and copied. Hard rejects are only the copyability
+  gates: too fast/HFT, core-perp share < 50% (spot), no main-coin trades, maker > 70%, history < 60 d, < 30 main-coin
+  round trips, median hold < 15 min, too small to copy, pnl ≤ 0, PF ≤ 1, copy edge after costs ≤ 0. A wallet's
+  off-list (alt) trading is ignored, not held against it: a first live run with a "main-coin share ≥ 50%" gate
+  rejected 41 of the first 120 candidates (many top wallets trade HYPE/alts with some BTC/ETH on the side). Quality is points out of 100 (`scoring.WEIGHTS`):
+  edge 25, profit factor 15, consistency 15, trade count 15, win rate 10, max DD 10, current DD 5, concentration 5.
+  A review screens until `pool_size` (100) wallets are fully scored; `join_rank` = 7 so the top 7 get followed
+  (hysteresis unchanged). Check `review_done` / `event=scored` in the log.
+- **Diversified wallets unlock alts/memecoins (owner request 2026-10-05):** a wallet that is profitable overall, net
+  profitable in ≥ `alt_min_coins` (3) coins and has no coin above `alt_max_coin_share` (50%) of its profit is
+  scored on ALL its core perps and copied in all of them (`Score.diversified`, `RiskGate.alts_ok`). Everyone else
+  stays on the main coins. Spot (`@`), outcome (`#`) and builder (`xyz:`) markets stay excluded.
 - Success metrics and the kill criterion are in the README and shown by `/progress`.

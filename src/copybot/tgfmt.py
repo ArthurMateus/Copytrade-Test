@@ -75,14 +75,16 @@ def trade_card(p: Position, mark: float | None, now_ms: float) -> str:
         ("Stop", f"{fpx(p.stop_px)} 🛑"),
         ("uPnL", f"{fusd(u)}  {fpct(u / notional * 100)}"),
         ("rPnL", f"{fusd(p.realized)}  {fpct(p.realized / notional * 100)}"),
-        ("Leader", short(p.leader)),
+        ("Leader", short(p.leader) + (f" 🤝+{len(p.backers)}" if p.backers else "")),
         ("Upd", hhmmss(now_ms)),
     ])
 
 
 REASONS = {"leader_close": "leader closed", "leader_flip": "leader flipped", "stop": "🛑 stop hit",
            "leader_reduce": "leader reduced", "reconcile_leader_flat": "leader flat (reconcile)",
-           "flatten": "/flatten", "leader_reopened": "stale copy", "reconcile_leader_reduced": "reconcile"}
+           "flatten": "/flatten", "leader_reopened": "stale copy", "reconcile_leader_reduced": "reconcile",
+           "conflict_better_leader": "⚔️ better leader took the other side", "backer_close": "🤝 backer closed",
+           "backer_flip": "🤝 backer flipped", "reconcile_backer_flat": "🤝 backer flat (reconcile)"}
 
 
 def closed_card(t: dict) -> str:
@@ -141,18 +143,19 @@ def status_card(st: State, mids: dict, health, now_ms: float, btc_px: float | No
     ])
 
 
-def leaders_card(st: State, ranks: dict[str, int], now_ms: float) -> str:
+def leaders_card(st: State, ranks: dict[str, int], now_ms: float, scores: dict | None = None) -> str:
     lines = []
     leaders = list(st.followed) + [p.leader for p in st.positions.values() if p.leader not in st.followed]
     for a in dict.fromkeys(leaders):
         s = st.leader_stats.get(a)
         mark = "⏸️" if a in st.paused_leaders else ("🟢" if a in st.followed else "⏳")
         r = ranks.get(a)
-        lines.append((f"{mark} {short(a)}", f"#{r if r else '-':<3} {s.trades if s else 0:>3}t "
-                                            f"{fusd(s.cum if s else 0.0)}"))
+        sc = (scores or {}).get(a, {}).get("score")
+        lines.append((f"{mark} {short(a)}", f"#{r if r else '-':<3} {f'{sc:.0f}' if sc else '-':>3}pt "
+                                            f"{s.trades if s else 0:>3}t {fusd(s.cum if s else 0.0)}"))
     if not lines:
         return "👥 <b>Leaders</b>\nNone followed (no eligible wallet yet).\n<i>upd " + hhmmss(now_ms) + "</i>"
-    return "👥 <b>Leaders</b>  rank · trades · copy P&amp;L\n" + pre(lines) + f"\n<i>upd {hhmmss(now_ms)}</i>"
+    return "👥 <b>Leaders</b>  rank · score · trades · copy P&amp;L\n" + pre(lines) + f"\n<i>upd {hhmmss(now_ms)}</i>"
 
 
 def positions_text(st: State, mids: dict) -> str:

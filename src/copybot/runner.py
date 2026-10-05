@@ -75,10 +75,10 @@ class Bot:
         self.assets: dict[str, hl.Asset] = {}
         self.feed = Feed(rt.ws_url, self.q)
         self.clock = Clock()
-        self.gate = RiskGate(cfg)
+        self.gate = RiskGate(cfg, alts_ok=lambda a: bool(self.score_dict(a).get("diversified")))
         self.broker = PaperBroker(cfg.broker, lambda c: self.info.book(c, rt.trading_timeout_s))
         self.pm = PositionManager(cfg, self.st, self.ledger, self.gate, self.broker, self.health, self.mids,
-                                  self.assets, notify=self.on_notify)
+                                  self.assets, notify=self.on_notify, score_of=self.score_of)
         self.det = Detector()
         self.ui = TelegramUI(cfg, lambda c: self.q.put(("cmd", c)), lambda k, m: self.q.put(("card", k, m)))
         self.scorer = Scorer(cfg, self.info, self.q, self.data / "cache")
@@ -165,7 +165,17 @@ class Bot:
         self.scorer.start()
 
     def wanted_users(self) -> set[str]:
-        return set(self.st.followed) | {p.leader for p in self.st.positions.values()}
+        return set(self.st.followed) | self.position_leaders()
+
+    def position_leaders(self) -> set[str]:
+        """Owners and backers of our open positions: their fills and positions must keep being watched."""
+        return {a for p in self.st.positions.values() for a in (p.leader, *p.backers)}
+
+    def score_dict(self, leader: str) -> dict:
+        return self.scores.get(leader) or self.scorer.scores.get(leader) or {}
+
+    def score_of(self, leader: str) -> float:
+        return float(self.score_dict(leader).get("score", 0.0))
 
     # ---- workers (never touch state: they only enqueue) ---------------------------------------------
     def health_worker(self) -> None:
@@ -250,7 +260,7 @@ class Bot:
                 if kind == "day" and self.st.marks.get("day"):
                     self.ui.send(tgfmt.progress_text(self.st, self.mids, self.mids.get("BTC"), now))
                 self.rec({"ev": "mark", "kind": kind, "key": key, "equity": eq})
-        self.leaders_with_positions = {p.leader for p in self.st.positions.values()}
+        self.leaders_with_positions = self.position_leaders()
         self.feed.set_users(self.wanted_users())
 
     def handle(self, item) -> None:
@@ -317,6 +327,8 @@ class Bot:
             s = scores.get(a, {})
             log.info("leader_followed", leader=a, rank=self.ranks.get(a), score=s.get("score"))
             self.ui.send(f"➕ <b>Following</b> <code>{tgfmt.short(a)}</code> · rank #{self.ranks.get(a)}\n" + tgfmt.pre([
+                ("Score", f"{s.get('score', 0):.0f}/100"),
+                ("Coins", "all perps 🎲 (diversified)" if s.get("diversified") else "main coins"),
                 ("Trades", str(s.get("trades", "-"))),
                 ("Win", f"{s.get('win_rate', 0) * 100:.0f}%"),
                 ("PF", f"{s.get('profit_factor', 0):.2f}"),
@@ -339,6 +351,24 @@ class Bot:
             key = f"pos:{t['pos_id']}"
             self.last_body.pop(key, None)
             self.ui.final_card(key, tgfmt.closed_card(t))
+        elif kind == "consensus":
+            p = self.st.positions.get(kw["coin"])
+            if p:
+                self.card_for(p, force=True)
+                extra = f"+{tgfmt.fusd(kw['size'] * p.entry_px, sign=False)} size" if kw["size"] else "no extra size"
+                self.ui.send(f"🤝 <b>{tgfmt.esc(p.coin)}</b> {tgfmt.side_tag(p.side)} · "
+                             f"<code>{tgfmt.short(kw['leader'])}</code> agrees with <code>{tgfmt.short(p.leader)}</code>"
+                             f" · {extra}")
+        elif kind == "handover":
+            p = self.st.positions.get(kw["coin"])
+            if p:
+                self.card_for(p, force=True)
+            self.ui.send(f"🔁 <b>{tgfmt.esc(kw['coin'])}</b> kept: <code>{tgfmt.short(kw['prev'])}</code> exited, "
+                         f"<code>{tgfmt.short(kw['leader'])}</code> still holds and now leads the copy")
+        elif kind == "conflict":
+            self.ui.send(f"⚔️ <b>{tgfmt.esc(kw['coin'])}</b> conflict: switching to <code>{tgfmt.short(kw['leader'])}</code>"
+                         f" (score {kw['score']:.0f}) over <code>{tgfmt.short(kw['holder'])}</code>"
+                         f" (score {kw['holder_score']:.0f})")
         elif kind == "leader_paused":
             self.ui.send(f"⏸️ <b>Leader paused</b> <code>{tgfmt.short(kw['leader'])}</code> · "
                          f"{tgfmt.esc(kw['reason'])}\nNo new copies from it; open copies keep mirroring exits.")
@@ -361,8 +391,8 @@ class Bot:
                 body = tgfmt.status_card(self.st, self.mids, h, 0, self.mids.get("BTC"))
                 full = lambda: tgfmt.status_card(self.st, self.mids, h, now_ms(), self.mids.get("BTC"))
             else:
-                body = tgfmt.leaders_card(self.st, self.ranks, 0)
-                full = lambda: tgfmt.leaders_card(self.st, self.ranks, now_ms())
+                body = tgfmt.leaders_card(self.st, self.ranks, 0, self.scores)
+                full = lambda: tgfmt.leaders_card(self.st, self.ranks, now_ms(), self.scores)
             if self.last_body.get(key) != body:
                 self.last_body[key] = body
                 self.ui.set_card(key, full())
@@ -377,7 +407,7 @@ class Bot:
             self.live_cards.add(key)
             self.last_body.pop(key, None)
             text = (tgfmt.status_card(self.st, self.mids, self.health(), now, self.mids.get("BTC")) if key == "status"
-                    else tgfmt.leaders_card(self.st, self.ranks, now))
+                    else tgfmt.leaders_card(self.st, self.ranks, now, self.scores))
             self.ui.set_card(key, text, new=True)
         elif c.name == "/positions":
             self.ui.send(tgfmt.positions_text(self.st, self.mids))

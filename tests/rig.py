@@ -22,6 +22,8 @@ class Rig:
         self.path = tmp_path / "ledger.jsonl"
         self.healthy = True
         self.events: list = []
+        self.scores: dict[str, float] = {}   # leader -> wallet score 0-100 (for conflicts)
+        self.alts: set[str] = set()           # diversified leaders (may be copied outside the main coins)
         self.boot()
         self.rec({"ev": "genesis", "equity0": equity, "btc_px0": 100_000})
         self.rec({"ev": "mark", "kind": "day", "key": "d", "equity": equity})
@@ -34,10 +36,11 @@ class Rig:
         self.st = self.ledger.replay()
         self.mids = dict(self.fake.mids)
         self.assets = self.info.meta()
-        self.gate = RiskGate(self.cfg)
+        self.gate = RiskGate(self.cfg, alts_ok=lambda a: a in self.alts)
         self.broker = PaperBroker(self.cfg.broker, lambda c: self.info.book(c, 2.0))
         self.pm = PositionManager(self.cfg, self.st, self.ledger, self.gate, self.broker, self.health, self.mids,
-                                  self.assets, notify=lambda kind, **kw: self.events.append((kind, kw)))
+                                  self.assets, notify=lambda kind, **kw: self.events.append((kind, kw)),
+                                  score_of=lambda a: self.scores.get(a, 0.0))
         self.det = Detector()
 
     def health(self):

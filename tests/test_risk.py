@@ -157,3 +157,15 @@ def test_exits_pass_with_everything_stale_and_partial_dust_is_upgraded():
     assert d.ok and d.size == 0.01 and d.reason == "exit_upgraded_to_close"   # $9 would be left
     d = g.check(Order("reduce", "ETH", 1, 0.002, 3000.0), st, Health(), {}, None)
     assert not d.ok and d.reason.startswith("below_min_notional")     # a $6 partial mirror is skipped
+
+
+def test_entries_only_on_main_coins(tmp_path):
+    from tests.rig import LEADER, Rig
+    r = Rig(tmp_path)
+    try:
+        r.cfg.selection.main_coins = ["ETH"]
+        o = Order("open", "BTC", 1, 0.001, 100_000.0, leader=LEADER)
+        d = r.gate.check(o, r.st, r.health(), r.mids, r.assets["BTC"])
+        assert not d and d.reason == "not_main_coin"
+    finally:
+        r.close()

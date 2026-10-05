@@ -1,7 +1,7 @@
 # Leader selection and hysteresis.
 rescore_minutes = 60.0        # one selection cycle                          [0.05, 1440]
 min_scored_to_start = 12      # start following once this many candidates are fully scored
-join_rank = 8                 # join when rank <= this ...                  [1, 8]
+join_rank = 7                 # join when rank <= this (the top 7) ...      [1, 8]
 drop_rank = 15                # drop when rank > this ...                   [8, 15]
 confirm_cycles = 2            # ... for this many consecutive cycles         [2, 10]
 min_follow_hours = 24.0       # never drop a leader followed for less than this (paused leaders excepted)
@@ -9,4 +9,13 @@ swaps_per_cycle = 1           #                                              [1,
 history_days = 180            # fills history used for scoring               [60, 180]
 max_candidates = 400          # prescreened wallets that get fill-screened per review (~6 s each; most top
                               # wallets are rejected as too fast, so this must be generous)
+pool_size = 100               # a review stops screening once this many wallets are fully scored (the top 100)  [7, 400]
 dropped_cooldown_days = 7.0   # a dropped or paused leader cannot rejoin for this long
+# Only these coins are scored (a wallet's trades in other coins are ignored) and copied (the risk gate refuses
+# entries on anything else). Exits on a coin removed from this list keep working.
+main_coins = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "ADA", "AVAX", "LINK", "LTC"]
+# Diversified wallets unlock every Hyperliquid perp (memecoins like PUMP, kPEPE, WIF...): a wallet that is net
+# profitable in at least alt_min_coins coins, with no single coin above alt_max_coin_share of its profit, is scored
+# on all its perp trades and copied in all of them. Others stay on main_coins. Set alt_min_coins = 1000 to disable.
+alt_min_coins = 3             # [2, 1000]
+alt_max_coin_share = 0.5      # [0.1, 1]

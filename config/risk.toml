@@ -21,3 +21,5 @@ max_mids_age_s = 10.0         # price feed older than this = stale           [1,
 max_leader_feed_age_s = 90.0  # websocket silent longer than this = leader data in doubt  [5, 600]
 leader_pause_dd_pct = 10.0    # pause a leader when its copy drawdown exceeds this % of (equity / max_leaders)  [0.1, 10]
 leader_pause_losses = 5       # ... or after this many consecutive losing copies  [1, 5]
+consensus_risk_pct = 0.5      # a 2nd followed leader opens the SAME side on a coin we hold: add this much extra risk,
+                              # still capped by max_symbol_risk_pct  [0, 1]
