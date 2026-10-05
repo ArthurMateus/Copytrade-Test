@@ -329,7 +329,7 @@ class Bot:
                 ("Coins", "all perps 🎲 (diversified)" if s.get("diversified") else "main coins"),
                 ("Trades", str(s.get("trades", "-"))),
                 ("Win", f"{s.get('win_rate', 0) * 100:.0f}%"),
-                ("PF", f"{s.get('profit_factor', 0):.2f}"),
+                ("PF", tgfmt.pf_text(s.get("profit_factor", 0))),
                 ("Edge", f"{s.get('copy_edge_bps', 0):.1f} bps after costs"),
                 ("Max DD", f"{s.get('max_dd', 0) * 100:.0f}%"),
             ]))

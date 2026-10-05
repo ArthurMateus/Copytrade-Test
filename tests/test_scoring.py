@@ -254,3 +254,14 @@ def test_screen_unlocks_alts_for_a_diversified_page():
     s = scoring.fill_screen(parse(raw), NOW, 100, coins=("ETH",))
     assert s.ok and s.metrics["diversified"]
     assert scoring.fill_screen(parse(raw), NOW, 100, coins=("ETH",), alt_min_coins=1000).reason == "no_main_coin_trades"
+
+
+def test_win_rate_and_score_floors():
+    raw, cs = trader(NOW, trips=500, win=0.65)
+    fl, c = parse(raw), cand(cs)
+    base = scoring.full_score("0xa", fl, c, 200_000, NOW)
+    assert base.eligible and base.win_rate < 0.70
+    s = scoring.full_score("0xa", fl, c, 200_000, NOW, scoring.ScoreParams(min_win_rate=0.70))
+    assert not s.eligible and s.reasons == ["win_rate<70%"] and s.score == 0
+    s = scoring.full_score("0xa", fl, c, 200_000, NOW, scoring.ScoreParams(min_score=base.score + 1))
+    assert not s.eligible and s.reasons == [f"score<{base.score + 1:g}"]

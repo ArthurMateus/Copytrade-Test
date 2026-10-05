@@ -18,7 +18,8 @@ from dataclasses import asdict, dataclass, field
 
 from copybot.hl import Candle, Fill, LbRow, is_core_perp
 
-VERSION = 3   # bump when the screen or the score changes: cached results of another version are redone
+SCREEN_VERSION = 3   # bump when fill_screen changes: cached screen results of another version are redone
+VERSION = 4          # bump when full_score changes: cached scores of another version are redone
 
 DAY = 86_400_000
 EPS = 1e-12
@@ -271,6 +272,8 @@ class ScoreParams:
     coins: tuple | None = None     # only trades in these coins count (None = all core perps) ...
     alt_min_coins: int = 3         # ... unless the wallet is diversified (see `diversification`)
     alt_max_share: float = 0.5
+    min_win_rate: float = 0.0      # hard floor on the win rate
+    min_score: float = 1.0         # hard floor on the 0-100 score
 
 
 # component -> weight; the weights add up to 100
@@ -396,10 +399,13 @@ def full_score(address: str, fills: list[Fill], candles: dict[str, list[Candle]]
         (s.pnl > 0, "pnl<=0"),
         (s.profit_factor > 1, "profit_factor<=1"),
         (s.copy_edge_bps > 0, "copy_edge<=0"),
+        (s.win_rate >= p.min_win_rate, f"win_rate<{p.min_win_rate * 100:.0f}%"),
     ]
+    s.points = points(s, p)
+    if sum(s.points.values()) < p.min_score:
+        checks.append((False, f"score<{p.min_score:g}"))
     s.reasons = [why for ok, why in checks if not ok]
     s.eligible = not s.reasons
-    s.points = points(s, p)
     # an eligible wallet scores 1-100; a rejected one scores 0 and is never ranked
     s.score = round(min(100.0, max(1.0, sum(s.points.values()))), 2) if s.eligible else 0.0
     return s

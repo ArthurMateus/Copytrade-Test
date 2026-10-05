@@ -146,7 +146,7 @@ def status_card(st: State, mids: dict, health, now_ms: float, btc_px: float | No
 def leaders_card(st: State, ranks: dict[str, int], now_ms: float, scores: dict | None = None) -> str:
     lines = []
     leaders = list(st.followed) + [p.leader for p in st.positions.values() if p.leader not in st.followed]
-    for a in dict.fromkeys(leaders):
+    for a in by_rank(leaders, ranks):
         s = st.leader_stats.get(a)
         mark = "⏸️" if a in st.paused_leaders else ("🟢" if a in st.followed else "⏳")
         r = ranks.get(a)
@@ -190,6 +190,18 @@ def progress_text(st: State, mids: dict, btc_px: float | None, now_ms: float) ->
         ("Med lag", (f"{med:.1f}s {'✅' if med <= 5 else '⚠️'}") if med is not None else "-"),
         ("Skipped<$10", str(st.counters.get("skipped_min_notional", 0))),
     ]) + "\n<i>A few dozen paper trades show the bot works, not that an edge exists.</i>"
+
+
+def by_rank(leaders, ranks: dict[str, int]) -> list[str]:
+    """Unique leaders, best rank first; unranked ones (no longer eligible) last."""
+    return sorted(dict.fromkeys(leaders), key=lambda a: (ranks.get(a) or 10**6, a))
+
+
+def pf_text(pf: float) -> str:
+    """Profit factor = money won on winning trades / money lost on losing trades."""
+    if pf >= 99:
+        return "no losing trade"
+    return f"{pf:.2f} (wins {fusd(pf, sign=False)} per 1$ lost)"
 
 
 def _n(k: int, word: str) -> str:
@@ -242,7 +254,7 @@ def traders_card(st: State, mids: dict, ranks: dict[str, int], scores: dict | No
     leaders = list(st.followed) + [a for p in st.positions.values() for a in (p.leader, *p.backers)
                                    if a not in st.followed]
     blocks, grand = [], 0.0
-    for a in dict.fromkeys(leaders):
+    for a in by_rank(leaders, ranks):
         mine = [t for t in st.closed if t["leader"] == a]
         wins = sum(1 for t in mine if t["pnl"] > 0)
         realized = sum(t["pnl"] for t in mine)
@@ -265,7 +277,8 @@ def traders_card(st: State, mids: dict, ranks: dict[str, int], scores: dict | No
         if mine:
             rows.append(("Best", f"{fusd(max(t['pnl'] for t in mine))} · worst {fusd(min(t['pnl'] for t in mine))}"))
         if sc:
-            rows.append(("History", f"{sc.get('win_rate', 0) * 100:.0f}% win · PF {sc.get('profit_factor', 0):.2f}"))
+            rows.append(("History", f"{sc.get('trades', 0)} trades · {sc.get('win_rate', 0) * 100:.0f}% win"))
+            rows.append(("PF", pf_text(sc.get("profit_factor", 0))))
         if a in st.followed and now_ms:
             rows.append(("Following", dur(now_ms - st.followed[a])))
         if a in st.paused_leaders:

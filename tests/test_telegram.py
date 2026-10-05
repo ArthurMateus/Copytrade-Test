@@ -164,6 +164,7 @@ def test_trades_and_traders_cards():
                                                     "profit_factor": 2.1}}, 3_600_000)
     assert "👥 <b>Traders</b> · 2 followed" in tr and "#1 · 94/100 🎲" in tr
     assert "2 trades · 1W/1L (50%)" in tr and "+1.50$" in tr and "backs 1" in tr
+    assert tr.index(a[-4:]) < tr.index(b[-4:])            # ranked before unranked
     assert "+3.45$" in tr                                 # 1.50 closed + 1.95 open, all from copying
     assert "None followed" in tgfmt.traders_card(State(equity0=300), {}, {}, {}, 0)
 
@@ -206,3 +207,14 @@ def test_a_read_timeout_is_a_network_error_and_polling_survives_it():
         srv.close()
         for c in conns:
             c.close()
+
+
+def test_traders_are_listed_by_rank_with_history_and_pf():
+    a, b, c = ("0x" + x * 40 for x in "abc")
+    st = State(equity0=300)
+    st.followed = {a: 0, b: 0, c: 0}                      # followed in this order ...
+    sc = {a: {"score": 60, "trades": 153, "win_rate": 0.77, "profit_factor": 2.5},
+          b: {"score": 90, "trades": 40, "win_rate": 1.0, "profit_factor": 99.0}}
+    tr = tgfmt.traders_card(st, {}, {b: 1, a: 2}, sc, 0)
+    assert tr.index("bbbb") < tr.index("aaaa") < tr.index("cccc")   # ... listed by rank, unranked last
+    assert "153 trades · 77% win" in tr and "2.50 (wins 2.50$ per 1$ lost)" in tr and "no losing trade" in tr

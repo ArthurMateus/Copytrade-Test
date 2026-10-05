@@ -23,7 +23,7 @@ that are not listed there unless the owner asks. The README covers run instructi
 - Tests fake only the network (`tests/fakes.py`: loopback HL REST + WS + Telegram). Never mock our own code.
   Parsers are tested against real recorded responses in `tests/fixtures` (re-record with
   `tools/record_samples.py`).
-- Run `uv run pytest` after every change (about 1.5 minutes, 159 tests at the time of writing, including real-process
+- Run `uv run pytest` after every change (about 1.5 minutes, 163 tests at the time of writing, including real-process
   kill -9 restarts).
 
 ## Layout (`src/copybot/`)
@@ -60,6 +60,10 @@ instances on the same wallet.
 - A partial mirror under $10 is skipped. A reduce that would leave under $10 becomes a full close.
 - Missed websocket fills are caught by reconcile every 60 s and right after any reconnect.
 - Leader pause: copy drawdown > 10% of (equity / 7) or 5 consecutive losses. A paused leader is dropped at the next cycle, then a 7-day cooldown.
+- Followed-set changes (owner request 2026-10-05): bad leaders leave at once (all paused ones, and every leader no
+  longer eligible for 2 cycles, even if followed < 24 h). New leaders join at most once per `change_cooldown_hours`
+  (24 h, counted from the newest join); free slots fill together then. Rank-based swaps (eligible but rank > 15)
+  only happen in that window, one per cycle, after `min_follow_hours`. Max 7 leaders.
 - A screen result is cached for 7 days per wallet (rejected wallets get retried after that).
 - Leaders are picked once `min_scored_to_start` (12) wallets are fully scored OR the first review has finished
   (`Scorer.ready`): real reviews of 400 candidates fully score only a handful, so waiting for 12 meant following nobody.
@@ -87,6 +91,9 @@ instances on the same wallet.
   off-list (alt) trading is ignored, not held against it: a first live run with a "main-coin share ≥ 50%" gate
   rejected 41 of the first 120 candidates (many top wallets trade HYPE/alts with some BTC/ETH on the side). Quality is points out of 100 (`scoring.WEIGHTS`):
   edge 25, profit factor 15, consistency 15, trade count 15, win rate 10, max DD 10, current DD 5, concentration 5.
+  Eligibility floors (owner request 2026-10-05): win rate ≥ `min_win_rate` (60%) and score ≥ `min_score` (50).
+  `scoring.SCREEN_VERSION` and `scoring.VERSION` are separate: a score-only change rescores the screened wallets
+  from cached fills at startup (`Scorer.rescore_missing`) instead of re-screening 400 wallets.
   A review screens until `pool_size` (100) wallets are fully scored; `join_rank` = 7 so the top 7 get followed
   (hysteresis unchanged). Check `review_done` / `event=scored` in the log.
 - **Diversified wallets unlock alts/memecoins (owner request 2026-10-05):** a wallet that is profitable overall, net

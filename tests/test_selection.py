@@ -80,11 +80,31 @@ def test_no_flip_flop_between_rank_8_and_15():
     assert set(f) == set(R[:7])
 
 
-def test_paused_leader_is_dropped_first_even_if_new():
+def test_paused_leader_is_dropped_at_once_even_if_new():
     followed = {a: NOW - HOUR for a in R[:7]}
-    f, plans, _ = run([R[:10], R[:10]], followed=followed, paused={R[3]})
-    assert plans[0].drops == [(R[3], "paused after a bad streak")]
-    assert R[3] not in f
+    f, plans, _ = run([R[:10], R[:10]], followed=followed, paused={R[3], R[4]})
+    assert plans[0].drops == [(R[3], "paused after a bad streak"), (R[4], "paused after a bad streak")]
+    assert R[3] not in f and R[4] not in f
+    assert not any(p.joins for p in plans)      # replacements wait for the daily change window
+
+
+def test_a_leader_that_no_longer_passes_the_rules_leaves_after_two_cycles():
+    followed = {a: NOW - HOUR for a in R[:7]}   # followed only an hour ago: not protected
+    ranking = R[:4]                             # R[4..6] are no longer eligible
+    f, plans, _ = run([ranking], followed=followed)
+    assert not plans[0].drops                   # one cycle is not enough
+    f, plans, _ = run([ranking, ranking], followed=followed)
+    assert {a for a, _ in plans[1].drops} == set(R[4:7]) and set(f) == set(R[:4])
+
+
+def test_new_leaders_join_at_most_once_a_day():
+    followed = {a: NOW - 2 * HOUR for a in R[:5]}   # two free slots, last join 2 hours ago
+    f, plans, _ = run([R[:10]] * 21, followed=followed)
+    assert set(f) == set(R[:5])                     # 20 hours later: still the same five
+    f, plans, _ = run([R[:10]] * 24, followed=followed)
+    assert set(f) == set(R[:7])                     # once 24 h passed since the last join, both slots fill
+    joins_at = [i for i, p in enumerate(plans) if p.joins]
+    assert len(joins_at) == 1
 
 
 def test_dropped_leader_cooldown():

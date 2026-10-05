@@ -1,10 +1,12 @@
 """Leader selection: pure hysteresis rules + the background scorer (downloads, disk cache, scoring).
 
 Hysteresis (all per selection cycle):
-  join  when rank <= join_rank for `confirm_cycles` consecutive cycles (free slots: any number per cycle)
-  drop  when rank >  drop_rank (or not eligible) for `confirm_cycles` cycles AND followed >= min_follow_hours,
-        or when the leader is paused (bad streak)
-  at most ONE drop (with its replacement) per cycle; a dropped leader cannot rejoin during the cooldown.
+  bad leaders leave at once: paused (losing copies), or no longer eligible for `confirm_cycles` cycles
+  join  when rank <= join_rank for `confirm_cycles` consecutive cycles, but only once `change_cooldown_hours`
+        have passed since the last join (then any free slots fill together)
+  drop  an eligible leader at rank > drop_rank for `confirm_cycles` cycles, followed >= min_follow_hours,
+        only when joins are allowed: ONE such swap per cycle
+  a dropped leader cannot rejoin during the cooldown.
 """
 from __future__ import annotations
 
@@ -46,24 +48,30 @@ def select(sel: dict, ranking: list[str], followed: dict[str, int], paused: set[
         if j or d or a in followed:
             new[a] = {"join": j, "drop": d}
     drops: list[tuple[str, str]] = []
-    cands = []
+    swaps = []
     for a, since in followed.items():
+        d = new.get(a, {}).get("drop", 0)
         if a in paused:
-            cands.append((0, -rank.get(a, 10**6), a, "paused after a bad streak"))
-        elif new.get(a, {}).get("drop", 0) >= s.confirm_cycles and now_ms - since >= s.min_follow_hours * HOUR:
-            cands.append((1, -rank.get(a, 10**6), a, f"rank > {s.drop_rank} for {s.confirm_cycles} cycles"))
-    cands.sort()
+            drops.append((a, "paused after a bad streak"))
+        elif a not in rank and d >= s.confirm_cycles:
+            drops.append((a, f"no longer passes the rules for {s.confirm_cycles} cycles"))
+        elif d >= s.confirm_cycles and now_ms - since >= s.min_follow_hours * HOUR:
+            swaps.append((-rank.get(a, 10**6), a, f"rank > {s.drop_rank} for {s.confirm_cycles} cycles"))
+    swaps.sort()
     cooldown = s.dropped_cooldown_days * DAY
     joinable = [a for a in ranking if a not in followed and new.get(a, {}).get("join", 0) >= s.confirm_cycles
                 and now_ms - dropped.get(a, -10**15) >= cooldown]
-    slots = cfg.risk.max_leaders - len(followed)
-    joins = joinable[:max(0, slots)]
-    rest = joinable[len(joins):]
-    if cands and s.swaps_per_cycle > 0:
-        _, _, a, why = cands[0]
-        drops.append((a, why))
-        if rest:
-            joins.append(rest[0])
+    joins: list[str] = []
+    # the followed set only grows once per `change_cooldown_hours` (counted from the newest leader)
+    if now_ms - max(followed.values(), default=-10**15) >= s.change_cooldown_hours * HOUR:
+        slots = cfg.risk.max_leaders - (len(followed) - len(drops))
+        joins = joinable[:max(0, slots)]
+        rest = joinable[len(joins):]
+        if swaps and s.swaps_per_cycle > 0:
+            _, a, why = swaps[0]
+            drops.append((a, why))
+            if rest:
+                joins.append(rest[0])
     return Plan(joins, drops, {"streaks": new, "cycles": int(sel.get("cycles", 0)) + 1, "at": now_ms})
 
 
@@ -105,16 +113,18 @@ class Scorer:
         self.cache = Cache(cache_dir)
         self.meta = self.cache.get("meta.json", {"last_daily": 0, "last_weekly": 0, "last_cycle": 0})
         # results of an older screen/score version are dropped, so those wallets are screened again
-        v = scoring.VERSION
-        self.screened: dict = {a: d for a, d in self.cache.get("screened.json", {}).items() if d.get("v") == v}
-        self.scores: dict = {a: d for a, d in self.cache.get("scores.json", {}).items() if d.get("v") == v}
+        self.screened: dict = {a: d for a, d in self.cache.get("screened.json", {}).items()
+                               if d.get("v") == scoring.SCREEN_VERSION}
+        self.scores: dict = {a: d for a, d in self.cache.get("scores.json", {}).items()
+                             if d.get("v") == scoring.VERSION}
         self.stop = threading.Event()
         self.focus: set[str] = set()   # followed leaders: always rescored (set by the trading loop)
         self.coins = tuple(cfg.selection.main_coins)
         self.params = scoring.ScoreParams(stop_pct=cfg.risk.stop_pct,
                                           cost_bps=2 * (cfg.broker.taker_fee_pct * 100 + cfg.broker.extra_slippage_bps + 1),
                                           coins=self.coins, alt_min_coins=cfg.selection.alt_min_coins,
-                                          alt_max_share=cfg.selection.alt_max_coin_share)
+                                          alt_max_share=cfg.selection.alt_max_coin_share,
+                                          min_win_rate=cfg.selection.min_win_rate, min_score=cfg.selection.min_score)
         self.our_notional = cfg.risk.start_equity * cfg.risk.risk_per_trade_pct / cfg.risk.stop_pct
 
     # ---- thread ---------------------------------------------------------------------------------
@@ -122,6 +132,7 @@ class Scorer:
         threading.Thread(target=self.run, name="scorer", daemon=True).start()
 
     def run(self) -> None:
+        self.rescore_missing()
         if self.scores:   # restart: resume from cache, do not repeat hours of downloads
             self.maybe_cycle(force=True)
         while not self.stop.is_set():
@@ -136,6 +147,20 @@ class Scorer:
                 self.out.put(("alert", f"scorer error: {type(e).__name__}"))
                 self.stop.wait(60)
             self.stop.wait(5)
+
+    def rescore_missing(self) -> None:
+        """Wallets that passed the screen but have no score of the current version (the scoring rules changed):
+        score them again from the cached fills and candles instead of waiting for the next review."""
+        missing = sorted(a for a, d in self.screened.items() if d.get("ok") and a not in self.scores)
+        for a in missing:
+            if self.stop.is_set():
+                return
+            try:
+                self.score(a)
+            except Exception as e:
+                log.warn("rescore_failed", addr=a, err=str(e))
+        if missing:
+            self._save()
 
     def _save(self) -> None:
         self.cache.put("meta.json", self.meta)
@@ -191,7 +216,7 @@ class Scorer:
                                  min_trips=self.params.min_trades, alt_min_coins=self.params.alt_min_coins,
                                  alt_max_share=self.params.alt_max_share)
         self.screened[a] = {"ok": sc.ok, "reason": sc.reason, "metrics": sc.metrics, "ts": now,
-                            "account_value": account_value, "v": scoring.VERSION}
+                            "account_value": account_value, "v": scoring.SCREEN_VERSION}
         log.info("screen", addr=a, ok=sc.ok, reason=sc.reason, **{k: v for k, v in sc.metrics.items()})
         if sc.ok:
             self.score(a, prior_page=page)
