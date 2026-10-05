@@ -275,3 +275,20 @@ def test_a_restart_does_not_push_the_hourly_cycle_back(scorer_env):
     sc2.meta["last_cycle"] = sc2.now() - 2 * HOUR
     sc2.maybe_cycle(force=True)                    # long overdue: the forced cycle is the real one
     assert sc2.meta["last_cycle"] >= sc2.now() - 60_000
+
+
+def test_changing_the_floors_rescores_saved_wallets(scorer_env):
+    fake, cfg, info, tmp, good, bad = scorer_env
+    sc = Scorer(cfg, info, queue.Queue(), tmp / "cache")
+    for a in good[:3]:
+        sc.screen_and_score(a, 200_000)
+    assert len(Scorer(cfg, info, queue.Queue(), tmp / "cache").scores) == 3   # same rules: kept
+    cfg.selection.min_profit_factor = 50.0
+    sc2 = Scorer(cfg, info, queue.Queue(), tmp / "cache")
+    assert sc2.scores == {}                                   # other rules: redone ...
+    n = len(fake.requests)
+    sc2.rescore_missing()                                     # ... from the screen results kept on disk
+    assert set(sc2.scores) == set(good[:3]) and not sc2.ranking()
+    assert all(d["reasons"] == ["profit_factor<50"] for d in sc2.scores.values())
+    assert not any(r["type"] == "userFillsByTime" and r["startTime"] < sc2.now() - 170 * 86_400_000
+                   for r in fake.requests[n:])                # no first-page screen again

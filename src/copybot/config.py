@@ -58,10 +58,11 @@ class Selection:
     min_follow_hours: float = 24.0
     change_cooldown_hours: float = 24.0   # new leaders join at most this often (bad ones still leave at once)
     min_win_rate: float = 0.60            # eligible only with at least this win rate ...
-    min_score: float = 50.0               # ... and at least this score (0-100)
+    min_score: float = 70.0               # ... at least this score (0-100) ...
+    min_profit_factor: float = 2.0        # ... and won at least this much per 1$ lost
     swaps_per_cycle: int = 1
     history_days: int = 180
-    max_candidates: int = 400             # prescreened wallets sent to fill screening per review
+    max_candidates: int = 2000            # prescreened wallets sent to fill screening per review
     pool_size: int = 100                  # a review stops screening once this many wallets are fully scored
     dropped_cooldown_days: float = 7.0
     main_coins: list = field(default_factory=lambda: list(MAIN_COINS))   # only these are scored and copied
@@ -143,6 +144,8 @@ CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
     ("selection", "change_cooldown_hours"): (0, 24 * 7),
     ("selection", "min_win_rate"): (0.0, 1.0),
     ("selection", "min_score"): (1, 100),
+    ("selection", "min_profit_factor"): (1.0, 10.0),
+    ("selection", "max_candidates"): (10, 5000),
     ("selection", "swaps_per_cycle"): (1, 1),
     ("selection", "history_days"): (60, 180),
     ("selection", "pool_size"): (7, 400),

@@ -265,3 +265,12 @@ def test_win_rate_and_score_floors():
     assert not s.eligible and s.reasons == ["win_rate<70%"] and s.score == 0
     s = scoring.full_score("0xa", fl, c, 200_000, NOW, scoring.ScoreParams(min_score=base.score + 1))
     assert not s.eligible and s.reasons == [f"score<{base.score + 1:g}"]
+
+
+def test_profit_factor_floor():
+    raw, cs = trader(NOW, trips=500, win=0.75)
+    fl, c = parse(raw), cand(cs)
+    base = scoring.full_score("0xa", fl, c, 200_000, NOW)
+    assert base.eligible and base.rules == scoring.ScoreParams().rules()
+    s = scoring.full_score("0xa", fl, c, 200_000, NOW, scoring.ScoreParams(min_profit_factor=base.profit_factor + 0.5))
+    assert not s.eligible and s.reasons == [f"profit_factor<{base.profit_factor + 0.5:g}"]

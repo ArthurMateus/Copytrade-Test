@@ -112,19 +112,21 @@ class Scorer:
         self.cfg, self.info, self.out, self.now = cfg, info, out, now
         self.cache = Cache(cache_dir)
         self.meta = self.cache.get("meta.json", {"last_daily": 0, "last_weekly": 0, "last_cycle": 0})
-        # results of an older screen/score version are dropped, so those wallets are screened again
-        self.screened: dict = {a: d for a, d in self.cache.get("screened.json", {}).items()
-                               if d.get("v") == scoring.SCREEN_VERSION}
-        self.scores: dict = {a: d for a, d in self.cache.get("scores.json", {}).items()
-                             if d.get("v") == scoring.VERSION}
-        self.stop = threading.Event()
-        self.focus: set[str] = set()   # followed leaders: always rescored (set by the trading loop)
         self.coins = tuple(cfg.selection.main_coins)
         self.params = scoring.ScoreParams(stop_pct=cfg.risk.stop_pct,
                                           cost_bps=2 * (cfg.broker.taker_fee_pct * 100 + cfg.broker.extra_slippage_bps + 1),
                                           coins=self.coins, alt_min_coins=cfg.selection.alt_min_coins,
                                           alt_max_share=cfg.selection.alt_max_coin_share,
-                                          min_win_rate=cfg.selection.min_win_rate, min_score=cfg.selection.min_score)
+                                          min_win_rate=cfg.selection.min_win_rate, min_score=cfg.selection.min_score,
+                                          min_profit_factor=cfg.selection.min_profit_factor)
+        # results of an older screen/score version, or scored under other eligibility floors, are redone
+        # (screened wallets are rescored from the disk cache at startup: see rescore_missing)
+        self.screened: dict = {a: d for a, d in self.cache.get("screened.json", {}).items()
+                               if d.get("v") == scoring.SCREEN_VERSION}
+        self.scores: dict = {a: d for a, d in self.cache.get("scores.json", {}).items()
+                             if d.get("v") == scoring.VERSION and d.get("rules") == self.params.rules()}
+        self.stop = threading.Event()
+        self.focus: set[str] = set()   # followed leaders: always rescored (set by the trading loop)
         self.our_notional = cfg.risk.start_equity * cfg.risk.risk_per_trade_pct / cfg.risk.stop_pct
 
     # ---- thread ---------------------------------------------------------------------------------

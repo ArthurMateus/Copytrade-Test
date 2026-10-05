@@ -23,7 +23,7 @@ that are not listed there unless the owner asks. The README covers run instructi
 - Tests fake only the network (`tests/fakes.py`: loopback HL REST + WS + Telegram). Never mock our own code.
   Parsers are tested against real recorded responses in `tests/fixtures` (re-record with
   `tools/record_samples.py`).
-- Run `uv run pytest` after every change (about 1.5 minutes, 163 tests at the time of writing, including real-process
+- Run `uv run pytest` after every change (about 1.5 minutes, 165 tests at the time of writing, including real-process
   kill -9 restarts).
 
 ## Layout (`src/copybot/`)
@@ -78,7 +78,7 @@ instances on the same wallet.
 - The owner's PC clock runs about 1.4–1.7 s ahead of the exchange (±0.15 s). It is corrected via the `Clock` offset.
 - 47,266 leaderboard rows → about 2,168 pass the pre-screen. Most top candidates then fail the first-page screen:
   `too_fast`, `high_frequency`, or `round_trips<150` because they accumulate or hold a core position and almost never
-  go flat (verified on real wallets; it is not a bug). Because of this, `max_candidates` was raised from 60 to 400.
+  go flat (verified on real wallets; it is not a bug). Because of this, `max_candidates` was raised from 60 to 400, then to 2000 (owner request).
 
 ## Status and open questions
 - Built and tested; the live smoke runs against real Hyperliquid were fine. Telegram has not been tested against
@@ -91,7 +91,9 @@ instances on the same wallet.
   off-list (alt) trading is ignored, not held against it: a first live run with a "main-coin share ≥ 50%" gate
   rejected 41 of the first 120 candidates (many top wallets trade HYPE/alts with some BTC/ETH on the side). Quality is points out of 100 (`scoring.WEIGHTS`):
   edge 25, profit factor 15, consistency 15, trade count 15, win rate 10, max DD 10, current DD 5, concentration 5.
-  Eligibility floors (owner request 2026-10-05): win rate ≥ `min_win_rate` (60%) and score ≥ `min_score` (50).
+  Eligibility floors (owner request 2026-10-05): win rate ≥ `min_win_rate` (60%), score ≥ `min_score` (70) and profit
+  factor ≥ `min_profit_factor` (2.0). Each score stores its `rules`; changing a floor rescores at the next start.
+  `max_candidates` = 2000 (≈ all of the ~2,200 pre-screened; the first full pass takes 5–6 h, about 7 wallets/min).
   `scoring.SCREEN_VERSION` and `scoring.VERSION` are separate: a score-only change rescores the screened wallets
   from cached fills at startup (`Scorer.rescore_missing`) instead of re-screening 400 wallets.
   A review screens until `pool_size` (100) wallets are fully scored; `join_rank` = 7 so the top 7 get followed

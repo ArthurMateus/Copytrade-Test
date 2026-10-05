@@ -251,6 +251,7 @@ class Score:
     shrink: float = 0.0
     scored_ms: int = 0
     points: dict = field(default_factory=dict)   # component -> points; they add up to `score` (0-100)
+    rules: dict = field(default_factory=dict)    # the eligibility floors it was scored under
     v: int = VERSION
 
     def to_dict(self) -> dict:
@@ -274,6 +275,12 @@ class ScoreParams:
     alt_max_share: float = 0.5
     min_win_rate: float = 0.0      # hard floor on the win rate
     min_score: float = 1.0         # hard floor on the 0-100 score
+    min_profit_factor: float = 1.0 # hard floor on the profit factor (above 1 is always required)
+
+    def rules(self) -> dict:
+        """The eligibility floors: a cached score made under other floors is redone."""
+        return {"min_win_rate": self.min_win_rate, "min_score": self.min_score,
+                "min_profit_factor": self.min_profit_factor}
 
 
 # component -> weight; the weights add up to 100
@@ -400,12 +407,14 @@ def full_score(address: str, fills: list[Fill], candles: dict[str, list[Candle]]
         (s.profit_factor > 1, "profit_factor<=1"),
         (s.copy_edge_bps > 0, "copy_edge<=0"),
         (s.win_rate >= p.min_win_rate, f"win_rate<{p.min_win_rate * 100:.0f}%"),
+        (s.profit_factor >= p.min_profit_factor, f"profit_factor<{p.min_profit_factor:g}"),
     ]
     s.points = points(s, p)
     if sum(s.points.values()) < p.min_score:
         checks.append((False, f"score<{p.min_score:g}"))
     s.reasons = [why for ok, why in checks if not ok]
     s.eligible = not s.reasons
+    s.rules = p.rules()
     # an eligible wallet scores 1-100; a rejected one scores 0 and is never ranked
     s.score = round(min(100.0, max(1.0, sum(s.points.values()))), 2) if s.eligible else 0.0
     return s
