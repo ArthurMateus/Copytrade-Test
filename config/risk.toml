@@ -23,3 +23,7 @@ leader_pause_dd_pct = 10.0    # pause a leader when its copy drawdown exceeds th
 leader_pause_losses = 5       # ... or after this many consecutive losing copies  [1, 5]
 consensus_risk_pct = 0.5      # a 2nd followed leader opens the SAME side on a coin we hold: add this much extra risk,
                               # still capped by max_symbol_risk_pct  [0, 1]
+side_wallets_risk_pct = [2.0, 5.0, 10.0, 20.0]
+                              # extra paper wallets ($start_equity each) copying the SAME moves at these risk
+                              # levels; every limit above scales with the level (loss stops capped at 100%).
+                              # Compared by /wallets. [] = none. Up to 8 levels, each in (0, 50]

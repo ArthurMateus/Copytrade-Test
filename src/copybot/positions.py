@@ -37,10 +37,11 @@ class PositionManager:
     def __init__(self, cfg: Config, st: State, ledger: Ledger, gate: RiskGate, broker: PaperBroker,
                  health: Callable[[], Health], mids: dict[str, float], assets: dict[str, Asset],
                  notify: Callable[..., None] = lambda *a, **k: None,
-                 score_of: Callable[[str], float] = lambda leader: 0.0):
+                 score_of: Callable[[str], float] = lambda leader: 0.0, pause_leaders: bool = True):
         self.cfg, self.st, self.ledger, self.gate, self.broker = cfg, st, ledger, gate, broker
         self.health, self.mids, self.assets, self.notify = health, mids, assets, notify
         self.score_of = score_of   # wallet score 0-100 of a leader (0 when unknown)
+        self.pause_leaders = pause_leaders   # False for side wallets: they follow the main wallet's pauses
 
     # ---- ledger helpers -----------------------------------------------------------------------
     def _rec(self, ev: dict) -> dict:
@@ -209,6 +210,8 @@ class PositionManager:
         d = self.gate.check(Order("open", m.coin, side, want, px, leader=m.leader, fill_time_ms=m.time_ms),
                             self.st, h, self.mids, asset)
         if not d:
+            if not d.reason.startswith(("leader_", "not_main_coin", "below_min_notional")):
+                self._rec({"ev": "count", "name": "opens_refused"})   # a copy our limits did not allow
             return self._skip(d.reason, coin=m.coin, leader=m.leader, side=side)
         iid = uuid.uuid4().hex[:12]
         self._rec({"ev": "intent", "intent": iid, "action": "open", "coin": m.coin})
@@ -345,7 +348,7 @@ class PositionManager:
 
     def _check_leader(self, leader: str) -> None:
         st = self.st.leader_stats.get(leader)
-        if st is None or leader in self.st.paused_leaders or leader not in self.st.followed:
+        if not self.pause_leaders or st is None or leader in self.st.paused_leaders or leader not in self.st.followed:
             return
         r = self.cfg.risk
         alloc = self.st.equity(self.mids) / max(1, r.max_leaders)

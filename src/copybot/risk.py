@@ -157,6 +157,8 @@ class RiskGate:
             m = st.marks.get(kind)
             if m is None:
                 return Decision(False, f"no_{kind}_mark")
+            if m["equity"] <= 0 or eq <= 0:
+                return Decision(False, "wallet_empty")
             if (m["equity"] - eq) / m["equity"] * 100 >= lim:
                 return Decision(False, f"{kind}_loss_limit")
         if self._rate_count() >= r.max_orders_per_min:

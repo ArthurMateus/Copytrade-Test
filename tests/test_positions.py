@@ -345,3 +345,70 @@ def test_refused_add_is_skipped_without_error(rig):
     rig.leader_trades(LEADER, rig.fill(LEADER, "ETH", 5, "B"))     # refused add: logged and notified, no crash
     assert rig.st.positions["ETH"].size == s
     assert any(k == "skip" and kw.get("action") == "add" for k, kw in rig.events)
+
+
+# ---- side wallets (same moves, another risk level) --------------------------------------------------------
+def side_rig(rig, risk):
+    from copybot.wallets import SideWallet
+    w = SideWallet(rig.cfg, risk, rig.path.parent, rig.broker, rig.health, rig.mids, rig.assets,
+                   alts_ok=lambda a: False, score_of=lambda a: 0.0)
+    w.rec({"ev": "genesis", "equity0": 300, "btc_px0": 100_000})
+    for kind, key in (("day", "d"), ("week", "w")):
+        w.rec({"ev": "mark", "kind": kind, "key": key, "equity": 300})
+    w.sync_leaders(rig.st)
+    return w
+
+
+def trade_both(rig, w, leader, *fills):
+    rig.fake.push_fills(leader, list(fills))
+    for m in rig.det.on_fills(leader, hl.parse_fills(list(fills))):
+        rig.pm.on_move(m)
+        w.pm.on_move(m)
+
+
+def test_side_wallet_copies_the_same_move_at_its_own_risk(rig):
+    w = side_rig(rig, 5.0)
+    assert set(w.st.followed) == set(rig.st.followed)
+    trade_both(rig, w, LEADER, rig.fill(LEADER, "ETH", 100, "B"))
+    main, side = rig.st.positions["ETH"], w.st.positions["ETH"]
+    assert main.risk_usd() == pytest.approx(3.0, rel=0.03) and side.risk_usd() == pytest.approx(15.0, rel=0.03)
+    assert side.stop_px == pytest.approx(side.entry_px * 0.97)
+    trade_both(rig, w, LEADER, rig.fill(LEADER, "ETH", 50, "A"))            # the leader halves: both halve
+    assert w.st.positions["ETH"].size == pytest.approx(side.size, rel=0.02)
+    assert rig.st.positions["ETH"].size == pytest.approx(main.size, rel=0.02)
+    rig.price("ETH", side.stop_px * 0.99)
+    w.pm.check_stops()
+    rig.pm.check_stops()
+    assert not rig.st.positions and not w.st.positions
+    assert w.st.closed[-1]["pnl"] == pytest.approx(5 * rig.st.closed[-1]["pnl"], rel=0.15)
+    st2 = Ledger(rig.path.parent / "wallets" / "risk_5pct" / "ledger.jsonl").replay()   # restart-safe
+    assert st2.closed == w.st.closed and not st2.uncertain
+    w.ledger.close()
+
+
+def test_side_wallet_follows_main_pauses_and_drops(rig):
+    w = side_rig(rig, 20.0)
+    rig.rec({"ev": "leader_pause", "leader": LEADER, "reason": "5 consecutive losses"})
+    rig.rec({"ev": "unfollow", "leader": OTHER, "reason": "x"})
+    w.sync_leaders(rig.st)
+    assert LEADER in w.st.paused_leaders and OTHER not in w.st.followed
+    trade_both(rig, w, LEADER, rig.fill(LEADER, "BTC", 1, "B"))
+    assert not w.st.positions and not rig.st.positions
+    w.ledger.close()
+
+
+def test_side_wallets_never_pause_leaders_on_their_own(rig):
+    w = side_rig(rig, 10.0)
+    for i in range(5):
+        trade_both(rig, w, LEADER, rig.fill(LEADER, "SOL", 10, "B"))
+        rig.price("SOL", rig.mids["SOL"] * 0.995)
+        w.pm.close("SOL", "test")              # side-wallet-only losses
+        trade_both(rig, w, LEADER, rig.fill(LEADER, "SOL", 10, "A"))
+    assert w.st.leader_stats[LEADER].consec_losses >= 5 and LEADER not in w.st.paused_leaders
+    w.ledger.close()
+
+
+def test_empty_wallet_takes_no_entries(rig):
+    rig.rec({"ev": "mark", "kind": "day", "key": "d2", "equity": 0.0})
+    rig.leader_trades(LEADER, rig.fill(LEADER, "BTC", 1, "B"))
+    assert "BTC" not in rig.st.positions

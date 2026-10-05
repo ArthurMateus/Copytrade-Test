@@ -1,3 +1,4 @@
+from pathlib import Path
 import logging
 
 import pytest
@@ -48,3 +49,27 @@ def test_log_redacts_secrets(tmp_path, capsys):
     out = capsys.readouterr().out + (tmp_path / "copybot.log").read_text(encoding="utf-8")
     assert "s3cr3tPIN" not in out and "ABCDEFGHIJ" not in out
     assert "event=x" in out and "***" in out
+
+
+def test_scaled_side_wallet_config():
+    from copybot import config as c
+    base = c.load("config", env={})
+    s = c.scaled(base, 5.0)
+    assert s.risk.risk_per_trade_pct == 5.0 and s.risk.max_symbol_risk_pct == 7.5 and s.risk.max_total_risk_pct == 50
+    assert s.risk.daily_loss_pct == 25 and s.risk.weekly_loss_pct == 50 and s.risk.consensus_risk_pct == 2.5
+    big = c.scaled(base, 20.0)
+    assert big.risk.daily_loss_pct == 100 and big.risk.weekly_loss_pct == 100
+    assert big.risk.stop_pct == base.risk.stop_pct and big.risk.max_leverage == base.risk.max_leverage
+    assert base.risk.risk_per_trade_pct == 1.0 and base.risk.side_wallets_risk_pct == [2.0, 5.0, 10.0, 20.0]
+
+
+@pytest.mark.parametrize("bad", ["[0.0]", "[60.0]", "[2.0, 2.0]", "[1.0]", '["x"]'])
+def test_side_wallet_levels_are_validated(tmp_path, bad):
+    import shutil
+    for f in Path("config").glob("*.toml"):
+        shutil.copy(f, tmp_path / f.name)
+    p = tmp_path / "risk.toml"
+    p.write_text(p.read_text(encoding="utf-8").replace("side_wallets_risk_pct = [2.0, 5.0, 10.0, 20.0]",
+                                                        f"side_wallets_risk_pct = {bad}"), encoding="utf-8")
+    with pytest.raises(config.ConfigError):
+        config.load(tmp_path, env={})

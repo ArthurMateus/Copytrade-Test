@@ -26,6 +26,7 @@ from copybot.positions import PositionManager
 from copybot.risk import Health, RiskGate
 from copybot.selection import Scorer, select
 from copybot.tg import HELP, TelegramUI
+from copybot.wallets import SideWallet, boot_repair
 
 
 def day_key(ms: float) -> str:
@@ -76,9 +77,14 @@ class Bot:
         self.feed = Feed(rt.ws_url, self.q)
         self.clock = Clock()
         self.gate = RiskGate(cfg, alts_ok=lambda a: bool(self.score_dict(a).get("diversified")))
-        self.broker = PaperBroker(cfg.broker, lambda c: self.info.book(c, rt.trading_timeout_s))
+        self.books: dict[str, tuple[float, object]] = {}   # coin -> (fetched at, book), shared with side wallets
+        self.broker = PaperBroker(cfg.broker, self.fresh_book)
         self.pm = PositionManager(cfg, self.st, self.ledger, self.gate, self.broker, self.health, self.mids,
                                   self.assets, notify=self.on_notify, score_of=self.score_of)
+        side_broker = PaperBroker(cfg.broker, self.recent_book)
+        self.sides = [SideWallet(cfg, r, self.data, side_broker, self.health, self.mids, self.assets,
+                                 alts_ok=self.gate.alts_ok, score_of=self.score_of)
+                      for r in cfg.risk.side_wallets_risk_pct]
         self.det = Detector()
         self.ui = TelegramUI(cfg, lambda c: self.q.put(("cmd", c)), lambda k, m: self.q.put(("card", k, m)))
         self.scorer = Scorer(cfg, self.info, self.q, self.data / "cache")
@@ -105,6 +111,30 @@ class Bot:
         self.st.apply(ev)
         return ev
 
+    # ---- books: the main wallet always reads a fresh one; side wallets reuse it for a second -------------
+    def fresh_book(self, coin: str):
+        b = self.info.book(coin, self.cfg.runtime.trading_timeout_s)
+        self.books[coin] = (time.time(), b)
+        return b
+
+    def recent_book(self, coin: str):
+        hit = self.books.get(coin)
+        if hit and time.time() - hit[0] < 1.0:
+            return hit[1]
+        return self.fresh_book(coin)
+
+    def on_sides(self, what: str, fn) -> None:
+        """Run fn(side) for every side wallet; a failure in one is logged and never reaches the main wallet."""
+        for w in self.sides:
+            try:
+                fn(w)
+            except Exception as e:
+                log.exception("side_wallet_error", wallet=w.name, what=what)
+                self.alert(f"side wallet {w.name}: {what} failed ({type(e).__name__})", key=f"side:{w.name}:{what}")
+
+    def sync_sides(self) -> None:
+        self.on_sides("sync", lambda w: w.sync_leaders(self.st))
+
     def alert(self, text: str, key: str | None = None, every_s: float = 600) -> None:
         k = key or text
         if time.time() - self.last_alert.get(k, 0) < every_s:
@@ -129,22 +159,27 @@ class Bot:
             self.assets.update(self.info.meta(timeout=10))
         except Exception as e:
             log.warn("boot_meta_failed", err=str(e))
-        problems = list(self.st.uncertain)
-        for iid in list(self.st.open_intents):
-            self.rec({"ev": "intent_abort", "intent": iid})
-        for p in list(self.st.positions.values()):  # never a stop-less position
-            bad = p.stop_px <= 0 or (p.side > 0 and p.stop_px >= p.entry_px) or (p.side < 0 and p.stop_px <= p.entry_px)
-            if bad:
-                stop = self.gate.stop_for(p.side, p.entry_px)
-                self.rec({"ev": "stop_set", "coin": p.coin, "pos_id": p.pos_id, "stop_px": stop})
-                log.error("stop_repaired", coin=p.coin, stop=stop)
+        problems = boot_repair(self.st, self.rec, self.gate, "main")
         if problems:
-            self.st.uncertain = problems
-            self.rec({"ev": "pause", "reason": "uncertain restart"})
             self.ui.send("⚠️ <b>Restart with uncertainty</b> · ⏸️ entries paused, exits and stops keep running\n"
                          + "\n".join(f"• {tgfmt.esc(x)}" for x in problems[:10])
                          + "\nCheck, then /resume.")
-            log.error("uncertain_restart", problems=" | ".join(problems))
+
+        def boot_side(w):
+            if not w.st.genesis_ms:
+                w.rec({"ev": "genesis", "equity0": w.cfg.risk.start_equity, "btc_px0": self.st.btc_px0})
+            w.rec({"ev": "boot", "positions": len(w.st.positions), "followed": len(w.st.followed)})
+            side_problems = boot_repair(w.st, w.rec, w.gate, w.name)
+            if side_problems:
+                self.ui.send(f"⚠️ <b>Side wallet {w.risk_pct:g}% restarted with uncertainty</b> · ⏸️ its entries "
+                             f"paused\n" + "\n".join(f"• {tgfmt.esc(x)}" for x in side_problems[:5])
+                             + "\n/resume resumes every wallet.")
+            if self.st.entries_paused and not w.st.entries_paused:
+                w.rec({"ev": "pause", "reason": self.st.pause_reason or "main wallet paused"})
+            log.info("side_wallet", wallet=w.name, equity=round(w.st.equity(), 2), positions=len(w.st.positions),
+                     trades=len(w.st.closed), paused=w.st.entries_paused)
+        self.on_sides("boot", boot_side)
+        self.sync_sides()
         for key, mid in self.st.cards.items():
             self.ui.restore_card(key, mid)
         log.info("state", equity=round(self.st.equity(), 2), positions=len(self.st.positions),
@@ -168,8 +203,9 @@ class Bot:
         return set(self.st.followed) | self.position_leaders()
 
     def position_leaders(self) -> set[str]:
-        """Owners and backers of our open positions: their fills and positions must keep being watched."""
-        return {a for p in self.st.positions.values() for a in (p.leader, *p.backers)}
+        """Owners and backers of open positions in any wallet: their fills and positions must keep being watched."""
+        return {a for st in (self.st, *(w.st for w in self.sides)) for p in st.positions.values()
+                for a in (p.leader, *p.backers)}
 
     def score_dict(self, leader: str) -> dict:
         return self.scores.get(leader) or self.scorer.scores.get(leader) or {}
@@ -243,6 +279,7 @@ class Bot:
         self.mids.update(mids)
         # 1. exits first: stops on the latest prices
         self.pm.check_stops()
+        self.on_sides("stops", lambda w: w.pm.check_stops())
         # 2. events from workers
         deadline = time.time() + 0.2
         while time.time() < deadline:
@@ -260,6 +297,12 @@ class Bot:
                 if kind == "day" and self.st.marks.get("day"):
                     self.ui.send(tgfmt.progress_text(self.st, self.mids, self.mids.get("BTC"), now))
                 self.rec({"ev": "mark", "kind": kind, "key": key, "equity": eq})
+
+        def marks(w):
+            for kind, key in (("day", day_key(now)), ("week", week_key(now))):
+                if w.st.marks.get(kind, {}).get("key") != key:
+                    w.rec({"ev": "mark", "kind": kind, "key": key, "equity": w.st.equity(self.mids)})
+        self.on_sides("marks", marks)
         self.leaders_with_positions = self.position_leaders()
         self.feed.set_users(self.wanted_users())
 
@@ -270,9 +313,11 @@ class Bot:
             if ev.user not in self.wanted_users():
                 return
             for m in self.det.on_fills(ev.user, ev.fills, snapshot=ev.snapshot):
-                self.pm.on_move(m)
+                self.pm.on_move(m)                                   # the main wallet always first
+                self.on_sides("move", lambda w: w.pm.on_move(m))
         elif kind == "leader_pos":
             self.pm.reconcile(item[1], item[2])
+            self.on_sides("reconcile", lambda w: w.pm.reconcile(item[1], item[2]))
         elif kind == "meta":
             assets, at = item[1], item[2]
             self.assets.update(assets)
@@ -280,6 +325,13 @@ class Bot:
             if self.st.marks.get("funding", {}).get("key") != hk and at % 3_600_000 < 600_000:
                 self.pm.apply_funding(self.assets, hk)
                 self.rec({"ev": "mark", "kind": "funding", "key": hk, "equity": self.st.equity(self.mids)})
+
+            def funding(w):
+                if w.st.marks.get("funding", {}).get("key") != hk:
+                    w.pm.apply_funding(self.assets, hk)
+                    w.rec({"ev": "mark", "kind": "funding", "key": hk, "equity": w.st.equity(self.mids)})
+            if at % 3_600_000 < 600_000:
+                self.on_sides("funding", funding)
         elif kind == "ws_up":
             self.reconcile_now.set()   # anything missed while disconnected is caught by reconcile
             if item[1] > 1:
@@ -334,6 +386,7 @@ class Bot:
                 ("Max DD", f"{s.get('max_dd', 0) * 100:.0f}%"),
             ]))
         self.rec({"ev": "sel", "state": plan.state})
+        self.sync_sides()
         self.scorer.focus = set(self.st.followed)
         if not ranking:
             self.alert("no eligible wallet this cycle: following nobody new", key="no_eligible", every_s=6 * 3600)
@@ -368,6 +421,7 @@ class Bot:
                          f" (score {kw['score']:.0f}) over <code>{tgfmt.short(kw['holder'])}</code>"
                          f" (score {kw['holder_score']:.0f})")
         elif kind == "leader_paused":
+            self.sync_sides()
             self.ui.send(f"⏸️ <b>Leader paused</b> <code>{tgfmt.short(kw['leader'])}</code> · "
                          f"{tgfmt.esc(kw['reason'])}\nNo new copies from it; open copies keep mirroring exits.")
 
@@ -398,6 +452,9 @@ class Bot:
             return tgfmt.trades_card(self.st, self.mids, now)
         if key == "traders":
             return tgfmt.traders_card(self.st, self.mids, self.ranks, self.scores, now)
+        if key == "wallets":
+            return tgfmt.wallets_card([(self.cfg.risk.risk_per_trade_pct, self.st, True)]
+                                      + [(w.risk_pct, w.st, False) for w in self.sides], self.mids, now)
         return tgfmt.leaders_card(self.st, self.ranks, now, self.scores)
 
     # ---- commands ------------------------------------------------------------------------------------
@@ -405,7 +462,7 @@ class Bot:
         now = now_ms()
         if c.name == "/help":
             self.ui.send(HELP)
-        elif c.name in ("/status", "/leaders", "/trades", "/traders"):
+        elif c.name in ("/status", "/leaders", "/trades", "/traders", "/wallets"):
             key = c.name[1:]
             self.live_cards.add(key)
             self.last_body.pop(key, None)
@@ -416,12 +473,19 @@ class Bot:
             self.ui.send(tgfmt.progress_text(self.st, self.mids, self.mids.get("BTC"), now))
         elif c.name == "/pause":
             self.rec({"ev": "pause", "reason": "/pause"})
+            self.on_sides("pause", lambda w: w.rec({"ev": "pause", "reason": "/pause"}))
             self.ui.send("⏸️ <b>Entries paused.</b> Exits and stops keep running. /resume to continue.")
         elif c.name == "/resume":
             if self.st.uncertain:
                 self.rec({"ev": "ack", "items": list(self.st.uncertain)})
             self.rec({"ev": "resume"})
-            self.ui.send("▶️ <b>Entries resumed.</b>")
+
+            def resume(w):
+                if w.st.uncertain:
+                    w.rec({"ev": "ack", "items": list(w.st.uncertain)})
+                w.rec({"ev": "resume"})
+            self.on_sides("resume", resume)
+            self.ui.send("▶️ <b>Entries resumed</b> (all wallets).")
         elif c.name == "/flatten":
             if not self.ui.check_pin(c.arg):
                 log.warn("flatten_bad_pin")
@@ -430,7 +494,13 @@ class Bot:
             n = len(self.st.positions)
             self.rec({"ev": "pause", "reason": "/flatten"})
             self.pm.flatten("flatten")
-            self.ui.send(f"🛑 <b>Flattened</b> {n} position(s). ⏸️ Entries paused · /resume to continue.")
+
+            def flatten(w):
+                w.rec({"ev": "pause", "reason": "/flatten"})
+                w.pm.flatten("flatten")
+            self.on_sides("flatten", flatten)
+            self.ui.send(f"🛑 <b>Flattened</b> {n} position(s) (and every side wallet). ⏸️ Entries paused · "
+                         f"/resume to continue.")
 
     def heartbeat(self) -> None:
         h = self.health()
@@ -453,6 +523,8 @@ class Bot:
         self.ui.stop.set()
         self.scorer.stop.set()
         self.ledger.close()
+        for w in self.sides:
+            w.ledger.close()
 
 
 def main(argv: list[str] | None = None) -> None:

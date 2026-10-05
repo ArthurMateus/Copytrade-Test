@@ -128,6 +128,14 @@ def test_full_bot_in_process(env):
                                     for m in tg.sent))
         tg.say("/traders")
         assert wait_for(lambda: any("👥 <b>Traders</b>" in m["text"] for m in tg.sent))
+        # side wallets copied the same open at their own risk
+        assert [w.risk_pct for w in bot.sides] == [2.0, 5.0, 10.0, 20.0]
+        assert all("ETH" in w.st.positions for w in bot.sides[:2])
+        r5 = next(w for w in bot.sides if w.risk_pct == 5.0).st.positions["ETH"]
+        assert r5.risk_usd() == pytest.approx(5 * bot.st.positions["ETH"].risk_usd(), rel=0.05)
+        tg.say("/wallets")
+        assert wait_for(lambda: any("💰 <b>Wallets</b>" in m["text"] and "20% risk" in m["text"]
+                                    and "1% risk (main)" in m["text"] for m in tg.sent))
         tg.say("/flatten 0000")
         assert wait_for(lambda: any("Wrong or missing PIN" in m["text"] for m in tg.sent))
         assert "ETH" in bot.st.positions
@@ -240,12 +248,13 @@ def test_random_kills_never_lose_a_position_or_its_stop(env):
             proc.kill()
             proc.wait()
             hl.drop_ws()
-        st = Ledger(data / "ledger.jsonl").replay()
-        survived += len(st.positions)
-        for p in st.positions.values():
-            assert p.stop_px > 0 and p.stop_px < p.entry_px     # every surviving long has its stop
-        for u in st.uncertain:
-            assert "truncated" in u or "no recorded result" in u, u
+        for path in [data / "ledger.jsonl", *sorted((data / "wallets").glob("*/ledger.jsonl"))]:
+            st = Ledger(path).replay()                          # the main wallet and every side wallet
+            survived += len(st.positions) if path.parent == data else 0
+            for p in st.positions.values():
+                assert p.stop_px > 0 and p.stop_px < p.entry_px     # every surviving long has its stop
+            for u in st.uncertain:
+                assert "truncated" in u or "no recorded result" in u, u
     assert survived >= 1    # the kills really happened with open positions
     # final run: the leader closes everything; every copy we hold must be closed, none opened twice
     n += 1
@@ -255,12 +264,15 @@ def test_random_kills_never_lose_a_position_or_its_stop(env):
         time.sleep(1.0)
         for coin, szi in list(hl.positions.get(LEADER, {}).items()):
             hl.push_fills(LEADER, [make_fill(coin, hl.mids[coin], abs(szi), "A", szi)])
-        assert wait_for(lambda: not Ledger(data / "ledger.jsonl").replay().positions, timeout=20)
-        evs = ledger_events(data)
-        ids = [e["pos"]["pos_id"] for e in evs if e["ev"] == "open"]
-        assert len(ids) == len(set(ids))
-        coins_open = [e["pos"]["coin"] for e in evs if e["ev"] == "open"]
-        assert len(coins_open) == len(set(coins_open))   # each coin was opened at most once
+        ledgers = [data, *sorted(p for p in (data / "wallets").iterdir())]
+        assert len(ledgers) == 5
+        assert wait_for(lambda: not any(Ledger(d / "ledger.jsonl").replay().positions for d in ledgers), timeout=20)
+        for d in ledgers:                                  # in EVERY wallet: nothing opened twice, nothing left
+            evs = ledger_events(d)
+            ids = [e["pos"]["pos_id"] for e in evs if e["ev"] == "open"]
+            assert len(ids) == len(set(ids))
+            coins_open = [e["pos"]["coin"] for e in evs if e["ev"] == "open"]
+            assert len(coins_open) == len(set(coins_open)), d   # each coin was opened at most once
     finally:
         proc.kill()
         proc.wait()

@@ -289,3 +289,35 @@ def traders_card(st: State, mids: dict, ranks: dict[str, int], scores: dict | No
     head = (f"👥 <b>Traders</b> · {len(st.followed)} followed · {_pnl_dot(grand)} {fusd(grand)} "
             f"({fpct(grand / st.equity0 * 100)}) from copying")
     return "\n".join([head, *blocks, f"<i>upd {hhmmss(now_ms)}</i>"])
+
+
+def wallets_card(wallets: list, mids: dict, now_ms: float) -> str:
+    """/wallets: the same copies at different risk levels, best result first.
+    `wallets` = [(risk_pct, State, is_main)]."""
+    from copybot.wallets import max_drop_pct
+    rows = []
+    for risk, st, main in wallets:
+        eq = st.equity(mids)
+        rows.append((eq - st.equity0, risk, st, main, eq))
+    rows.sort(key=lambda x: (-x[0], x[1]))
+    medals = ["🥇", "🥈", "🥉"]
+    out = ["💰 <b>Wallets</b> · same traders, different risk per trade"]
+    for i, (pnl, risk, st, main, eq) in enumerate(rows):
+        n = len(st.closed)
+        wins = sum(1 for t in st.closed if t["pnl"] > 0)
+        live = sum(p.upnl(mids[p.coin]) for p in st.positions.values() if mids.get(p.coin))
+        medal = medals[i] if i < 3 and pnl != 0 else "▫️"
+        name = f"{risk:g}% risk" + (" (main)" if main else "")
+        state = " ⏸️" if st.entries_paused or st.uncertain else ""
+        body = [
+            ("Wallet", f"{fusd(eq, sign=False)}  {_pnl_dot(pnl)} {fpct(pnl / st.equity0 * 100)}"),
+            ("Trades", f"{n} · {wins}W/{n - wins}L" + (f" ({wins / n * 100:.0f}%)" if n else "")),
+            ("Open", f"{len(st.positions)} pos · {fusd(live)}"),
+            ("Max drop", f"−{max_drop_pct(st, mids):.1f}%"),
+        ]
+        refused = st.counters.get("opens_refused", 0) + st.counters.get("skipped_min_notional", 0)
+        if refused:
+            body.append(("Not taken", f"{refused} (limits)"))
+        out.append(f"{medal} <b>{esc(name)}</b>{state}\n" + pre(body))
+    out.append(f"<i>upd {hhmmss(now_ms)}</i>")
+    return "\n".join(out)

@@ -23,7 +23,7 @@ that are not listed there unless the owner asks. The README covers run instructi
 - Tests fake only the network (`tests/fakes.py`: loopback HL REST + WS + Telegram). Never mock our own code.
   Parsers are tested against real recorded responses in `tests/fixtures` (re-record with
   `tools/record_samples.py`).
-- Run `uv run pytest` after every change (about 1.5 minutes, 165 tests at the time of writing, including real-process
+- Run `uv run pytest` after every change (about 1.5 minutes, 175 tests at the time of writing, including real-process
   kill -9 restarts).
 
 ## Layout (`src/copybot/`)
@@ -42,6 +42,7 @@ that are not listed there unless the owner asks. The README covers run instructi
 | `feed.py` | Websocket (allMids + userFills, max 15 users) and the exchange `Clock` offset estimate |
 | `tg.py`, `tgfmt.py` | Telegram: owner-only commands, outbox; cards edited in place, rate-limited; renderers. Live cards: /status, /leaders, /trades, /traders (`Bot.render_card`) |
 | `runner.py` | `Bot`: boot/repair, worker threads, trading loop, commands, selection application, heartbeat |
+| `wallets.py` | Side wallets: same moves at other risk levels (`risk.side_wallets_risk_pct`), own ledger in `data/wallets/<name>/`, limits scaled by `config.scaled`; `boot_repair` shared with the main wallet |
 
 Runtime state: `data/ledger.jsonl` (the source of truth), `data/cache/`, `data/bot.lock` (single instance) and
 `logs/copybot.log`. All of these are git-ignored. Moving the bot to another PC means copying `data/`. Never run two
@@ -68,6 +69,12 @@ instances on the same wallet.
 - Leaders are picked once `min_scored_to_start` (12) wallets are fully scored OR the first review has finished
   (`Scorer.ready`): real reviews of 400 candidates fully score only a handful, so waiting for 12 meant following nobody.
 - `/resume` writes an `ack` event that clears acknowledged restart uncertainties.
+- Side wallets (owner request 2026-10-05): 2/5/10/20% risk, $300 each, compared by `/wallets`. EVERY risk limit
+  scales with the level (per-symbol, total, consensus, daily/weekly loss stops capped at 100%); leverage, stop
+  distance and liquidation buffer do not. They are allowed above the CEILINGS on purpose (paper comparison only).
+  They follow the main wallet's followed/paused sets (`sync_leaders`), never pause leaders themselves, post no trade
+  cards, and get the main wallet's moves after it (books reused for 1 s). A side-wallet error is logged/alerted and
+  never reaches the main wallet. /pause, /resume and /flatten act on every wallet.
 - Lag = exchange-clock time of our paper fill minus the leader's fill time.
 
 ## Findings from the real API (2026-10-05)

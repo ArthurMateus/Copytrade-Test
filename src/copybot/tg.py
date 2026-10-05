@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from copybot import log
 from copybot.config import Config
 
-COMMANDS = ("/status", "/trades", "/traders", "/positions", "/leaders", "/progress", "/pause", "/resume", "/flatten",
+COMMANDS = ("/status", "/trades", "/traders", "/wallets", "/positions", "/leaders", "/progress", "/pause", "/resume", "/flatten",
             "/help")
 
 
@@ -261,6 +261,7 @@ HELP = ("🤖 <b>Copybot (paper)</b>\n"
         "/status – wallet, P&amp;L, health (live)\n"
         "/trades – open trades at live prices + P&amp;L vs the start (live)\n"
         "/traders – followed traders and what copying them earned (live)\n"
+        "/wallets – the same copies at 1/2/5/10/20% risk, compared (live)\n"
         "/positions – open positions (short list)\n"
         "/leaders – followed wallets (live)\n"
         "/progress – success metrics\n"

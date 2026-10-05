@@ -5,6 +5,7 @@ Secrets (Telegram token, chat id, PIN) come from environment variables ONLY.
 """
 from __future__ import annotations
 
+import copy
 import os
 import tomllib
 from dataclasses import asdict, dataclass, field, fields
@@ -39,6 +40,8 @@ class Risk:
     leader_pause_dd_pct: float = 10.0     # copy drawdown, % of the per-leader allocation (equity / max_leaders)
     leader_pause_losses: int = 5
     consensus_risk_pct: float = 0.5       # extra risk when a 2nd followed leader opens the same side (symbol cap still applies)
+    # extra paper wallets copying the same moves at these risk levels (every limit scaled, see `scaled`)
+    side_wallets_risk_pct: list = field(default_factory=lambda: [2.0, 5.0, 10.0, 20.0])
 
 
 @dataclass
@@ -196,11 +199,34 @@ def validate(cfg: Config) -> None:
             raise ConfigError(f"{sec}.{key}={v} outside allowed range [{lo}, {hi}]")
     if cfg.selection.drop_rank <= cfg.selection.join_rank:
         raise ConfigError("selection.drop_rank must be > join_rank")
+    sides = cfg.risk.side_wallets_risk_pct
+    if not all(isinstance(x, (int, float)) and not isinstance(x, bool) and 0 < x <= 50 for x in sides):
+        raise ConfigError("risk.side_wallets_risk_pct must be numbers in (0, 50]")
+    if len(set(sides)) != len(sides) or cfg.risk.risk_per_trade_pct in sides or len(sides) > 8:
+        raise ConfigError("risk.side_wallets_risk_pct: at most 8 distinct levels, none equal to risk_per_trade_pct")
     coins = cfg.selection.main_coins
     if not coins or not all(isinstance(c, str) and is_core_perp(c) for c in coins):
         raise ConfigError("selection.main_coins must be a non-empty list of perp names like \"BTC\"")
     if cfg.risk.stop_pct / 100 * cfg.risk.liq_buffer_mult >= 0.9:
         raise ConfigError("risk.stop_pct x liq_buffer_mult leaves no room before liquidation")
+
+
+def scaled(cfg: Config, risk_pct: float) -> Config:
+    """A copy of `cfg` for a side wallet at `risk_pct` per trade: every risk limit scales by the same factor
+    (owner decision 2026-10-05: per-symbol, total and consensus risk, and the daily/weekly loss stops, capped
+    at 100%). Leverage, the stop distance and the liquidation buffer do not change. Side wallets are allowed
+    above the main wallet's CEILINGS on purpose; they are paper comparisons."""
+    c = copy.deepcopy(cfg)
+    f = risk_pct / cfg.risk.risk_per_trade_pct
+    r = c.risk
+    r.risk_per_trade_pct = risk_pct
+    r.max_symbol_risk_pct *= f
+    r.max_total_risk_pct *= f
+    r.consensus_risk_pct *= f
+    r.daily_loss_pct = min(100.0, r.daily_loss_pct * f)
+    r.weekly_loss_pct = min(100.0, r.weekly_loss_pct * f)
+    r.side_wallets_risk_pct = []
+    return c
 
 
 def public_dict(cfg: Config) -> dict:
