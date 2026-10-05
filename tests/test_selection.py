@@ -215,3 +215,27 @@ def test_scorer_scores_main_coins_only_unless_diversified(scorer_env):
     sc2 = Scorer(cfg, info, queue.Queue(), tmp / "cache2")
     sc2.screen_and_score(good[0], 200_000)
     assert sc2.scores[good[0]]["diversified"] and sc2.scores[good[0]]["trades"] > d["trades"]
+
+
+def test_a_finished_review_publishes_a_ranking_even_with_few_scored(scorer_env):
+    fake, cfg, info, tmp, good, bad = scorer_env
+    cfg.selection.min_scored_to_start = 50          # more than this review can ever score
+    out = queue.Queue()
+    sc = Scorer(cfg, info, out, tmp / "cache")
+    calls = {"n": 0}
+    real = sc.screen_and_score
+
+    def stop_after_3(a, av):
+        calls["n"] += 1
+        real(a, av)
+        if calls["n"] == 3:
+            sc.stop.set()
+    sc.screen_and_score = stop_after_3
+    sc.review(weekly=True)                           # interrupted: not finished, not ready
+    sc.maybe_cycle()
+    assert not sc.ready() and all(m[0] != "ranking" for m in list(out.queue))
+    sc2 = Scorer(cfg, info, out, tmp / "cache")
+    sc2.review(weekly=True)                          # finished with only ~13 scored
+    sc2.maybe_cycle()
+    rankings = [m for m in list(out.queue) if m[0] == "ranking"]
+    assert sc2.ready() and rankings and rankings[-1][2] < 50 and rankings[-1][1]

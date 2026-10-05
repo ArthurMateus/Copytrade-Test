@@ -311,8 +311,6 @@ class Bot:
         self.ranks = {a: i + 1 for i, a in enumerate(ranking)}
         self.scores = scores
         now = now_ms()
-        if n_scored < self.cfg.selection.min_scored_to_start:
-            return
         if now - int(self.st.sel.get("at", 0)) < self.cfg.selection.rescore_minutes * 60_000 * 0.9:
             return   # a ranking re-published right after a restart is not a new cycle
         plan = select(self.st.sel, ranking, self.st.followed, set(self.st.paused_leaders), self.st.dropped, now, self.cfg)

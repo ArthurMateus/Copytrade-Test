@@ -95,7 +95,8 @@ def _fill_from(d: dict) -> Fill:
 # ---- background scorer -------------------------------------------------------------------------------
 class Scorer:
     """Runs on its own thread. Pushes ("ranking", ranking, n_scored, scores) to `out` once at least
-    `min_scored_to_start` wallets are fully scored, then every `rescore_minutes`. Pushes ("alert", text)
+    `min_scored_to_start` wallets are fully scored OR a first review has finished (whatever it found), then
+    every `rescore_minutes`. Pushes ("alert", text)
     for problems. All downloads use the BULK budget class (exits can never be starved)."""
 
     def __init__(self, cfg: Config, info: hl.Info, out: queue.Queue, cache_dir: str | os.PathLike,
@@ -243,9 +244,14 @@ class Scorer:
     def ranking(self) -> list[str]:
         return scoring.ranking([scoring.Score(**d) for d in self.scores.values()])
 
+    def ready(self) -> bool:
+        """Enough to pick leaders: `min_scored_to_start` wallets scored, or a full review done. Most real
+        wallets are rejected before the full score, so a review can end with fewer than that."""
+        return len(self.scores) >= self.cfg.selection.min_scored_to_start or self.meta.get("last_daily", 0) > 0
+
     def maybe_cycle(self, force: bool = False) -> None:
         now = self.now()
-        if len(self.scores) < self.cfg.selection.min_scored_to_start:
+        if not self.ready():
             return
         if not force and now - self.meta["last_cycle"] < self.cfg.selection.rescore_minutes * 60_000:
             return
