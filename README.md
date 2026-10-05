@@ -42,7 +42,9 @@ Run the tests: `uv run pytest` (about 1 minute; this includes real-process kill 
 | Telegram commands and in-place edited cards | `tg.py`, `tgfmt.py` |
 | Threads and the trading loop | `runner.py` |
 
-Telegram commands: `/status` and `/leaders` (live cards with rank and score, edited in place), `/positions`, `/progress`, `/pause`,
+Telegram commands: `/status`, `/trades` (open trades at live prices and P&L against the $300 start), `/traders`
+(followed traders: score, copied trades, wins/losses, money made) and `/leaders` (live cards, edited in place),
+`/positions`, `/progress`, `/pause`,
 `/resume`, and `/flatten <PIN>`. Each open trade gets one message, which is edited until it becomes the final
 ✅/❌ summary.
 

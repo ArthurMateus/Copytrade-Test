@@ -123,6 +123,11 @@ def test_full_bot_in_process(env):
         # commands
         tg.say("/status")
         assert wait_for(lambda: any("📊 <b>Status</b>" in m["text"] for m in tg.sent))
+        tg.say("/trades")
+        assert wait_for(lambda: any("💼 <b>Trades</b> · 1 open" in m["text"] and "<b>ETH</b>" in m["text"]
+                                    for m in tg.sent))
+        tg.say("/traders")
+        assert wait_for(lambda: any("👥 <b>Traders</b>" in m["text"] for m in tg.sent))
         tg.say("/flatten 0000")
         assert wait_for(lambda: any("Wrong or missing PIN" in m["text"] for m in tg.sent))
         assert "ETH" in bot.st.positions

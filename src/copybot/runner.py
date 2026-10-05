@@ -385,28 +385,31 @@ class Bot:
             self.card_for(p)
         h = self.health()
         for key in list(self.live_cards):
-            if key == "status":
-                body = tgfmt.status_card(self.st, self.mids, h, 0, self.mids.get("BTC"))
-                full = lambda: tgfmt.status_card(self.st, self.mids, h, now_ms(), self.mids.get("BTC"))
-            else:
-                body = tgfmt.leaders_card(self.st, self.ranks, 0, self.scores)
-                full = lambda: tgfmt.leaders_card(self.st, self.ranks, now_ms(), self.scores)
+            # rendered at time 0 to see whether anything but the clock changed (no edit for a time stamp alone)
+            body = self.render_card(key, h, 0)
             if self.last_body.get(key) != body:
                 self.last_body[key] = body
-                self.ui.set_card(key, full())
+                self.ui.set_card(key, self.render_card(key, h, now_ms()))
+
+    def render_card(self, key: str, h, now: float) -> str:
+        if key == "status":
+            return tgfmt.status_card(self.st, self.mids, h, now, self.mids.get("BTC"))
+        if key == "trades":
+            return tgfmt.trades_card(self.st, self.mids, now)
+        if key == "traders":
+            return tgfmt.traders_card(self.st, self.mids, self.ranks, self.scores, now)
+        return tgfmt.leaders_card(self.st, self.ranks, now, self.scores)
 
     # ---- commands ------------------------------------------------------------------------------------
     def command(self, c) -> None:
         now = now_ms()
         if c.name == "/help":
             self.ui.send(HELP)
-        elif c.name in ("/status", "/leaders"):
+        elif c.name in ("/status", "/leaders", "/trades", "/traders"):
             key = c.name[1:]
             self.live_cards.add(key)
             self.last_body.pop(key, None)
-            text = (tgfmt.status_card(self.st, self.mids, self.health(), now, self.mids.get("BTC")) if key == "status"
-                    else tgfmt.leaders_card(self.st, self.ranks, now, self.scores))
-            self.ui.set_card(key, text, new=True)
+            self.ui.set_card(key, self.render_card(key, self.health(), now), new=True)
         elif c.name == "/positions":
             self.ui.send(tgfmt.positions_text(self.st, self.mids))
         elif c.name == "/progress":

@@ -19,7 +19,8 @@ from dataclasses import dataclass, field
 from copybot import log
 from copybot.config import Config
 
-COMMANDS = ("/status", "/positions", "/leaders", "/progress", "/pause", "/resume", "/flatten", "/help")
+COMMANDS = ("/status", "/trades", "/traders", "/positions", "/leaders", "/progress", "/pause", "/resume", "/flatten",
+            "/help")
 
 
 class TgError(Exception):
@@ -246,7 +247,9 @@ class TelegramUI:
 
 HELP = ("🤖 <b>Copybot (paper)</b>\n"
         "/status – wallet, P&amp;L, health (live)\n"
-        "/positions – open positions\n"
+        "/trades – open trades at live prices + P&amp;L vs the start (live)\n"
+        "/traders – followed traders and what copying them earned (live)\n"
+        "/positions – open positions (short list)\n"
         "/leaders – followed wallets (live)\n"
         "/progress – success metrics\n"
         "/pause · /resume – new entries (exits always run)\n"

@@ -190,3 +190,89 @@ def progress_text(st: State, mids: dict, btc_px: float | None, now_ms: float) ->
         ("Med lag", (f"{med:.1f}s {'✅' if med <= 5 else '⚠️'}") if med is not None else "-"),
         ("Skipped<$10", str(st.counters.get("skipped_min_notional", 0))),
     ]) + "\n<i>A few dozen paper trades show the bot works, not that an edge exists.</i>"
+
+
+def _n(k: int, word: str) -> str:
+    return f"{k} {word}" + ("" if k == 1 else "s")
+
+
+def _pnl_dot(x: float) -> str:
+    return "🟢" if x > 0 else ("🔴" if x < 0 else "⚪")
+
+
+def trades_card(st: State, mids: dict, now_ms: float) -> str:
+    """/trades: every open copy at the live price, plus the result against the starting wallet."""
+    eq = st.equity(mids)
+    total = eq - st.equity0
+    unreal = sum(p.upnl(mids[p.coin]) for p in st.positions.values() if mids.get(p.coin))
+    wins = sum(1 for t in st.closed if t["pnl"] > 0)
+    closed_pnl = sum(t["pnl"] for t in st.closed)
+    head = (f"💼 <b>Trades</b> · {len(st.positions)} open · {_pnl_dot(total)} "
+            f"{fusd(total)} ({fpct(total / st.equity0 * 100)})")
+    out = [head, pre([
+        ("Start", fusd(st.equity0, sign=False)),
+        ("Now", f"{fusd(eq, sign=False)}  {fpct(total / st.equity0 * 100)}"),
+        ("Closed", f"{fusd(closed_pnl)} · {_n(len(st.closed), 'trade')} {wins}W/{len(st.closed) - wins}L"),
+        ("Open", f"{fusd(unreal + sum(p.realized for p in st.positions.values()))}"),
+        ("At risk", f"{fusd(st.total_risk(), sign=False)} ({st.total_risk() / st.equity0 * 100:.1f}%)"),
+    ])]
+    if not st.positions:
+        out.append("📭 No open positions.")
+    for p in sorted(st.positions.values(), key=lambda p: p.opened_ms):
+        mark = mids.get(p.coin)
+        net = (p.upnl(mark) if mark else 0.0) + p.realized          # price move - fees + funding so far
+        notional = p.entry_notional or p.size * p.entry_px
+        to_stop = (p.stop_px / mark - 1) * 100 if mark else None
+        backers = f" 🤝+{len(p.backers)}" if p.backers else ""
+        out.append(f"{'📈' if net >= 0 else '📉'} {side_tag(p.side)} <b>{esc(p.coin)}</b> · {p.leverage:g}x · "
+                   f"<code>{short(p.leader)}</code>{backers}\n" + pre([
+                       ("Price", f"{fpx(p.entry_px)} → {fpx(mark) if mark else '-'}"),
+                       ("Size", fusd(p.size * (mark or p.entry_px), sign=False)),
+                       ("P&L", f"{fusd(net)}  {fpct(net / notional * 100)}"),
+                       ("Stop", f"{fpx(p.stop_px)}" + (f" ({fpct(to_stop)})" if to_stop is not None else "")),
+                       ("Open", dur(now_ms - p.opened_ms) if now_ms else "-"),
+                   ]))
+    out.append(f"<i>upd {hhmmss(now_ms)}</i>")
+    return "\n".join(out)
+
+
+def traders_card(st: State, mids: dict, ranks: dict[str, int], scores: dict | None, now_ms: float) -> str:
+    """/traders: every followed (or still held) leader with what copying it has earned us."""
+    scores = scores or {}
+    leaders = list(st.followed) + [a for p in st.positions.values() for a in (p.leader, *p.backers)
+                                   if a not in st.followed]
+    blocks, grand = [], 0.0
+    for a in dict.fromkeys(leaders):
+        mine = [t for t in st.closed if t["leader"] == a]
+        wins = sum(1 for t in mine if t["pnl"] > 0)
+        realized = sum(t["pnl"] for t in mine)
+        held = [p for p in st.positions.values() if p.leader == a]
+        backing = sum(1 for p in st.positions.values() if a in p.backers)
+        live = sum((p.upnl(mids[p.coin]) if mids.get(p.coin) else 0.0) + p.realized for p in held)
+        grand += realized + live
+        sc = scores.get(a, {})
+        mark = "⏸️" if a in st.paused_leaders else ("🟢" if a in st.followed else "⏳")
+        r = ranks.get(a)
+        tag = f"#{r} · " if r else ""
+        tag += f"{sc['score']:.0f}/100" if sc.get("score") else "no score"
+        tag += " 🎲" if sc.get("diversified") else ""
+        rows = [
+            ("Copied", f"{_n(len(mine), 'trade')} · {wins}W/{len(mine) - wins}L"
+                       + (f" ({wins / len(mine) * 100:.0f}%)" if mine else "")),
+            ("Won", f"{fusd(realized)}  {fpct(realized / st.equity0 * 100)}"),
+            ("Open", f"{len(held)} pos · {fusd(live)}" + (f" · backs {backing}" if backing else "")),
+        ]
+        if mine:
+            rows.append(("Best", f"{fusd(max(t['pnl'] for t in mine))} · worst {fusd(min(t['pnl'] for t in mine))}"))
+        if sc:
+            rows.append(("History", f"{sc.get('win_rate', 0) * 100:.0f}% win · PF {sc.get('profit_factor', 0):.2f}"))
+        if a in st.followed and now_ms:
+            rows.append(("Following", dur(now_ms - st.followed[a])))
+        if a in st.paused_leaders:
+            rows.append(("Paused", st.paused_leaders[a]))
+        blocks.append(f"{mark} <code>{short(a)}</code> · {esc(tag)}\n" + pre(rows))
+    if not blocks:
+        return "👥 <b>Traders</b>\nNone followed yet.\n<i>upd " + hhmmss(now_ms) + "</i>"
+    head = (f"👥 <b>Traders</b> · {len(st.followed)} followed · {_pnl_dot(grand)} {fusd(grand)} "
+            f"({fpct(grand / st.equity0 * 100)}) from copying")
+    return "\n".join([head, *blocks, f"<i>upd {hhmmss(now_ms)}</i>"])

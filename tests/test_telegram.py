@@ -141,3 +141,28 @@ def test_status_leaders_progress_render():
     assert "⏸️" in tgfmt.status_card(st, {}, h, 0, None)
     assert "🟢 0xaaaa…aaaa" in tgfmt.leaders_card(st, {}, 0)
     assert "too early" in tgfmt.progress_text(st, {}, None, 0)
+
+
+def test_trades_and_traders_cards():
+    a, b = "0x" + "a" * 40, "0x" + "b" * 40
+    st = State(equity0=300, btc_px0=100_000, genesis_ms=0)
+    st.followed = {a: 0, b: 0}
+    st.positions["BTC"] = Position(pos_id="BTC-1", coin="BTC", side=1, size=0.001, entry_px=100_000.0,
+                                   stop_px=97_000.0, leverage=5, leader=a, k=0.001, open_oid=1, opened_ms=0,
+                                   realized=-0.05, entry_notional=100.0, backers={b: {"lpos": 1, "oid": 2, "frac": 0}})
+    st.closed = [{"pos_id": "ETH-1", "coin": "ETH", "side": 1, "leader": a, "pnl": 2.0},
+                 {"pos_id": "SOL-1", "coin": "SOL", "side": -1, "leader": a, "pnl": -0.5}]
+    st.realized = 1.5 - 0.05
+    mids = {"BTC": 102_000.0}
+    t = tgfmt.trades_card(st, mids, 3_600_000)
+    assert "💼 <b>Trades</b> · 1 open" in t and "🟢 LONG <b>BTC</b>" in t and "🤝+1" in t
+    assert "+1.95$" in t                                 # position: +2.00 price - 0.05 fees
+    assert "+3.45$" in t and "+1.15%" in t                # wallet: 1.45 realized + 2.00 open, vs $300
+    assert "1W/1L" in t and "1h00m" in t
+    assert "No open positions" in tgfmt.trades_card(State(equity0=300), {}, 0)
+    tr = tgfmt.traders_card(st, mids, {a: 1}, {a: {"score": 94.5, "diversified": True, "win_rate": 0.77,
+                                                    "profit_factor": 2.1}}, 3_600_000)
+    assert "👥 <b>Traders</b> · 2 followed" in tr and "#1 · 94/100 🎲" in tr
+    assert "2 trades · 1W/1L (50%)" in tr and "+1.50$" in tr and "backs 1" in tr
+    assert "+3.45$" in tr                                 # 1.50 closed + 1.95 open, all from copying
+    assert "None followed" in tgfmt.traders_card(State(equity0=300), {}, {}, {}, 0)
