@@ -20,6 +20,11 @@ For unattended runs, restart the bot automatically if it crashes. It is designed
 while ($true) { uv run copybot; Start-Sleep 10 }
 ```
 
+Discord (optional, runs next to Telegram): create a bot at https://discord.com/developers/applications (scopes
+`bot` + `applications.commands`; permissions View Channels, Send Messages, Embed Links, Read Message History),
+then set `DISCORD_BOT_TOKEN`, `DISCORD_CHANNEL_ID` and `DISCORD_OWNER_ID` the same way. The same commands appear
+as slash commands; only the owner can use them, and replies to commands are private.
+
 Keep the PC from sleeping. State lives in `data/ledger.jsonl` (append-only, fsync on every write) and the
 download cache lives in `data/cache/`. Logs go to `logs/copybot.log` (rotating, key=value, no secrets).
 Settings are in `config/*.toml`. Every limit has a documented range, and the bot refuses to start when a

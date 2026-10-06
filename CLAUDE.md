@@ -14,7 +14,8 @@ that are not listed there unless the owner asks. The README covers run instructi
 ## Hard rules (never break)
 - Never import a signing library, read a wallet key, or call an exchange/order endpoint.
   `tests/test_safety.py` enforces this.
-- Secrets come from environment variables only: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `COPYBOT_PIN`.
+- Secrets come from environment variables only: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `COPYBOT_PIN`,
+  `DISCORD_BOT_TOKEN`, `DISCORD_CHANNEL_ID`, `DISCORD_OWNER_ID`.
   Never log or commit them. `log.py` redacts them.
 - Every order goes through `RiskGate.check` (`risk.py`). Exits (reduce/close/stop) are never refused; entries
   fail closed.
@@ -23,7 +24,7 @@ that are not listed there unless the owner asks. The README covers run instructi
 - Tests fake only the network (`tests/fakes.py`: loopback HL REST + WS + Telegram). Never mock our own code.
   Parsers are tested against real recorded responses in `tests/fixtures` (re-record with
   `tools/record_samples.py`).
-- Run `uv run pytest` after every change (about 1.5 minutes, 176 tests at the time of writing, including real-process
+- Run `uv run pytest` after every change (about 1.5 minutes, 183 tests at the time of writing, including real-process
   kill -9 restarts).
 
 ## Layout (`src/copybot/`)
@@ -40,7 +41,8 @@ that are not listed there unless the owner asks. The README covers run instructi
 | `scoring.py` | Pure, deterministic: `prescreen` → `fill_screen` (first 2,000 fills) → `full_score` (180 d fills + 1h candles, 0–100 points) → `ranking`. `VERSION` invalidates cached results |
 | `selection.py` | Pure `select()` hysteresis; `Scorer` thread with a disk cache in `data/cache` (resumes after a restart) |
 | `feed.py` | Websocket (allMids + userFills, max 15 users) and the exchange `Clock` offset estimate |
-| `tg.py`, `tgfmt.py` | Telegram: owner-only commands, outbox; cards edited in place, rate-limited; renderers. Live cards: /status, /leaders, /trades, /traders (`Bot.render_card`) |
+| `tg.py`, `tgfmt.py` | Telegram: owner-only commands, outbox; cards edited in place, rate-limited; renderers (shared by Discord). Live cards: /status, /leaders, /trades, /traders, /wallets (`Bot.render_card`). Card conventions: 🟢/🔴 = money only, ⬆️/⬇️ = side, one P&L after fees+funding, `label: value` lines (no `<pre>`), times in `telegram.utc_offset_hours` |
+| `discord.py` | Discord (owner request 2026-10-06), runs NEXT TO Telegram via `MultiUI`: `DiscordUI` subclasses `TelegramUI` (same outbox/card logic) over REST + Gateway (stdlib + `websockets.sync`), guild slash commands, owner-only, ephemeral replies (PIN never shown). Telegram HTML → markdown embeds coloured by money. Discord card ids live in the ledger as `dc:<key>` |
 | `runner.py` | `Bot`: boot/repair, worker threads, trading loop, commands, selection application, heartbeat |
 | `wallets.py` | Side wallets: same moves at other risk levels (`risk.side_wallets_risk_pct`), own ledger in `data/wallets/<name>/`, limits scaled by `config.scaled`; `boot_repair` shared with the main wallet |
 

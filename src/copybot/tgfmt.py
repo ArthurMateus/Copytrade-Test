@@ -219,9 +219,7 @@ def trades_card(st: State, mids: dict, now_ms: float) -> str:
         out.append("📭 No open trades.")
     for p in sorted(st.positions.values(), key=lambda p: p.opened_ms):
         mark = mids.get(p.coin)
-        rows = _trade_rows(p, mark, now_ms)
-        rows.append(("Trader", short(p.leader)))
-        out.append("\n" + trade_head(p, mark) + "\n" + pre(rows))
+        out.append("\n" + trade_head(p, mark) + "\n" + pre(_trade_rows(p, mark, now_ms)))
     out.append(updated(now_ms))
     return "\n".join(out)
 
