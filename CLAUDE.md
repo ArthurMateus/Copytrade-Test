@@ -23,7 +23,7 @@ that are not listed there unless the owner asks. The README covers run instructi
 - Tests fake only the network (`tests/fakes.py`: loopback HL REST + WS + Telegram). Never mock our own code.
   Parsers are tested against real recorded responses in `tests/fixtures` (re-record with
   `tools/record_samples.py`).
-- Run `uv run pytest` after every change (about 1.5 minutes, 175 tests at the time of writing, including real-process
+- Run `uv run pytest` after every change (about 1.5 minutes, 176 tests at the time of writing, including real-process
   kill -9 restarts).
 
 ## Layout (`src/copybot/`)
@@ -80,6 +80,8 @@ instances on the same wallet.
 ## Findings from the real API (2026-10-05)
 - `tests/test_telegram.py::test_card_is_edited_in_place_rate_limited_and_skips_unchanged` is timing-based and can
   fail rarely under load; rerun before suspecting a bug.
+- Hyperliquid closes the websocket about every 3 h with code 1000 "Expired"; the bot reconnects in 2–17 s and
+  reconciles. Only an outage longer than `runtime.ws_alert_after_s` (60 s) alerts on Telegram.
 - One websocket can track at most 15 users. Live `userFills` messages have no `isSnapshot`, and `hash` can be all zeros.
 - Spot fills (`@107`) have `dir` = `Buy`/`Sell`. Builder perps (`xyz:TSLA`) appear in fills and are ignored. `#140` candles return HTTP 500.
 - The owner's PC clock runs about 1.4–1.7 s ahead of the exchange (±0.15 s). It is corrected via the `Clock` offset.

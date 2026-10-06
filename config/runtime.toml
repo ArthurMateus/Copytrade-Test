@@ -10,3 +10,5 @@ weight_per_min = 1200         # Hyperliquid info rate limit per IP            [1
 critical_reserve_weight = 300 # budget that scoring/backfill can never use (kept for exits, stops, books)
 reconcile_s = 60.0            # check leaders' real positions against our copies
 clock_refresh_s = 60.0
+ws_alert_after_s = 60.0       # Hyperliquid closes the websocket about every 3 h ("Expired") and the bot reconnects
+                              # in seconds; alert only when it stays down longer than this  [1, 3600]

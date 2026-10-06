@@ -96,6 +96,8 @@ class Bot:
         self.last_funding_meta_ms = 0
         self.live_cards: set[str] = set()
         self.leaders_with_positions: set[str] = set()
+        self.ws_down_since = 0.0     # websocket down since (0 = up); alerted only if it stays down
+        self.ws_alerted = False
 
     # ---- health ------------------------------------------------------------------------------------
     def health(self) -> Health:
@@ -305,6 +307,11 @@ class Bot:
         self.on_sides("marks", marks)
         self.leaders_with_positions = self.position_leaders()
         self.feed.set_users(self.wanted_users())
+        if self.ws_down_since and not self.ws_alerted and \
+                time.time() - self.ws_down_since >= self.cfg.runtime.ws_alert_after_s:
+            self.ws_alerted = True
+            self.alert(f"websocket down for {time.time() - self.ws_down_since:.0f}s: new copies refused until it is "
+                       f"back (exits and stops keep working)", key="ws_down", every_s=1800)
 
     def handle(self, item) -> None:
         kind = item[0]
@@ -335,9 +342,15 @@ class Bot:
         elif kind == "ws_up":
             self.reconcile_now.set()   # anything missed while disconnected is caught by reconcile
             if item[1] > 1:
-                log.warn("ws_reconnected", n=item[1])
+                down = time.time() - self.ws_down_since if self.ws_down_since else 0.0
+                log.warn("ws_reconnected", n=item[1], down_s=round(down, 1))
+                if self.ws_alerted:
+                    self.ui.send(f"✅ Websocket back after {down:.0f}s · copying again")
+            self.ws_down_since, self.ws_alerted = 0.0, False
         elif kind == "ws_down":
-            self.alert("websocket disconnected: entries refused until it is back", key="ws_down", every_s=1800)
+            # Hyperliquid closes it about every 3 h ("Expired") and we reconnect in seconds: no alert for that
+            log.warn("ws_down")
+            self.ws_down_since = self.ws_down_since or time.time()
         elif kind == "cmd":
             self.command(item[1])
         elif kind == "card":

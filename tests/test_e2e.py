@@ -185,6 +185,8 @@ def test_ws_drop_missed_close_is_caught_by_reconcile(env):
         hl.drop_ws()
         assert wait_for(lambda: "BTC" not in bot.st.positions, timeout=10)
         assert bot.st.closed[-1]["reason"] == "reconcile_leader_flat"
+        # a quick reconnect (Hyperliquid's routine "Expired" close) is not worth an alert
+        assert not any("ebsocket" in m["text"] for m in tg.sent)
     finally:
         bot.stop.set()
         th.join(5)
@@ -276,3 +278,27 @@ def test_random_kills_never_lose_a_position_or_its_stop(env):
     finally:
         proc.kill()
         proc.wait()
+
+
+def test_ws_alert_only_when_it_stays_down(env):
+    hl, tg, data, cdir = env
+    seed_ledger(data)
+    (cdir / "runtime.toml").write_text((cdir / "runtime.toml").read_text(encoding="utf-8")
+                                       + "ws_alert_after_s = 2.0\n", encoding="utf-8")
+    cfg = config.load(cdir, env=env_for(tg))
+    log.setup(None)
+    bot = Bot(cfg)
+    th = threading.Thread(target=bot.run, daemon=True)
+    th.start()
+    try:
+        assert wait_for(lambda: LEADER in hl.subscribed_users() and bot.feed.connected)
+        hl.ws_refuse = True
+        hl.drop_ws()
+        assert wait_for(lambda: any("websocket down for" in m["text"] for m in tg.sent), timeout=15)
+        assert sum("websocket down" in m["text"] for m in tg.sent) == 1        # once, not on every retry
+        hl.ws_refuse = False
+        assert wait_for(lambda: any("Websocket back after" in m["text"] for m in tg.sent), timeout=30)
+    finally:
+        bot.stop.set()
+        th.join(5)
+        bot.shutdown()

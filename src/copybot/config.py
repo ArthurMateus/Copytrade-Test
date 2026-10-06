@@ -96,6 +96,7 @@ class Runtime:
     critical_reserve_weight: int = 300    # scoring/backfill can never use this part of the budget
     reconcile_s: float = 60.0
     clock_refresh_s: float = 60.0
+    ws_alert_after_s: float = 60.0        # alert only when the websocket stays down this long (it reconnects in seconds)
 
 
 @dataclass
@@ -159,6 +160,7 @@ CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
     ("runtime", "trading_timeout_s"): (0.1, 2.0),
     ("runtime", "weight_per_min"): (1, 1200),
     ("runtime", "tick_s"): (0.01, 1.0),
+    ("runtime", "ws_alert_after_s"): (1, 3600),
 }
 
 

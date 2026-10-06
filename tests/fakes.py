@@ -70,6 +70,7 @@ class FakeHL:
         self.book_fail = False
         self.lock = threading.Lock()
         self._ws_conns: list = []
+        self.ws_refuse = False
         self.ws_subs: dict = {}
         self.mids_push = True
 
@@ -166,6 +167,9 @@ class FakeHL:
 
     # ---- websocket ------------------------------------------------------------------------------
     def _ws_handler(self, conn):
+        if self.ws_refuse:            # simulate an outage: accept, then close at once
+            conn.close()
+            return
         with self.lock:
             self._ws_conns.append(conn)
             self.ws_subs[conn] = set()
