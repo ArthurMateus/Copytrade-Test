@@ -90,9 +90,18 @@ instances on the same wallet.
   go flat (verified on real wallets; it is not a bug). Because of this, `max_candidates` was raised from 60 to 400, then to 2000 (owner request).
 
 ## Status and open questions
-- Built and tested; the live smoke runs against real Hyperliquid were fine. Telegram has not been tested against
-  the real API yet (only the fake). No leader had been followed yet when this was written: the first review was
-  still screening.
+- **Live since 2026-10-05** on the owner's notebook (started from PowerShell with `python -m uv run copybot` in a
+  restart loop; `uv` is not on PATH there). Telegram works against the real API. First review: 400 screened,
+  13 fully scored; under the strict floors 3 leaders followed (0xc0b2…, 0x8a80…, 0xb556…). First copy 2026-10-06
+  09:55 UTC: NEAR long from 0x8a80…, copied by all 5 wallets in ~0.5 s.
+- Real-world issues already fixed: Telegram read timeouts killed the command thread; a second program polled the
+  same bot token (getUpdates conflict; the owner changed tokens); websocket "Expired" closes every ~3 h alerted.
+- Owner environment quirks: the Claude desktop app is a packaged app, so anything it installs under %APPDATA%
+  is invisible to the owner's own terminal (install uv/Python from the owner's terminal). A VS Code-style terminal
+  may auto-activate `.venv` (`(copybot)` prompt): run `deactivate` first, and load the secrets with
+  `[Environment]::GetEnvironmentVariable(name, "User")` if the terminal predates `setx`.
+- Next: after ~50 trades, analyse results per leader/coin/wallet risk level (owner wants this offline, not an AI
+  in the trading path).
 - **Scoring (owner decision 2026-10-05, differs from the spec on purpose):** only `selection.main_coins` (BTC, ETH,
   SOL, XRP, BNB, DOGE, ADA, AVAX, LINK, LTC) are screened, scored and copied. Hard rejects are only the copyability
   gates: too fast/HFT, core-perp share < 50% (spot), no main-coin trades, maker > 70%, history < 60 d, < 30 main-coin
