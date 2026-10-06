@@ -302,3 +302,91 @@ def test_ws_alert_only_when_it_stays_down(env):
         bot.stop.set()
         th.join(5)
         bot.shutdown()
+
+
+# ---- /search, /reset, /restart -----------------------------------------------------------------------------
+def start_bot(env, scorer=False):
+    hl, tg, data, cdir = env
+    seed_ledger(data)
+    cfg = config.load(cdir, env=env_for(tg))
+    log.setup(str(data / "logs"))
+    bot = Bot(cfg)
+    if not scorer:
+        bot.scorer.stop.set()          # the test feeds rankings itself
+    th = threading.Thread(target=bot.run, daemon=True)
+    th.start()
+    assert wait_for(lambda: LEADER in hl.subscribed_users() and bot.health().clock_ok)
+    return bot, th
+
+
+def stop_bot(bot, th):
+    bot.stop.set()
+    th.join(5)
+    bot.shutdown()
+
+
+TOP = [f"0x{i:040x}" for i in range(1, 10)]
+
+
+def test_search_repicks_the_best_seven_now(env):
+    hl, tg, data, cdir = env
+    bot, th = start_bot(env)
+    try:
+        scores = {a: {"score": 90 - i, "trades": 100, "win_rate": 0.7, "profit_factor": 3} for i, a in enumerate(TOP)}
+        bot.q.put(("ranking", TOP, len(TOP), scores))
+        assert wait_for(lambda: bot.ranking == TOP)
+        tg.say("/search")
+        assert wait_for(lambda: set(bot.st.followed) == set(TOP[:7]))     # at once: no window, no 2 checks
+        assert LEADER in bot.st.dropped                                     # it is not in the ranking any more
+        assert all(set(w.st.followed) == set(TOP[:7]) for w in bot.sides)
+        assert wait_for(lambda: any("following 7 new, dropping 1" in m["text"] for m in tg.sent))
+        assert bot.search_pending
+        better = [f"0x{i:040x}" for i in range(50, 52)] + TOP          # the background search found 2 better ones
+        scores.update({a: {"score": 99, "trades": 100, "win_rate": 0.8, "profit_factor": 4} for a in better[:2]})
+        bot.q.put(("searched", better, len(better), scores))
+        assert wait_for(lambda: set(bot.st.followed) == set(better[:7]))
+        assert TOP[5] in bot.st.dropped and TOP[6] in bot.st.dropped
+        assert wait_for(lambda: any("Search finished" in m["text"] for m in tg.sent)) and not bot.search_pending
+    finally:
+        stop_bot(bot, th)
+
+
+def test_reset_needs_no_open_trades_and_the_pin_then_starts_fresh(env):
+    hl, tg, data, cdir = env
+    bot, th = start_bot(env)
+    try:
+        hl.push_fills(LEADER, [leader_fill(hl, "ETH", 50, "B")])
+        assert wait_for(lambda: "ETH" in bot.st.positions and "ETH" in bot.sides[0].st.positions)
+        tg.say(f"/reset {PIN}")
+        assert wait_for(lambda: any("Reset refused" in m["text"] for m in tg.sent))
+        hl.mids["ETH"] = 3010.0
+        hl.push_fills(LEADER, [leader_fill(hl, "ETH", 50, "A")])
+        assert wait_for(lambda: not bot.st.positions and not any(w.st.positions for w in bot.sides))
+        assert bot.st.closed and bot.st.realized != 0
+        since = bot.st.followed[LEADER]
+        tg.say("/reset 0000")
+        assert wait_for(lambda: any("Wrong or missing PIN. Usage: /reset" in m["text"] for m in tg.sent))
+        tg.say(f"/reset {PIN}")
+        assert wait_for(lambda: any("Reset done" in m["text"] for m in tg.sent))
+        assert wait_for(lambda: bot.stop.is_set(), timeout=8)              # restarts itself
+        th.join(5)
+        arch = next((data / "archive").glob("reset-*"))
+        old = Ledger(arch / "ledger.jsonl").replay()
+        assert old.closed and old.realized != 0                             # nothing deleted
+        assert (arch / "wallets" / "risk_20pct" / "ledger.jsonl").exists() and not (data / "wallets").exists()
+        new = Ledger(data / "ledger.jsonl").replay()
+        assert new.equity() == 300 and not new.closed and not new.positions and not new.uncertain
+        assert new.followed == {LEADER: since}                             # traders kept, with their 'since'
+    finally:
+        stop_bot(bot, th)
+
+
+def test_restart_command_stops_the_loop_for_the_restart_loop(env):
+    hl, tg, data, cdir = env
+    bot, th = start_bot(env)
+    try:
+        tg.say("/restart")
+        assert wait_for(lambda: any("Restarting" in m["text"] for m in tg.sent))
+        assert wait_for(lambda: bot.stop.is_set(), timeout=8)
+    finally:
+        stop_bot(bot, th)

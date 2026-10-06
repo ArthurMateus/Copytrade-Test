@@ -10,6 +10,7 @@ import argparse
 import datetime as dt
 import os
 import queue
+import shutil
 import statistics
 import sys
 import threading
@@ -24,7 +25,7 @@ from copybot.feed import Clock, Feed
 from copybot.ledger import Ledger, now_ms
 from copybot.positions import PositionManager
 from copybot.risk import Health, RiskGate
-from copybot.selection import Scorer, select
+from copybot.selection import Plan, Scorer, rebalance, select
 from copybot.discord import DiscordUI, MultiUI
 from copybot.tg import HELP, TelegramUI
 from copybot.wallets import SideWallet, boot_repair
@@ -93,7 +94,10 @@ class Bot:
         tgfmt.set_utc_offset(cfg.telegram.utc_offset_hours)
         self.scorer = Scorer(cfg, self.info, self.q, self.data / "cache")
         self.ranks: dict[str, int] = {}
+        self.ranking: list[str] = []
         self.scores: dict = {}
+        self.search_pending = False
+        self.restart_at = 0.0        # /restart and /reset: stop the loop at this time (the outbox gets to flush)
         self.reconcile_now = threading.Event()
         self.last_body: dict[str, str] = {}
         self.last_alert: dict[str, float] = {}
@@ -264,6 +268,10 @@ class Bot:
         last_beat = 0.0
         while not self.stop.is_set():
             t0 = time.time()
+            if self.restart_at and t0 >= self.restart_at:
+                log.info("restart", why="command")
+                self.stop.set()
+                break
             try:
                 self.tick()
                 if time.time() - last_ui >= 1.0:
@@ -288,7 +296,7 @@ class Bot:
         self.on_sides("stops", lambda w: w.pm.check_stops())
         # 2. events from workers
         deadline = time.time() + 0.2
-        while time.time() < deadline:
+        while time.time() < deadline and not self.restart_at:
             try:
                 item = self.q.get_nowait()
             except queue.Empty:
@@ -366,6 +374,8 @@ class Bot:
                 self.rec({"ev": "card", "key": key, "msg_id": mid})
         elif kind == "ranking":
             self.on_ranking(item[1], item[2], item[3])
+        elif kind == "searched":
+            self.on_searched(item[1], item[3])
         elif kind == "review":
             weekly, n_pre, n_scored, n_el = item[1:]
             self.ui.send(f"🔎 <b>{'Weekly' if weekly else 'Daily'} review</b> · {n_pre} passed the pre-screen · "
@@ -377,12 +387,42 @@ class Bot:
 
     # ---- selection ----------------------------------------------------------------------------------
     def on_ranking(self, ranking: list[str], n_scored: int, scores: dict) -> None:
+        self.ranking = list(ranking)
         self.ranks = {a: i + 1 for i, a in enumerate(ranking)}
         self.scores = scores
         now = now_ms()
         if now - int(self.st.sel.get("at", 0)) < self.cfg.selection.rescore_minutes * 60_000 * 0.9:
             return   # a ranking re-published right after a restart is not a new cycle
         plan = select(self.st.sel, ranking, self.st.followed, set(self.st.paused_leaders), self.st.dropped, now, self.cfg)
+        self.apply_plan(plan)
+        self.rec({"ev": "sel", "state": plan.state})
+        if not ranking:
+            self.alert("no eligible wallet this cycle: following nobody new", key="no_eligible", every_s=6 * 3600)
+
+    def on_searched(self, ranking: list[str], scores: dict) -> None:
+        """The /search review finished: re-pick the best traders with what it found."""
+        self.ranking, self.scores = list(ranking), scores
+        self.ranks = {a: i + 1 for i, a in enumerate(ranking)}
+        if not self.search_pending:
+            return
+        self.search_pending = False
+        if not ranking:
+            self.ui.send("🔎 <b>Search finished</b> · no eligible wallet found: keeping your current traders.")
+            return
+        self.repick("🔎 <b>Search finished</b>")
+
+    def repick(self, title: str) -> None:
+        plan = rebalance(self.ranking, self.st.followed, set(self.st.paused_leaders), self.st.dropped, now_ms(),
+                         self.cfg)
+        if not plan.joins and not plan.drops:
+            self.ui.send(f"{title} · no change: you already follow the best {len(self.st.followed)} "
+                         f"({len(self.ranking)} eligible).")
+            return
+        self.ui.send(f"{title} · following {len(plan.joins)} new, dropping {len(plan.drops)}.")
+        self.apply_plan(plan)
+
+    def apply_plan(self, plan: Plan) -> None:
+        scores = self.scores
         for a, why in plan.drops:
             self.rec({"ev": "unfollow", "leader": a, "reason": why})
             held = sum(1 for p in self.st.positions.values() if p.leader == a)
@@ -399,14 +439,11 @@ class Bot:
                 ("Trades", str(s.get("trades", "-"))),
                 ("Win", f"{s.get('win_rate', 0) * 100:.0f}%"),
                 ("PF", tgfmt.pf_text(s.get("profit_factor", 0))),
-                ("Edge", f"{s.get('copy_edge_bps', 0):.1f} bps after costs"),
-                ("Max DD", f"{s.get('max_dd', 0) * 100:.0f}%"),
+                ("Avg per trade", f"{s.get('copy_edge_bps', 0) / 100:+.2f}% after our costs"),
+                ("Biggest drop", f"{s.get('max_dd', 0) * 100:.0f}%"),
             ]))
-        self.rec({"ev": "sel", "state": plan.state})
         self.sync_sides()
         self.scorer.focus = set(self.st.followed)
-        if not ranking:
-            self.alert("no eligible wallet this cycle: following nobody new", key="no_eligible", every_s=6 * 3600)
 
     # ---- notifications from the position manager -----------------------------------------------------
     def on_notify(self, kind: str, **kw) -> None:
@@ -503,6 +540,33 @@ class Bot:
                 w.rec({"ev": "resume"})
             self.on_sides("resume", resume)
             self.ui.send("▶️ <b>Entries resumed</b> (all wallets).")
+        elif c.name == "/search":
+            if not self.ranking:
+                self.ui.send("🔎 The ranking is not ready yet (the bot just started). Try again in a minute.")
+                return
+            self.repick("🔎 <b>Search</b> · re-picked from the wallets checked so far")
+            self.search_pending = True
+            self.scorer.search_req.set()
+            self.ui.send("🔎 Checking for new wallets in the background; I will re-pick again when it finishes.")
+        elif c.name == "/restart":
+            self.ui.send("🔄 <b>Restarting</b>… back in about 15 seconds.")
+            self.restart_at = time.time() + 3
+        elif c.name == "/reset":
+            if not self.ui.check_pin(c.arg):
+                log.warn("reset_bad_pin")
+                self.ui.send("⛔ Wrong or missing PIN. Usage: /reset &lt;PIN&gt;")
+                return
+            wallets = [self.st, *(w.st for w in self.sides)]
+            n_open = sum(len(st.positions) for st in wallets)
+            if n_open:
+                self.ui.send(f"⛔ <b>Reset refused</b>: {n_open} open trade(s). Wait for them to close, or "
+                             f"/flatten &lt;PIN&gt; first.")
+                return
+            where = self.reset_wallets()
+            self.ui.send(f"♻️ <b>Reset done</b> · every wallet is back to "
+                         f"{tgfmt.fusd(self.cfg.risk.start_equity, sign=False)}, traders kept. Old history saved in "
+                         f"<code>{tgfmt.esc(where)}</code>.\n🔄 Restarting… back in about 15 seconds.")
+            self.restart_at = time.time() + 3
         elif c.name == "/flatten":
             if not self.ui.check_pin(c.arg):
                 log.warn("flatten_bad_pin")
@@ -518,6 +582,33 @@ class Bot:
             self.on_sides("flatten", flatten)
             self.ui.send(f"🛑 <b>Flattened</b> {n} position(s) (and every side wallet). ⏸️ Entries paused · "
                          f"/resume to continue.")
+
+    def reset_wallets(self) -> str:
+        """/reset: archive every ledger and start fresh ones that keep the followed leaders (with their 'since'),
+        pauses, drop cooldowns and selection streaks. Nothing is deleted. The caller restarts the process."""
+        st = self.st
+        seed = [{"ev": "genesis", "equity0": self.cfg.risk.start_equity,
+                 "btc_px0": self.mids.get("BTC") or st.btc_px0}]
+        seed += [{"ev": "unfollow", "leader": a, "reason": "kept across /reset", "ts": t} for a, t in st.dropped.items()]
+        seed += [{"ev": "follow", "leader": a, "ts": t} for a, t in st.followed.items()]
+        seed += [{"ev": "leader_pause", "leader": a, "reason": why} for a, why in st.paused_leaders.items()]
+        seed.append({"ev": "sel", "state": st.sel})
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+        arch = self.data / "archive" / f"reset-{stamp}"
+        arch.mkdir(parents=True, exist_ok=True)
+        seed.append({"ev": "note", "text": f"reset; previous history in {arch.as_posix()}"})
+        for lg in (self.ledger, *(w.ledger for w in self.sides)):
+            lg.frozen = True       # nothing more is written to the old files before the restart
+            lg.close()
+        shutil.move(str(self.data / "ledger.jsonl"), str(arch / "ledger.jsonl"))
+        if (self.data / "wallets").exists():
+            shutil.move(str(self.data / "wallets"), str(arch / "wallets"))
+        fresh = Ledger(self.data / "ledger.jsonl")
+        for ev in seed:
+            fresh.append(ev)
+        fresh.close()
+        log.info("reset", archive=arch.as_posix(), followed=len(st.followed))
+        return arch.as_posix()
 
     def heartbeat(self) -> None:
         h = self.health()

@@ -38,6 +38,9 @@ DESCRIPTIONS = {
     "/pause": "Pause new copies (exits and stops keep running)",
     "/resume": "Resume new copies",
     "/flatten": "Close EVERYTHING in every wallet and pause (needs the PIN)",
+    "/search": "Look for new traders now and re-pick the best 7",
+    "/reset": "Every wallet back to the start (no open trades); traders kept (needs the PIN)",
+    "/restart": "Restart the bot",
     "/help": "List the commands",
 }
 
@@ -204,7 +207,7 @@ class DiscordUI(TelegramUI):
         cmds = []
         for c in COMMANDS:
             cmd = {"name": c[1:], "description": DESCRIPTIONS.get(c, c[1:]), "type": 1}
-            if c == "/flatten":
+            if c in ("/flatten", "/reset"):
                 cmd["options"] = [{"type": 3, "name": "pin", "description": "Your COPYBOT_PIN", "required": True}]
             cmds.append(cmd)
         self.api.call("PUT", f"/applications/{app_id}/guilds/{guild}/commands", cmds)
@@ -229,7 +232,8 @@ class DiscordUI(TelegramUI):
             return self._reply(d, "❓ Unknown command.")
         opts = {o["name"]: o.get("value", "") for o in (d.get("data") or {}).get("options") or []}
         log.info("discord_command", cmd=name)     # never the argument (may be the PIN)
-        self._reply(d, f"👍 {name}" + (" (results in the channel)" if name not in ("/pause", "/resume") else ""))
+        self._reply(d, f"👍 {name}" + (" (results in the channel)" if name not in ("/pause", "/resume", "/restart")
+                                        else ""))
         self.on_command(Command(name, str(opts.get("pin", "")).strip()))
 
 

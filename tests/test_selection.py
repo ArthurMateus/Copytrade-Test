@@ -292,3 +292,22 @@ def test_changing_the_floors_rescores_saved_wallets(scorer_env):
     assert all(d["reasons"] == ["profit_factor<50"] for d in sc2.scores.values())
     assert not any(r["type"] == "userFillsByTime" and r["startTime"] < sc2.now() - 170 * 86_400_000
                    for r in fake.requests[n:])                # no first-page screen again
+
+
+# ---- /search: re-pick the best now ----------------------------------------------------------------------
+def test_rebalance_follows_the_best_seven_now():
+    from copybot.selection import rebalance
+    followed = {R[0]: NOW - HOUR, R[8]: NOW - HOUR, R[20]: NOW - 48 * HOUR}   # R[20] is no longer eligible
+    p = rebalance(R[:10], followed, set(), {}, NOW, CFG)
+    assert p.joins == R[1:7] and dict(p.drops) == {R[8]: "replaced by a better trader (/search)",
+                                                   R[20]: "no longer passes the rules"}
+    # fewer than 7 eligible: nobody eligible is dropped, free slots fill
+    p = rebalance(R[:3], {R[2]: NOW}, set(), {}, NOW, CFG)
+    assert p.joins == R[:2] and not p.drops
+
+
+def test_rebalance_skips_paused_and_cooling_down_leaders():
+    from copybot.selection import rebalance
+    p = rebalance(R[:10], {R[0]: NOW}, {R[0]}, {R[1]: NOW - HOUR}, NOW, CFG)
+    assert p.drops == [(R[0], "paused after a bad streak")]
+    assert R[1] not in p.joins and p.joins == R[2:9]

@@ -62,7 +62,8 @@ class Selection:
     change_cooldown_hours: float = 24.0   # new leaders join at most this often (bad ones still leave at once)
     min_win_rate: float = 0.60            # eligible only with at least this win rate ...
     min_score: float = 70.0               # ... at least this score (0-100) ...
-    min_profit_factor: float = 2.0        # ... and won at least this much per 1$ lost
+    min_profit_factor: float = 2.0        # ... and won at least this much per 1$ lost ...
+    max_drawdown: float = 0.30            # ... and never fell more than this from a peak (low swings)
     swaps_per_cycle: int = 1
     history_days: int = 180
     max_candidates: int = 2000            # prescreened wallets sent to fill screening per review
@@ -162,6 +163,7 @@ CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
     ("selection", "min_win_rate"): (0.0, 1.0),
     ("selection", "min_score"): (1, 100),
     ("selection", "min_profit_factor"): (1.0, 10.0),
+    ("selection", "max_drawdown"): (0.05, 1.0),
     ("selection", "max_candidates"): (10, 5000),
     ("selection", "swaps_per_cycle"): (1, 1),
     ("selection", "history_days"): (60, 180),

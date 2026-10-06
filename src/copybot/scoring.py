@@ -276,11 +276,12 @@ class ScoreParams:
     min_win_rate: float = 0.0      # hard floor on the win rate
     min_score: float = 1.0         # hard floor on the 0-100 score
     min_profit_factor: float = 1.0 # hard floor on the profit factor (above 1 is always required)
+    max_dd_cap: float = 1.0        # hard cap on the max drawdown (1.0 = none)
 
     def rules(self) -> dict:
         """The eligibility floors: a cached score made under other floors is redone."""
         return {"min_win_rate": self.min_win_rate, "min_score": self.min_score,
-                "min_profit_factor": self.min_profit_factor}
+                "min_profit_factor": self.min_profit_factor, "max_dd_cap": self.max_dd_cap}
 
 
 # component -> weight; the weights add up to 100
@@ -408,6 +409,7 @@ def full_score(address: str, fills: list[Fill], candles: dict[str, list[Candle]]
         (s.copy_edge_bps > 0, "copy_edge<=0"),
         (s.win_rate >= p.min_win_rate, f"win_rate<{p.min_win_rate * 100:.0f}%"),
         (s.profit_factor >= p.min_profit_factor, f"profit_factor<{p.min_profit_factor:g}"),
+        (s.max_dd <= p.max_dd_cap, f"max_drawdown>{p.max_dd_cap * 100:.0f}%"),
     ]
     s.points = points(s, p)
     if sum(s.points.values()) < p.min_score:

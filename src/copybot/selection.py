@@ -75,6 +75,22 @@ def select(sel: dict, ranking: list[str], followed: dict[str, int], paused: set[
     return Plan(joins, drops, {"streaks": new, "cycles": int(sel.get("cycles", 0)) + 1, "at": now_ms})
 
 
+def rebalance(ranking: list[str], followed: dict[str, int], paused: set[str], dropped: dict[str, int],
+              now_ms: int, cfg: Config) -> Plan:
+    """/search (owner request): follow the best `max_leaders` of the ranking right now, without the daily window
+    or the confirmation cycles. Followed leaders outside them are dropped (their open copies keep being managed
+    until they close; no new copies). Paused leaders and leaders in their drop cooldown are not picked."""
+    cooldown = cfg.selection.dropped_cooldown_days * DAY
+    target = [a for a in ranking if a not in paused
+              and (a in followed or now_ms - dropped.get(a, -10**15) >= cooldown)][: cfg.risk.max_leaders]
+    rank = set(ranking)
+    drops = [(a, "paused after a bad streak" if a in paused else
+              ("replaced by a better trader (/search)" if a in rank else "no longer passes the rules"))
+             for a in followed if a not in target]
+    joins = [a for a in target if a not in followed]
+    return Plan(joins, drops, {})
+
+
 # ---- disk cache --------------------------------------------------------------------------------------
 class Cache:
     def __init__(self, root: str | os.PathLike):
@@ -118,7 +134,8 @@ class Scorer:
                                           coins=self.coins, alt_min_coins=cfg.selection.alt_min_coins,
                                           alt_max_share=cfg.selection.alt_max_coin_share,
                                           min_win_rate=cfg.selection.min_win_rate, min_score=cfg.selection.min_score,
-                                          min_profit_factor=cfg.selection.min_profit_factor)
+                                          min_profit_factor=cfg.selection.min_profit_factor,
+                                          max_dd_cap=cfg.selection.max_drawdown)
         # results of an older screen/score version, or scored under other eligibility floors, are redone
         # (screened wallets are rescored from the disk cache at startup: see rescore_missing)
         self.screened: dict = {a: d for a, d in self.cache.get("screened.json", {}).items()
@@ -126,6 +143,7 @@ class Scorer:
         self.scores: dict = {a: d for a, d in self.cache.get("scores.json", {}).items()
                              if d.get("v") == scoring.VERSION and d.get("rules") == self.params.rules()}
         self.stop = threading.Event()
+        self.search_req = threading.Event()   # /search: run a review now, then publish ("searched", ...)
         self.focus: set[str] = set()   # followed leaders: always rescored (set by the trading loop)
         self.our_notional = cfg.risk.start_equity * cfg.risk.risk_per_trade_pct / cfg.risk.stop_pct
 
@@ -143,6 +161,11 @@ class Scorer:
                 weekly = now - self.meta["last_weekly"] >= 7 * DAY
                 if weekly or now - self.meta["last_daily"] >= DAY:
                     self.review(weekly)
+                if self.search_req.is_set():
+                    self.search_req.clear()
+                    self.review(False)   # wallets checked in the last 7 days come from the cache
+                    if not self.stop.is_set():
+                        self.out.put(("searched", self.ranking(), len(self.scores), dict(self.scores)))
                 self.maybe_cycle()
             except Exception as e:
                 log.exception("scorer_error")

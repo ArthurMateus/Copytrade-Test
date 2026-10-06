@@ -221,3 +221,15 @@ def test_traders_are_listed_by_rank_with_history_and_pf():
     tr = tgfmt.traders_card(st, {}, {b: 1, a: 2}, sc, 0)
     assert tr.index("bbbb") < tr.index("aaaa") < tr.index("cccc")   # ... listed by rank, unranked last
     assert "153 trades · 77% win" in tr and "2.50 (wins 2.50$ per 1$ lost)" in tr and "no losing trade" in tr
+
+
+def test_a_stale_restart_or_reset_is_never_acted_on_twice():
+    cfg = config.load("config", env={"TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_CHAT_ID": "1"})
+    got = []
+    ui = TelegramUI(cfg, got.append, lambda k, m: None)
+    old = int(ui.started) - 60                       # sent before this start (Telegram may deliver it again)
+    for name in ("/restart", "/reset 1234", "/flatten 1234"):
+        ui.handle_update({"update_id": 1, "message": {"chat": {"id": 1}, "text": name, "date": old}})
+    ui.handle_update({"update_id": 2, "message": {"chat": {"id": 1}, "text": "/status", "date": old}})
+    ui.handle_update({"update_id": 3, "message": {"chat": {"id": 1}, "text": "/restart", "date": int(ui.started)}})
+    assert [c.name for c in got] == ["/status", "/restart"]

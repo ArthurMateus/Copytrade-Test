@@ -274,3 +274,13 @@ def test_profit_factor_floor():
     assert base.eligible and base.rules == scoring.ScoreParams().rules()
     s = scoring.full_score("0xa", fl, c, 200_000, NOW, scoring.ScoreParams(min_profit_factor=base.profit_factor + 0.5))
     assert not s.eligible and s.reasons == [f"profit_factor<{base.profit_factor + 0.5:g}"]
+
+
+def test_max_drawdown_cap():
+    raw, cs = trader(NOW, trips=500, win=0.75)
+    fl, c = parse(raw), cand(cs)
+    base = scoring.full_score("0xa", fl, c, 200_000, NOW)
+    assert base.eligible and 0 < base.max_dd
+    s = scoring.full_score("0xa", fl, c, 200_000, NOW, scoring.ScoreParams(max_dd_cap=base.max_dd / 2))
+    assert not s.eligible and s.reasons == [f"max_drawdown>{base.max_dd / 2 * 100:.0f}%"]
+    assert "max_dd_cap" in s.rules

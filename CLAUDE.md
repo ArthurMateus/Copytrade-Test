@@ -24,7 +24,7 @@ that are not listed there unless the owner asks. The README covers run instructi
 - Tests fake only the network (`tests/fakes.py`: loopback HL REST + WS + Telegram). Never mock our own code.
   Parsers are tested against real recorded responses in `tests/fixtures` (re-record with
   `tools/record_samples.py`).
-- Run `uv run pytest` after every change (about 1.5 minutes, 183 tests at the time of writing, including real-process
+- Run `uv run pytest` after every change (about 1.5 minutes, 190 tests at the time of writing, including real-process
   kill -9 restarts).
 
 ## Layout (`src/copybot/`)
@@ -71,6 +71,14 @@ instances on the same wallet.
 - Leaders are picked once `min_scored_to_start` (12) wallets are fully scored OR the first review has finished
   (`Scorer.ready`): real reviews of 400 candidates fully score only a handful, so waiting for 12 meant following nobody.
 - `/resume` writes an `ack` event that clears acknowledged restart uncertainties.
+- Owner commands added 2026-10-06: `/search` re-picks at once with `selection.rebalance` (top `max_leaders` of
+  the ranking, no window/confirmation; followed ones outside it are dropped, their open copies managed until
+  exit) and asks the scorer for a review (`search_req` → `("searched", ...)` → re-pick again; an empty ranking
+  never drops anyone). `/reset <PIN>` (no open trade in any wallet) archives `data/ledger.jsonl` and
+  `data/wallets/` to `data/archive/reset-<UTC>/`, writes a fresh ledger seeded with genesis + followed (original
+  'since') + drop cooldowns + pauses + selection streaks, freezes the old ledgers and restarts. `/restart` stops
+  the loop after 3 s; the owner's PowerShell `while` loop starts it again. `/reset`, `/restart`, `/flatten` sent
+  before the current start are ignored (Telegram can redeliver them).
 - Side wallets (owner request 2026-10-05): 2/5/10/20% risk, $300 each, compared by `/wallets`. EVERY risk limit
   scales with the level (per-symbol, total, consensus, daily/weekly loss stops capped at 100%); leverage, stop
   distance and liquidation buffer do not. They are allowed above the CEILINGS on purpose (paper comparison only).
@@ -112,7 +120,7 @@ instances on the same wallet.
   rejected 41 of the first 120 candidates (many top wallets trade HYPE/alts with some BTC/ETH on the side). Quality is points out of 100 (`scoring.WEIGHTS`):
   edge 25, profit factor 15, consistency 15, trade count 15, win rate 10, max DD 10, current DD 5, concentration 5.
   Eligibility floors (owner request 2026-10-05): win rate ≥ `min_win_rate` (60%), score ≥ `min_score` (70) and profit
-  factor ≥ `min_profit_factor` (2.0). Each score stores its `rules`; changing a floor rescores at the next start.
+  factor ≥ `min_profit_factor` (2.0), biggest drop ≤ `max_drawdown` (30%, owner request 2026-10-06). Each score stores its `rules`; changing a floor rescores at the next start.
   `max_candidates` = 2000 (≈ all of the ~2,200 pre-screened; the first full pass takes 5–6 h, about 7 wallets/min).
   `scoring.SCREEN_VERSION` and `scoring.VERSION` are separate: a score-only change rescores the screened wallets
   from cached fills at startup (`Scorer.rescore_missing`) instead of re-screening 400 wallets.

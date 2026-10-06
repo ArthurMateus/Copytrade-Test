@@ -50,7 +50,8 @@ Run the tests: `uv run pytest` (about 1 minute; this includes real-process kill 
 Telegram commands: `/status`, `/trades` (open trades at live prices and P&L against the $300 start), `/traders`
 (followed traders: score, copied trades, wins/losses, money made), `/wallets` (the same copies at 1/2/5/10/20% risk,
 compared) and `/leaders` (live cards, edited in place),
-`/positions`, `/progress`, `/pause`,
+`/positions`, `/progress`, `/search` (look for new traders now and re-pick the best 7), `/reset <PIN>` (every wallet back
+to the start, traders kept, old history archived), `/restart`, `/pause`,
 `/resume`, and `/flatten <PIN>`. Each open trade gets one message, which is edited until it becomes the final
 ✅/❌ summary.
 

@@ -333,6 +333,7 @@ class Ledger:
         self._lock = threading.Lock()
         self._seq = 0
         self._f = None
+        self.frozen = False   # set by /reset after archiving: nothing more may be written to this file
 
     def replay(self) -> State:
         st = State()
@@ -367,6 +368,8 @@ class Ledger:
 
     def append(self, ev: dict) -> dict:
         with self._lock:
+            if self.frozen:
+                return {"seq": self._seq, "ts": ev.get("ts") or now_ms(), **ev}
             self._seq += 1
             ev = {"seq": self._seq, "ts": ev.get("ts") or now_ms(), **{k: v for k, v in ev.items() if k != "ts"}}
             line = (json.dumps(ev, separators=(",", ":"), default=_default) + "\n").encode()

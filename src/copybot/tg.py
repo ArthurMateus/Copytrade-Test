@@ -20,8 +20,9 @@ from dataclasses import dataclass, field
 from copybot import log
 from copybot.config import Config
 
-COMMANDS = ("/status", "/trades", "/traders", "/wallets", "/positions", "/leaders", "/progress", "/pause", "/resume", "/flatten",
-            "/help")
+COMMANDS = ("/status", "/trades", "/traders", "/wallets", "/positions", "/leaders", "/progress", "/search", "/pause",
+            "/resume", "/flatten", "/reset", "/restart", "/help")
+ONCE = ("/reset", "/restart", "/flatten")   # never acted on twice: a stale copy after a restart is ignored
 
 
 class TgError(Exception):
@@ -91,6 +92,7 @@ class TelegramUI:
         self.offset = 0
         self.stop = threading.Event()
         self.wake = threading.Event()
+        self.started = time.time()
         self.limits = cfg.telegram          # edit_min_interval_s / min_send_interval_s
         self.name = "telegram"
 
@@ -255,6 +257,9 @@ class TelegramUI:
         if name not in COMMANDS:
             self.send("❓ Unknown command. /help")
             return
+        if name in ONCE and msg.get("date") and msg["date"] < self.started - 5:
+            log.warn("telegram_stale_command", cmd=name)   # sent before this start (e.g. the /restart itself)
+            return
         log.info("telegram_command", cmd=name)     # never the argument (may be the PIN)
         self.on_command(Command(name, arg.strip()))
 
@@ -271,4 +276,7 @@ HELP = ("🤖 <b>Copybot (paper)</b>\n"
         "/leaders – followed wallets (live)\n"
         "/progress – success metrics\n"
         "/pause · /resume – new entries (exits always run)\n"
-        "/flatten &lt;PIN&gt; – close everything and pause")
+        "/flatten &lt;PIN&gt; – close everything and pause\n"
+        "/search – look for new traders now and re-pick the best 7\n"
+        "/reset &lt;PIN&gt; – every wallet back to the start (no open trades), traders kept\n"
+        "/restart – restart the bot")
