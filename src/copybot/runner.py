@@ -25,6 +25,7 @@ from copybot.ledger import Ledger, now_ms
 from copybot.positions import PositionManager
 from copybot.risk import Health, RiskGate
 from copybot.selection import Scorer, select
+from copybot.discord import DiscordUI, MultiUI
 from copybot.tg import HELP, TelegramUI
 from copybot.wallets import SideWallet, boot_repair
 
@@ -86,7 +87,10 @@ class Bot:
                                  alts_ok=self.gate.alts_ok, score_of=self.score_of)
                       for r in cfg.risk.side_wallets_risk_pct]
         self.det = Detector()
-        self.ui = TelegramUI(cfg, lambda c: self.q.put(("cmd", c)), lambda k, m: self.q.put(("card", k, m)))
+        on_cmd = lambda c: self.q.put(("cmd", c))
+        self.ui = MultiUI(TelegramUI(cfg, on_cmd, lambda k, m: self.q.put(("card", k, m))),
+                          DiscordUI(cfg, on_cmd, lambda k, m: self.q.put(("card", "dc:" + k, m))))
+        tgfmt.set_utc_offset(cfg.telegram.utc_offset_hours)
         self.scorer = Scorer(cfg, self.info, self.q, self.data / "cache")
         self.ranks: dict[str, int] = {}
         self.scores: dict = {}
@@ -533,7 +537,7 @@ class Bot:
     def shutdown(self) -> None:
         self.stop.set()
         self.feed.stop.set()
-        self.ui.stop.set()
+        self.ui.shutdown()
         self.scorer.stop.set()
         self.ledger.close()
         for w in self.sides:
@@ -549,7 +553,7 @@ def main(argv: list[str] | None = None) -> None:
     except config.ConfigError as e:
         print(f"config error: {e}", file=sys.stderr)
         raise SystemExit(2)
-    for s in (cfg.tg_token, cfg.pin):
+    for s in (cfg.tg_token, cfg.pin, cfg.dc_token):
         log.add_secret(s)
     log.setup(cfg.runtime.log_dir)
     bot = Bot(cfg)

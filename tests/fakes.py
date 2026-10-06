@@ -325,3 +325,157 @@ class FakeTelegram:
                 self.edits.append(body)
                 return 200, {"ok": True, "result": {"message_id": mid}}
         return 200, {"ok": True, "result": True}
+
+
+class FakeDiscord:
+    """Loopback Discord: REST (/api/v10/...) and a Gateway websocket that says hello, accepts identify, answers
+    heartbeats and can push slash-command interactions."""
+
+    def __init__(self, token="DCTOKEN.fake.discord-bot-token", channel="5550001", owner="7770001", guild="9990001",
+                 app="1110001"):
+        self.token, self.channel, self.owner, self.guild, self.app = token, channel, owner, guild, app
+        self.messages: dict[int, dict] = {}     # id -> embed
+        self.sent: list[dict] = []
+        self.edits: list[dict] = []
+        self.replies: list[dict] = []           # interaction callbacks
+        self.commands = None                    # registered slash commands
+        self.identified: list[dict] = []
+        self.calls: list[tuple[float, str]] = []
+        self.fail_429 = 0
+        self.next_id = 10_000
+        self.seq = 0
+        self.lock = threading.Lock()
+        self._conns: list = []
+        fake = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _go(self, verb):
+                n = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(n) or b"null")
+                code, obj = fake.rest(verb, urlparse(self.path).path, body, self.headers.get("Authorization", ""))
+                b = json.dumps(obj).encode() if obj is not None else b""
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(b)))
+                self.end_headers()
+                self.wfile.write(b)
+
+            def do_GET(self):
+                self._go("GET")
+
+            def do_POST(self):
+                self._go("POST")
+
+            def do_PATCH(self):
+                self._go("PATCH")
+
+            def do_PUT(self):
+                self._go("PUT")
+
+        self.http = _Server(("127.0.0.1", 0), H)
+        threading.Thread(target=self.http.serve_forever, daemon=True).start()
+        self.ws = serve(self._ws, "127.0.0.1", 0)
+        threading.Thread(target=self.ws.serve_forever, daemon=True).start()
+
+    @property
+    def api_base(self):
+        return f"http://127.0.0.1:{self.http.server_address[1]}/api/v10"
+
+    @property
+    def gateway_url(self):
+        return f"ws://127.0.0.1:{self.ws.socket.getsockname()[1]}/?v=10&encoding=json"
+
+    def close(self):
+        self.http.shutdown()
+        self.ws.shutdown()
+
+    def text(self, mid) -> str:
+        return self.messages[mid]["description"]
+
+    # ---- REST -----------------------------------------------------------------------------------
+    def rest(self, verb, path, body, auth):
+        p = path.removeprefix("/api/v10")
+        with self.lock:
+            if p.startswith("/interactions/"):
+                self.replies.append(body)
+                return 204, None
+            if auth != f"Bot {self.token}":
+                return 401, {"message": "401: Unauthorized", "code": 0}
+            self.calls.append((time.time(), f"{verb} {p}"))
+            if self.fail_429 > 0:
+                self.fail_429 -= 1
+                return 429, {"message": "You are being rate limited.", "retry_after": 1.0, "global": False}
+            if verb == "GET" and p == f"/channels/{self.channel}":
+                return 200, {"id": self.channel, "guild_id": self.guild, "type": 0}
+            if verb == "PUT" and p == f"/applications/{self.app}/guilds/{self.guild}/commands":
+                self.commands = body
+                return 200, body
+            if verb == "POST" and p == f"/channels/{self.channel}/messages":
+                mid = self.next_id
+                self.next_id += 1
+                self.messages[mid] = body["embeds"][0]
+                self.sent.append({**body["embeds"][0], "id": mid})
+                return 200, {"id": str(mid), "channel_id": self.channel}
+            if verb == "PATCH" and p.startswith(f"/channels/{self.channel}/messages/"):
+                mid = int(p.rsplit("/", 1)[1])
+                if mid not in self.messages:
+                    return 404, {"message": "Unknown Message", "code": 10008}
+                self.messages[mid] = body["embeds"][0]
+                self.edits.append({**body["embeds"][0], "id": mid})
+                return 200, {"id": str(mid)}
+        return 404, {"message": "404: Not Found", "code": 0}
+
+    # ---- Gateway --------------------------------------------------------------------------------
+    def _next(self):
+        with self.lock:
+            self.seq += 1
+            return self.seq
+
+    def _ws(self, conn):
+        conn.send(json.dumps({"op": 10, "d": {"heartbeat_interval": 500}}))
+        try:
+            for raw in conn:
+                m = json.loads(raw)
+                if m["op"] == 2:
+                    if m["d"]["token"] != self.token:
+                        conn.close(4004, "Authentication failed.")
+                        return
+                    self.identified.append(m["d"])
+                    with self.lock:
+                        self._conns.append(conn)
+                    conn.send(json.dumps({"op": 0, "t": "READY", "s": self._next(), "d": {
+                        "session_id": "s1", "application": {"id": self.app}, "user": {"id": "bot"}}}))
+                elif m["op"] == 1:
+                    conn.send(json.dumps({"op": 11}))
+        except Exception:
+            pass
+        finally:
+            with self.lock:
+                if conn in self._conns:
+                    self._conns.remove(conn)
+
+    def connected(self) -> bool:
+        with self.lock:
+            return bool(self._conns)
+
+    def interact(self, name, options=None, user=None):
+        d = {"id": f"i{self._next()}", "token": "itoken", "type": 2, "channel_id": self.channel,
+             "member": {"user": {"id": user or self.owner}},
+             "data": {"name": name, "options": [{"name": k, "type": 3, "value": v} for k, v in (options or {}).items()]}}
+        msg = json.dumps({"op": 0, "t": "INTERACTION_CREATE", "s": self._next(), "d": d})
+        with self.lock:
+            conns = list(self._conns)
+        for c in conns:
+            c.send(msg)
+
+    def drop(self):
+        with self.lock:
+            conns = list(self._conns)
+        for c in conns:
+            try:
+                c.close()
+            except Exception:
+                pass

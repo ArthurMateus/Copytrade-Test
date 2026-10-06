@@ -81,6 +81,15 @@ class Telegram:
     edit_min_interval_s: float = 5.0      # per message
     min_send_interval_s: float = 1.1      # all API writes to the chat, globally
     poll_timeout_s: int = 25
+    utc_offset_hours: float = 0.0         # times on every card are shown in this time zone (Brazil: -3)
+
+
+@dataclass
+class Discord:
+    api_base: str = "https://discord.com/api/v10"
+    gateway_url: str = "wss://gateway.discord.gg/?v=10&encoding=json"
+    edit_min_interval_s: float = 5.0      # per message
+    min_send_interval_s: float = 1.1      # all API writes to the channel, globally
 
 
 @dataclass
@@ -105,14 +114,18 @@ class Config:
     broker: Broker = field(default_factory=Broker)
     selection: Selection = field(default_factory=Selection)
     telegram: Telegram = field(default_factory=Telegram)
+    discord: Discord = field(default_factory=Discord)
     runtime: Runtime = field(default_factory=Runtime)
     # secrets (env only, never logged)
     tg_token: str = field(default="", repr=False)
     tg_chat_id: str = field(default="", repr=False)
     pin: str = field(default="", repr=False)
+    dc_token: str = field(default="", repr=False)
+    dc_channel_id: str = field(default="", repr=False)
+    dc_owner_id: str = field(default="", repr=False)
 
 
-SECTIONS = ("risk", "broker", "selection", "telegram", "runtime")
+SECTIONS = ("risk", "broker", "selection", "telegram", "discord", "runtime")
 
 # (section, key) -> (min, max). The documented hard ceilings; a config outside them refuses to start.
 CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
@@ -156,6 +169,9 @@ CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
     ("selection", "alt_min_coins"): (2, 1000),
     ("selection", "alt_max_coin_share"): (0.1, 1.0),
     ("telegram", "edit_min_interval_s"): (0.05, 600),
+    ("telegram", "utc_offset_hours"): (-12, 14),
+    ("discord", "edit_min_interval_s"): (0.05, 600),
+    ("discord", "min_send_interval_s"): (0.0, 60),
     ("telegram", "min_send_interval_s"): (0.0, 60),
     ("runtime", "trading_timeout_s"): (0.1, 2.0),
     ("runtime", "weight_per_min"): (1, 1200),
@@ -191,6 +207,9 @@ def load(config_dir: str | os.PathLike, env: dict | None = None) -> Config:
     cfg.tg_token = env.get("TELEGRAM_BOT_TOKEN", "")
     cfg.tg_chat_id = env.get("TELEGRAM_CHAT_ID", "")
     cfg.pin = env.get("COPYBOT_PIN", "")
+    cfg.dc_token = env.get("DISCORD_BOT_TOKEN", "")
+    cfg.dc_channel_id = env.get("DISCORD_CHANNEL_ID", "")
+    cfg.dc_owner_id = env.get("DISCORD_OWNER_ID", "")
     return cfg
 
 
@@ -234,6 +253,6 @@ def scaled(cfg: Config, risk_pct: float) -> Config:
 def public_dict(cfg: Config) -> dict:
     """Config without secrets, safe to log."""
     d = asdict(cfg)
-    for k in ("tg_token", "tg_chat_id", "pin"):
+    for k in ("tg_token", "tg_chat_id", "pin", "dc_token", "dc_channel_id", "dc_owner_id"):
         d.pop(k)
     return d

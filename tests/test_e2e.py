@@ -114,8 +114,8 @@ def test_full_bot_in_process(env):
         p = bot.st.positions["ETH"]
         assert p.stop_px == pytest.approx(p.entry_px * 0.97)
         assert bot.st.lags_ms[-1] < 5000
-        assert wait_for(lambda: any("🟢 LONG <b>ETH</b>" in m["text"] for m in tg.sent))
-        card = next(m for m in tg.sent if "🟢 LONG <b>ETH</b>" in m["text"])["message_id"]
+        assert wait_for(lambda: any("<b>ETH</b> ⬆️ LONG" in m["text"] for m in tg.sent))
+        card = next(m for m in tg.sent if "<b>ETH</b> ⬆️ LONG" in m["text"])["message_id"]
         # price moves -> the SAME message is edited
         hl.mids["ETH"] = 3030.0
         assert wait_for(lambda: "3,030" in tg.messages[card] or "3030" in tg.messages[card])
@@ -149,7 +149,7 @@ def test_full_bot_in_process(env):
         # leader closes -> we close, and the trade card becomes a final summary in place
         hl.push_fills(LEADER, [leader_fill(hl, "ETH", 50, "A")])
         assert wait_for(lambda: "ETH" not in bot.st.positions, timeout=5)
-        assert wait_for(lambda: "✅ WIN" in tg.messages[card] and "leader closed" in tg.messages[card])
+        assert wait_for(lambda: "✅ WIN" in tg.messages[card] and "the trader closed" in tg.messages[card])
         assert not any("ETH" in m["text"] and "WIN" in m["text"] for m in tg.sent[n_sent:])   # no new message
         # flatten with PIN
         hl.push_fills(LEADER, [leader_fill(hl, "BTC", 5, "A")])

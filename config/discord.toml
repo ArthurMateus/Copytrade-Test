@@ -1,0 +1,6 @@
+# Discord UI (runs next to Telegram; either can be left unset). Secrets come from the environment ONLY:
+#   DISCORD_BOT_TOKEN, DISCORD_CHANNEL_ID (where the bot posts), DISCORD_OWNER_ID (the only user it obeys)
+api_base = "https://discord.com/api/v10"
+gateway_url = "wss://gateway.discord.gg/?v=10&encoding=json"
+edit_min_interval_s = 5.0     # at most one edit per message per this many seconds
+min_send_interval_s = 1.1     # global spacing of all messages/edits to the channel
