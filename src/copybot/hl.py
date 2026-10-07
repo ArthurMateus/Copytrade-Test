@@ -137,6 +137,28 @@ def parse_positions(obj: dict) -> dict[str, float]:
 
 
 @dataclass(frozen=True)
+class OpenPos:
+    coin: str
+    szi: float         # signed size
+    value: float       # position value (USD)
+    upnl: float        # unrealized pnl (USD)
+
+
+@dataclass(frozen=True)
+class Account:
+    value: float                 # perp account value (margin summary)
+    positions: tuple = ()        # OpenPos, non-zero only
+
+
+def parse_account(obj: dict) -> Account:
+    """clearinghouseState -> perp account value and open positions with their unrealized pnl."""
+    ps = tuple(OpenPos(p["coin"], float(p["szi"]), float(p.get("positionValue") or 0),
+                       float(p.get("unrealizedPnl") or 0))
+               for p in (ap["position"] for ap in obj.get("assetPositions", [])) if float(p["szi"]) != 0)
+    return Account(float((obj.get("marginSummary") or {}).get("accountValue") or 0), ps)
+
+
+@dataclass(frozen=True)
 class Asset:
     name: str
     sz_decimals: int
@@ -311,6 +333,10 @@ class Info:
 
     def positions(self, user: str, timeout: float) -> dict[str, float]:
         return parse_positions(self.post({"type": "clearinghouseState", "user": user}, CRITICAL, timeout))
+
+    def account(self, user: str, timeout: float = 20.0) -> Account:
+        """A leader's live account for scoring (BULK: never competes with exits)."""
+        return parse_account(self.post({"type": "clearinghouseState", "user": user}, BULK, timeout))
 
     def meta(self, cls: str = CRITICAL, timeout: float = 5.0) -> dict[str, Asset]:
         return parse_meta(self.post({"type": "metaAndAssetCtxs"}, cls, timeout))

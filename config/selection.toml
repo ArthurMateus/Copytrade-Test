@@ -10,7 +10,9 @@ min_win_rate = 0.60           # a wallet needs at least this win rate to be elig
 min_score = 70.0              # ... at least this score out of 100  [1, 100]
 min_profit_factor = 2.0       # ... and a profit factor (money won / money lost) of at least this  [1, 10]
 max_drawdown = 0.30           # ... and a biggest fall from a peak of at most this (0.30 = 30%)  [0.05, 1]
-# Changing these three rescores the saved wallets automatically at the next start.
+max_open_loss = 0.15          # ... and open (not yet closed) losses of at most this share of its account. A losing
+                              # position it keeps open also counts as a lost trade in its win rate.  [0.01, 1]
+# Changing these rescores the saved wallets automatically at the next start.
 swaps_per_cycle = 1           #                                              [1, 1]
 history_days = 180            # fills history used for scoring               [60, 180]
 max_candidates = 2000         # prescreened wallets that get fill-screened per review (about 7 per minute: the

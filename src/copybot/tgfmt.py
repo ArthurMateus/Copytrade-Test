@@ -283,6 +283,8 @@ def traders_card(st: State, mids: dict, ranks: dict[str, int], scores: dict | No
         if sc:
             rows.append(("Their record", f"{sc.get('trades', 0)} trades · {sc.get('win_rate', 0) * 100:.0f}% win"))
             rows.append(("Profit factor", pf_text(sc.get("profit_factor", 0))))
+            if sc.get("open_losers"):
+                rows.append(("Holding losers", f"{sc['open_losers']} open · {sc.get('open_loss_pct', 0) * 100:.0f}% of account"))
         if a in st.followed and now_ms:
             rows.append(("Following for", dur(now_ms - st.followed[a])))
         if a in st.paused_leaders:

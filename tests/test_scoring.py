@@ -284,3 +284,34 @@ def test_max_drawdown_cap():
     s = scoring.full_score("0xa", fl, c, 200_000, NOW, scoring.ScoreParams(max_dd_cap=base.max_dd / 2))
     assert not s.eligible and s.reasons == [f"max_drawdown>{base.max_dd / 2 * 100:.0f}%"]
     assert "max_dd_cap" in s.rules
+
+
+def test_open_losers_count_as_lost_trades():
+    raw, cs = trader(NOW, trips=500, win=0.75)
+    fl, c = parse(raw), cand(cs)
+    base = scoring.full_score("0xa", fl, c, 200_000, NOW)
+    live = hl.Account(200_000, (hl.OpenPos("BTC", 1.0, 100_000, -2_000), hl.OpenPos("ETH", -5.0, 15_000, 300),
+                                hl.OpenPos("WIF", 100.0, 5_000, -500)))   # WIF: not a scored coin
+    main = scoring.ScoreParams(coins=("BTC", "ETH", "SOL"), alt_min_coins=1000)   # main coins only: WIF not scored
+    s = scoring.full_score("0xa", fl, c, 200_000, NOW, main, live)
+    wins = round(base.win_rate * base.trades)
+    assert s.live and s.open_losers == 1 and s.trades == base.trades
+    assert s.win_rate == pytest.approx(wins / (base.trades + 1)) and s.profit_factor < base.profit_factor
+    assert s.open_loss_pct == pytest.approx(2_500 / 200_000)   # the account-level figure counts every coin
+    assert s.eligible
+
+
+def test_open_loss_cap_and_empty_account():
+    raw, cs = trader(NOW, trips=500, win=0.75)
+    fl, c = parse(raw), cand(cs)
+    # the losers sit in a coin it is not scored on, so only the account-level cap can reject it
+    p = scoring.ScoreParams(max_open_loss=0.15, coins=("BTC", "ETH", "SOL"), alt_min_coins=1000)
+    assert "max_open_loss" in p.rules()
+    bag = hl.Account(50_000, (hl.OpenPos("WIF", 1.0, 90_000, -10_000),))   # 10k of max(50k, 200k) = 5%: ok
+    assert scoring.full_score("0xa", fl, c, 200_000, NOW, p, bag).eligible
+    bag = hl.Account(50_000, (hl.OpenPos("WIF", 1.0, 90_000, -40_000),))   # 20% of the account
+    s = scoring.full_score("0xa", fl, c, 200_000, NOW, p, bag)
+    assert not s.eligible and s.reasons == ["open_losses>15%"] and s.score == 0
+    s = scoring.full_score("0xa", fl, c, 200_000, NOW, p, hl.Account(0.0, ()))   # moved its money out
+    assert not s.eligible and s.reasons == ["account_empty"]
+    assert scoring.full_score("0xa", fl, c, 200_000, NOW, p, hl.Account(50.0, (hl.OpenPos("BTC", 1.0, 900, 5),))).eligible

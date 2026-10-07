@@ -121,6 +121,13 @@ instances on the same wallet.
   edge 25, profit factor 15, consistency 15, trade count 15, win rate 10, max DD 10, current DD 5, concentration 5.
   Eligibility floors (owner request 2026-10-05): win rate ≥ `min_win_rate` (60%), score ≥ `min_score` (70) and profit
   factor ≥ `min_profit_factor` (2.0), biggest drop ≤ `max_drawdown` (30%, owner request 2026-10-06). Each score stores its `rules`; changing a floor rescores at the next start.
+  **Live account (owner request 2026-10-06, `scoring.VERSION` 5):** `Scorer.score` reads the wallet's
+  `clearinghouseState` (`Info.account`, BULK). Each losing open position in the scored coins counts as a lost trade
+  (win rate and profit factor); open losses over `max_open_loss` (15%) of max(perp value, leaderboard value), counting
+  every coin, reject (`open_losses>15%`), and an empty perp account with no position rejects (`account_empty`).
+  Followed leaders are rescored every cycle, so they leave after `confirm_cycles`. Found live: followed wallets with a
+  90% win rate sitting on open losses of 60% of the account, and one that moved all its money out of perps.
+  A failed account fetch skips these gates (logged `account_fetch_failed`).
   `max_candidates` = 2000 (≈ all of the ~2,200 pre-screened; the first full pass takes 5–6 h, about 7 wallets/min).
   `scoring.SCREEN_VERSION` and `scoring.VERSION` are separate: a score-only change rescores the screened wallets
   from cached fills at startup (`Scorer.rescore_missing`) instead of re-screening 400 wallets.

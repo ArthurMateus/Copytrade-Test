@@ -135,7 +135,8 @@ class Scorer:
                                           alt_max_share=cfg.selection.alt_max_coin_share,
                                           min_win_rate=cfg.selection.min_win_rate, min_score=cfg.selection.min_score,
                                           min_profit_factor=cfg.selection.min_profit_factor,
-                                          max_dd_cap=cfg.selection.max_drawdown)
+                                          max_dd_cap=cfg.selection.max_drawdown,
+                                          max_open_loss=cfg.selection.max_open_loss)
         # results of an older screen/score version, or scored under other eligibility floors, are redone
         # (screened wallets are rescored from the disk cache at startup: see rescore_missing)
         self.screened: dict = {a: d for a, d in self.cache.get("screened.json", {}).items()
@@ -284,11 +285,17 @@ class Scorer:
         coins = sorted({f.coin for f in fills if hl.is_core_perp(f.coin)})
         cs = {c: self.candles(c, start, now) for c in coins}
         av = self.screened.get(a, {}).get("account_value", 0.0)
-        s = scoring.full_score(a, fills, cs, av, now, self.params)
+        try:   # live positions: losers it keeps open count against it (followed leaders are rescored every cycle)
+            live = self.info.account(a)
+        except Exception as e:
+            log.warn("account_fetch_failed", addr=a, err=str(e))
+            live = None
+        s = scoring.full_score(a, fills, cs, av, now, self.params, live)
         self.scores[a] = s.to_dict()
         log.info("scored", addr=a, eligible=s.eligible, score=round(s.score, 1), trades=s.trades,
                  win=round(s.win_rate, 3), pf=round(s.profit_factor, 2), edge_bps=round(s.copy_edge_bps, 1),
-                 mdd=round(s.max_dd, 3), diversified=s.diversified, why=",".join(s.reasons))
+                 mdd=round(s.max_dd, 3), open_loss=round(s.open_loss_pct, 3), open_losers=s.open_losers,
+                 diversified=s.diversified, why=",".join(s.reasons))
 
     # ---- hourly cycle ------------------------------------------------------------------------------
     def ranking(self) -> list[str]:

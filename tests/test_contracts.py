@@ -74,6 +74,16 @@ def test_clearinghouse_positions_parse():
     assert pos and all(isinstance(v, float) and v != 0 for v in pos.values())
 
 
+def test_clearinghouse_account_parse():
+    raw = fixture("clearinghouse_state.json")
+    acc = hl.parse_account(raw)
+    assert acc.value == float(raw["marginSummary"]["accountValue"])
+    assert {p.coin: p.szi for p in acc.positions} == hl.parse_positions(raw)
+    btc = next(p for p in acc.positions if p.coin == "BTC")
+    assert btc.upnl == 727.086276 and btc.value == 193372.344386
+    assert any(p.upnl < 0 for p in acc.positions)
+
+
 def test_meta_parse():
     meta = hl.parse_meta(fixture("meta_and_asset_ctxs.json"))
     assert meta["BTC"].sz_decimals == 5 and meta["BTC"].max_leverage >= 10

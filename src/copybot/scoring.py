@@ -6,7 +6,9 @@ it is DIVERSIFIED (net profitable in several coins, none dominating its profit):
 counts (memecoins included) and the bot may copy all of them. What we score is what we copy.
 
 Hard rejects are kept for wallets we cannot copy (too fast/HFT, mostly spot or maker, almost never closes a
-main-coin trade, trades too small to mirror, no edge after our costs). Everything about quality (trade count, win rate,
+main-coin trade, trades too small to mirror, no edge after our costs) and for live accounts that are empty or
+sitting on big unrealized losses. A losing position the trader keeps open counts as a lost trade, so holding
+losers instead of closing them cannot inflate the win rate. Everything about quality (trade count, win rate,
 profit factor, consistency, drawdowns, concentration) becomes points of a 0-100 score; eligible wallets score
 1-100 and the best ones are followed.
 """
@@ -16,13 +18,14 @@ import bisect
 import statistics
 from dataclasses import asdict, dataclass, field
 
-from copybot.hl import Candle, Fill, LbRow, is_core_perp
+from copybot.hl import Account, Candle, Fill, LbRow, is_core_perp
 
 SCREEN_VERSION = 3   # bump when fill_screen changes: cached screen results of another version are redone
-VERSION = 4          # bump when full_score changes: cached scores of another version are redone
+VERSION = 5          # bump when full_score changes: cached scores of another version are redone
 
 DAY = 86_400_000
 EPS = 1e-12
+EMPTY_USD = 100.0    # a live perp account below this with no open position has left: nothing to copy
 
 
 # ---- 1. pre-screen from the leaderboard row alone -------------------------------------------------
@@ -248,6 +251,9 @@ class Score:
     diversified: bool = False                    # profitable across coins: copied in every perp, not only main coins
     coin_pnl: dict = field(default_factory=dict)  # biggest net pnl contributors, all core perps
     copy_edge_bps: float = 0.0
+    open_losers: int = 0          # losing positions still open (counted as lost trades)
+    open_loss_pct: float = 0.0    # unrealized losses of all open positions / account value
+    live: bool = False            # the live account was checked
     shrink: float = 0.0
     scored_ms: int = 0
     points: dict = field(default_factory=dict)   # component -> points; they add up to `score` (0-100)
@@ -277,11 +283,13 @@ class ScoreParams:
     min_score: float = 1.0         # hard floor on the 0-100 score
     min_profit_factor: float = 1.0 # hard floor on the profit factor (above 1 is always required)
     max_dd_cap: float = 1.0        # hard cap on the max drawdown (1.0 = none)
+    max_open_loss: float = 1.0     # hard cap on live unrealized losses / account value (1.0 = none)
 
     def rules(self) -> dict:
         """The eligibility floors: a cached score made under other floors is redone."""
         return {"min_win_rate": self.min_win_rate, "min_score": self.min_score,
-                "min_profit_factor": self.min_profit_factor, "max_dd_cap": self.max_dd_cap}
+                "min_profit_factor": self.min_profit_factor, "max_dd_cap": self.max_dd_cap,
+                "max_open_loss": self.max_open_loss}
 
 
 # component -> weight; the weights add up to 100
@@ -371,7 +379,8 @@ def drawdowns(curve: list[float]) -> tuple[float, float]:
 
 
 def full_score(address: str, fills: list[Fill], candles: dict[str, list[Candle]], account_value: float,
-               now_ms: int, p: ScoreParams = ScoreParams()) -> Score:
+               now_ms: int, p: ScoreParams = ScoreParams(), live: Account | None = None) -> Score:
+    """`live` is the wallet's account right now (None = not checked: the live gates are skipped)."""
     start = now_ms - p.blocks * p.block_days * DAY
     fl = [f for f in fills if f.time >= start]
     trips = [t for t in round_trips(fl) if t.close_ms >= start]
@@ -384,10 +393,17 @@ def full_score(address: str, fills: list[Fill], candles: dict[str, list[Candle]]
     if n == 0:
         s.reasons = ["no_round_trips"]
         return s
+    held: list[float] = []   # unrealized pnl of the losing positions it keeps open, in the coins we score
+    if live is not None:
+        s.live = True
+        core = [q for q in live.positions if is_core_perp(q.coin)]
+        held = [q.upnl for q in core if q.upnl < 0 and (p.coins is None or s.diversified or q.coin in p.coins)]
+        s.open_losers = len(held)
+        s.open_loss_pct = -sum(q.upnl for q in core if q.upnl < 0) / max(live.value, account_value, 1.0)
     nets = [t.net for t in trips]
     s.pnl = sum(nets)
-    s.win_rate = sum(1 for x in nets if x > 0) / n
-    gp, gl = sum(x for x in nets if x > 0), -sum(x for x in nets if x < 0)
+    s.win_rate = sum(1 for x in nets if x > 0) / (n + len(held))
+    gp, gl = sum(x for x in nets if x > 0), -sum(x for x in nets if x < 0) - sum(held)
     s.profit_factor = gp / gl if gl > 0 else (99.0 if gp > 0 else 0.0)
     blocks = [0.0] * p.blocks
     for t in trips:
@@ -410,6 +426,8 @@ def full_score(address: str, fills: list[Fill], candles: dict[str, list[Candle]]
         (s.win_rate >= p.min_win_rate, f"win_rate<{p.min_win_rate * 100:.0f}%"),
         (s.profit_factor >= p.min_profit_factor, f"profit_factor<{p.min_profit_factor:g}"),
         (s.max_dd <= p.max_dd_cap, f"max_drawdown>{p.max_dd_cap * 100:.0f}%"),
+        (live is None or bool(live.positions) or live.value >= EMPTY_USD, "account_empty"),
+        (s.open_loss_pct <= p.max_open_loss, f"open_losses>{p.max_open_loss * 100:.0f}%"),
     ]
     s.points = points(s, p)
     if sum(s.points.values()) < p.min_score:
