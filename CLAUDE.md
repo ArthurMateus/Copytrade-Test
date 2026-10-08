@@ -14,7 +14,8 @@ that are not listed there unless the owner asks. The README covers run instructi
 ## Hard rules (never break)
 - Never import a signing library, read a wallet key, or call an exchange/order endpoint.
   `tests/test_safety.py` enforces this.
-- Secrets come from environment variables only: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `COPYBOT_PIN`.
+- Secrets come from environment variables only: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `COPYBOT_PIN`, and for the
+  Solana book `FOMO_COOKIE` or `FOMO_COOKIE_FILE`, `DISCORD_BOT_TOKEN`, `DISCORD_CHANNEL_ID`, `DISCORD_OWNER_ID`.
   Never log or commit them. `log.py` redacts them.
 - Every order goes through `RiskGate.check` (`risk.py`). Exits (reduce/close/stop) are never refused; entries
   fail closed.
@@ -23,7 +24,7 @@ that are not listed there unless the owner asks. The README covers run instructi
 - Tests fake only the network (`tests/fakes.py`: loopback HL REST + WS + Telegram). Never mock our own code.
   Parsers are tested against real recorded responses in `tests/fixtures` (re-record with
   `tools/record_samples.py`).
-- Run `uv run pytest` after every change (about 1 minute, 131 tests at the time of writing, including real-process
+- Run `uv run pytest` after every change (about 2 minutes, 196 tests at the time of writing, including real-process
   kill -9 restarts).
 
 ## Layout (`src/copybot/`)
@@ -42,6 +43,8 @@ that are not listed there unless the owner asks. The README covers run instructi
 | `feed.py` | Websocket (allMids + userFills, max 15 users) and the exchange `Clock` offset estimate |
 | `tg.py`, `tgfmt.py` | Telegram: owner-only commands, outbox; cards edited in place, rate-limited; renderers |
 | `runner.py` | `Bot`: boot/repair, worker threads, trading loop, commands, selection application, heartbeat |
+| `sol/` | **Solana memecoin paper book** (own $300, own ledger `data/sol/`, own risk gate). `fomo.py` client + parsers, `scoring.py` strict pure scoring, `scorer.py` thread + cache, `market.py` DexScreener + paper broker, `risk.py` gate, `trader.py` detector + positions, `runner.py` `SolBot` (threads inside the main process), `fmt.py` cards |
+| `discord_ui.py` | Discord REST UI with the same interface as `TelegramUI`; `UIGroup` fans out to both. Cards keep ids under `dc:<key>` |
 
 Runtime state: `data/ledger.jsonl` (the source of truth), `data/cache/`, `data/bot.lock` (single instance) and
 `logs/copybot.log`. All of these are git-ignored. Moving the bot to another PC means copying `data/`. Never run two
@@ -56,6 +59,19 @@ instances on the same wallet.
 - A screen result is cached for 7 days per wallet (rejected wallets get retried after that).
 - `/resume` writes an `ack` event that clears acknowledged restart uncertainties.
 - Lag = exchange-clock time of our paper fill minus the leader's fill time.
+
+## Solana / FOMO / Discord (added 2026-10-07 at the owner's request; not in the original spec)
+- Wallets come from the FOMO leaderboard (`prod-api.fomo.family/v2/leaderboard/{24h,7d,30d}`, 150 rows each) and are
+  re-verified from `/v2/users/{id}/swaps?limit=N` (newest first; `limit` is the ONLY working paging parameter). Both need
+  the owner's logged-in session cookie. The API is private and can change; fixtures in `tests/fixtures/fomo_*.json`
+  are real recordings. pump.fun was checked and has no trader leaderboard (Cloudflare, undocumented endpoints): not used.
+- Ledger reuse: Solana positions are `Position(side=+1, leverage=1, coin=<mint>, sym=<symbol>)` in the same `State`; a
+  `cursor` event stores the newest handled swap time per leader so a restart never re-copies old swaps.
+- Entries need DexScreener liquidity >= `min_liquidity_usd`; bonding-curve pools often have none -> refused (fail closed).
+- Reduces are target-based (`k x leader balance`), so a trim too small to trade is caught up by the next one.
+- Bug found and fixed while building it: `_skip(..., kind=...)` collided with `notify(kind, ...)` (also in `positions.py`).
+- Open risks: the FOMO cookie may expire (hours or days unknown); while it is dead the bot cannot see leader sells, only
+  stops protect open copies. Copy lag is poll-based (seconds).
 
 ## Findings from the real API (2026-10-05)
 - One websocket can track at most 15 users. Live `userFills` messages have no `isSnapshot`, and `hash` can be all zeros.

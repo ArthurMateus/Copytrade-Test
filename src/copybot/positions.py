@@ -39,7 +39,8 @@ class PositionManager:
         log.info("copy_skip", reason=why, **kw)
         if why.startswith("below_min_notional"):
             self._rec({"ev": "count", "name": "skipped_min_notional"})
-        self.notify("skip", reason=why, **kw)
+        # `kind` is notify()'s own first argument: pass the order kind under another name
+        self.notify("skip", reason=why, **{("order" if k == "kind" else k): v for k, v in kw.items()})
 
     def _lag(self, h: Health, move: Move | None) -> float | None:
         return None if move is None else h.exchange_now_ms() - move.time_ms

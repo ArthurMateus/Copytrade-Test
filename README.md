@@ -25,7 +25,7 @@ download cache lives in `data/cache/`. Logs go to `logs/copybot.log` (rotating, 
 Settings are in `config/*.toml`. Every limit has a documented range, and the bot refuses to start when a
 value is outside it.
 
-Run the tests: `uv run pytest` (about 1 minute; this includes real-process kill -9 restarts).
+Run the tests: `uv run pytest` (about 2 minutes; this includes real-process kill -9 restarts).
 
 ## What it does
 
@@ -57,6 +57,65 @@ Telegram commands: `/status` and `/leaders` (live cards, edited in place), `/pos
 - **Leader pause:** a leader is paused after 5 consecutive losing copies, or when its copy drawdown exceeds 10% of its allocation (equity / 7). The next cycle drops it, and it cannot rejoin for 7 days.
 - **Reviews:** the scorer rescores the followed leaders and the top 15 every hour. A daily review downloads the leaderboard again and screens up to 400 pre-screened wallets. A screen result is kept for 7 days.
 - **Restart with doubt:** if the ledger has a torn line, an order intent with no result, or a position without a valid stop, the bot pauses entries, sends a Telegram alert and keeps running stops and exits. `/resume` acknowledges the problem.
+
+## Solana memecoin book (wallets from FOMO) and Discord
+
+A second **paper-only** book copies wallets from the FOMO leaderboard (Solana memecoins), next to the Hyperliquid
+one. It has its own $300, ledger (`data/sol/ledger.jsonl`), risk gate and scoring. It never signs, never holds a key
+and never sends a transaction: fills are simulated from the real DexScreener pool price and liquidity.
+Without a FOMO cookie it stays off and the Hyperliquid bot runs exactly as before.
+
+| Part | Module |
+|---|---|
+| FOMO client + parsers (leaderboard 24h/7d/30d, per-trader swaps) | `sol/fomo.py` |
+| Strict scoring from verified swaps | `sol/scoring.py` |
+| Background scorer, disk cache of swap history | `sol/scorer.py` |
+| DexScreener prices/liquidity + paper broker (price impact + 1% swap fee) | `sol/market.py` |
+| The Solana risk gate | `sol/risk.py` |
+| Leader swap detector + position manager (open/add/reduce/close, stop at entry) | `sol/trader.py` |
+| Threads, selection, commands | `sol/runner.py`, `sol/fmt.py` |
+| Discord (same cards as Telegram, edited in place) | `discord_ui.py` |
+
+**How a wallet is chosen.** Pre-screen from the FOMO boards (30d pnl, 7d must be positive, not losing today, not
+holding a big bag, not one-shot luck), then the wallet's swaps are re-checked: every rule in `config/sol.toml` must pass
+(60-day history, >= 40 round trips, win rate >= 40%, profit factor >= 1.5, 3 of the last 4 weeks positive, no single trade
+> 20% or token > 30% of the profit, median hold >= 60 s so it is not a sniper, open bag <= 30% of its buys, drawdown limits, and
+a positive copy edge after OUR fees, slippage and entry lag). The same hysteresis as Hyperliquid decides who is followed.
+
+**Risk (spot, no leverage).** 1% of the book per trade with a 30% stop = about $9.5 notional at $300; max 6% of the book in
+one token; entries refused below $25k pool liquidity (or when DexScreener has no liquidity figure), when the price or
+the leader feed is stale, or when the FOMO session is in doubt. Exits are never refused. Memecoins can gap through a stop:
+the paper fill uses the pool price when the stop is seen.
+
+### Setup (Windows PowerShell)
+1. **FOMO cookie.** Use a throwaway FOMO account (automated use may break FOMO's terms). In Chrome, open fomo.family
+   signed in, press F12, open the Network tab, reload, click any request to `prod-api.fomo.family`, and copy the whole
+   `cookie:` value from Request Headers. Save it as one line in a file inside the repo's `secrets` folder
+   (`secrets/fomo.cookie`, git-ignored), then:
+   ```powershell
+   setx FOMO_COOKIE_FILE "C:\My stuff\Copytrade Test\secrets\fomo.cookie"
+   ```
+   (`setx FOMO_COOKIE` also works, but Windows cuts values at 1024 characters, which a login cookie can exceed.)
+   When the session expires the bot alerts you on Telegram and Discord, stops adding wallets, and keeps the stops
+   running. Save a fresh cookie into the same file: it is picked up within seconds, no restart.
+2. **Discord (optional).** In the Discord developer portal create an application and a bot, switch on **Message Content
+   Intent**, invite it to your server with permissions *Send Messages*, *Read Message History* and *Manage Messages*
+   (the last one deletes a `!solflatten <PIN>` message). Turn on Developer Mode in Discord, then copy the channel id and
+   your own user id:
+   ```powershell
+   setx DISCORD_BOT_TOKEN "<bot token>"
+   setx DISCORD_CHANNEL_ID "<channel id>"
+   setx DISCORD_OWNER_ID "<your user id>"
+   ```
+3. Open a NEW terminal and `uv run copybot`.
+
+Commands (Telegram `/x`, Discord `!x`; only the owner can use them): `/sol` (live book card), `/solpositions`,
+`/solleaders` (live), `/solprogress`, `/solpause`, `/solresume`, `/solflatten <PIN>`, plus all the Hyperliquid commands.
+On Discord the PIN message is deleted right after it is read.
+
+**Limits to know.** The bot sees a leader's trades by polling FOMO every few seconds (`poll_leader_s`), so the copy lag is
+several seconds, not sub-second; it is measured and shown in `/solprogress`. FOMO is a private, undocumented API and its
+cookie can expire without notice. Both are logged and alerted, never hidden.
 
 ## Findings from the real API (recorded in `tests/fixtures`, re-record with `tools/record_samples.py`)
 - One websocket can track at most **15 users** (`"Cannot track more than 15 total users."`).

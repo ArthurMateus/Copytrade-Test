@@ -48,3 +48,41 @@ def test_log_redacts_secrets(tmp_path, capsys):
     out = capsys.readouterr().out + (tmp_path / "copybot.log").read_text(encoding="utf-8")
     assert "s3cr3tPIN" not in out and "ABCDEFGHIJ" not in out
     assert "event=x" in out and "***" in out
+
+
+def test_solana_and_discord_sections_load_with_documented_ranges(tmp_path):
+    import shutil
+    d = tmp_path / "config"
+    shutil.copytree("config", d)
+    cfg = config.load(d, env={})
+    assert cfg.sol.enabled and cfg.sol.stop_pct == 30.0 and cfg.discord.prefix == "!"
+    (d / "sol.toml").write_text("stop_pct = 99.0\n", encoding="utf-8")
+    with pytest.raises(config.ConfigError, match="sol.stop_pct"):
+        config.load(d, env={})
+    (d / "sol.toml").write_text("not_a_key = 1\n", encoding="utf-8")
+    with pytest.raises(config.ConfigError, match="unknown key"):
+        config.load(d, env={})
+    (d / "sol.toml").write_text("join_rank = 6\ndrop_rank = 5\n", encoding="utf-8")
+    with pytest.raises(config.ConfigError, match="drop_rank"):
+        config.load(d, env={})
+
+
+def test_new_secrets_come_from_the_environment_and_never_appear_in_public_config():
+    env = {"FOMO_COOKIE": "session=SECRETVALUE", "DISCORD_BOT_TOKEN": "DCTOKEN", "DISCORD_CHANNEL_ID": "1",
+           "DISCORD_OWNER_ID": "2"}
+    cfg = config.load("config", env=env)
+    assert (cfg.fomo_cookie, cfg.discord_token, cfg.discord_channel, cfg.discord_owner) == (
+        "session=SECRETVALUE", "DCTOKEN", "1", "2")
+    shown = str(config.public_dict(cfg)) + repr(cfg)
+    assert "SECRETVALUE" not in shown and "DCTOKEN" not in shown
+
+
+def test_strict_scoring_thresholds_cannot_be_loosened_past_their_ceilings(tmp_path):
+    import shutil
+    d = tmp_path / "config"
+    shutil.copytree("config", d)
+    for line in ("min_win_rate = 0.1", "max_drawdown = 0.9", "min_positive_weeks = 1", "max_open_buy_share = 0.9",
+                 "min_profit_factor = 1.0"):
+        (d / "sol.toml").write_text(line + "\n", encoding="utf-8")
+        with pytest.raises(config.ConfigError):
+            config.load(d, env={})

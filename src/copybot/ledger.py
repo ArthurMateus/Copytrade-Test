@@ -40,6 +40,7 @@ class Position:
     funding: float = 0.0
     entry_notional: float = 0.0
     open_lag_ms: float | None = None
+    sym: str = ""          # display symbol (Solana tokens; Hyperliquid coins are their own name)
 
     def risk_usd(self) -> float:
         return abs(self.entry_px - self.stop_px) * self.size
@@ -84,6 +85,7 @@ class State:
     open_intents: dict[str, dict] = field(default_factory=dict)
     uncertain: list[str] = field(default_factory=list)
     counters: dict[str, int] = field(default_factory=dict)
+    cursors: dict[str, int] = field(default_factory=dict)         # leader -> newest swap time handled (Solana)
     seq: int = 0
 
     # ---- derived -------------------------------------------------------------------------
@@ -212,7 +214,7 @@ class State:
             "pos_id": p.pos_id, "coin": p.coin, "side": p.side, "leader": p.leader, "entry": p.entry_px,
             "exit": px, "pnl": p.realized, "fees": p.fees, "funding": p.funding, "notional": p.entry_notional,
             "opened_ms": p.opened_ms, "closed_ms": int(ev["ts"]), "reason": ev.get("reason", ""),
-            "open_lag_ms": p.open_lag_ms, "leverage": p.leverage,
+            "open_lag_ms": p.open_lag_ms, "leverage": p.leverage, "sym": p.sym,
         })
 
     def _ev_funding(self, ev):
@@ -264,6 +266,9 @@ class State:
     def _ev_ack(self, ev):
         """The owner acknowledged the uncertainties raised so far (/resume)."""
         self.uncertain.clear()
+
+    def _ev_cursor(self, ev):
+        self.cursors[ev["leader"]] = max(self.cursors.get(ev["leader"], 0), int(ev["t"]))
 
     def _ev_count(self, ev):
         self.bump(ev["name"], int(ev.get("n", 1)))

@@ -1,0 +1,407 @@
+"""SolBot: the Solana paper book, running as threads inside the main process.
+
+Threads: poller (leader swaps, FOMO) | prices (DexScreener) | seeder (history -> leader balances) | scorer |
+this module's loop (decisions, paper broker, UI). Workers only talk to the loop through one queue, the loop is the
+only writer of state (ledger.append then State.apply, like the Hyperliquid side).
+It owns data/sol/ledger.jsonl and data/sol/cache/. Telegram/Discord go through the shared UI group.
+"""
+from __future__ import annotations
+
+import datetime as dt
+import queue
+import threading
+import time
+from pathlib import Path
+from types import SimpleNamespace
+
+from copybot import log, tgfmt
+from copybot.config import Config
+from copybot.ledger import Ledger, now_ms
+from copybot.selection import select
+from copybot.sol import fmt
+from copybot.sol.fomo import AuthError, FomoClient, FomoError
+from copybot.sol.market import PaperBroker, Prices
+from copybot.sol.risk import Health, SolGate
+from copybot.sol.scorer import SolScorer
+from copybot.sol.trader import Detector, Trader
+
+
+def day_key(ms: float) -> str:
+    return time.strftime("%Y-%m-%d", time.gmtime(ms / 1000))
+
+
+def week_key(ms: float) -> str:
+    y, w, _ = dt.datetime.fromtimestamp(ms / 1000, dt.timezone.utc).isocalendar()
+    return f"{y}-W{w:02d}"
+
+
+class SolBot:
+    def __init__(self, cfg: Config, ui, alert):
+        self.cfg, self.c, self.ui, self.alert_fn = cfg, cfg.sol, ui, alert
+        self.data = Path(cfg.runtime.data_dir) / "sol"
+        self.data.mkdir(parents=True, exist_ok=True)
+        self.q: queue.Queue = queue.Queue()
+        self.stop = threading.Event()
+        self.ledger = Ledger(self.data / "ledger.jsonl")
+        self.st = self.ledger.replay()
+        self.client = FomoClient(self.c.api_base, cfg.fomo_cookie, cookie_file=cfg.fomo_cookie_file)
+        self.prices = Prices(self.c.dex_url)
+        self.scorer = SolScorer(cfg, self.client, self.q, self.data / "cache")
+        self.det = Detector()
+        self.gate = SolGate(self.c)
+        self.broker = PaperBroker(self.c)
+        self.trader = Trader(self.c, self.st, self.ledger, self.gate, self.broker, self.prices, self.health, self.det,
+                             notify=self.on_notify)
+        self.auth_ok = True
+        self.last_poll_ok = 0.0
+        self.ready: set[str] = set()          # leaders whose balances are seeded (polling starts after this)
+        self.seeding: set[str] = set()
+        self.seed_q: queue.Queue = queue.Queue()
+        self.ranks: dict[str, int] = {}
+        self.scores: dict = {}
+        self.last_body: dict[str, str] = {}
+        self.live_cards: set[str] = set()
+        self.last_alert: dict[str, float] = {}
+
+    # ---- helpers ---------------------------------------------------------------------------------
+    def health(self) -> Health:
+        now = time.time()
+        return Health(now_ms=now_ms(), price_age_s=now - self.prices.last_ok if self.prices.last_ok else 1e9,
+                      leader_feed_age_s=now - self.last_poll_ok if self.last_poll_ok else 1e9, auth_ok=self.auth_ok)
+
+    def rec(self, ev: dict) -> dict:
+        ev = self.ledger.append(ev)
+        self.st.apply(ev)
+        return ev
+
+    def alert(self, text: str, key: str | None = None, every_s: float = 600) -> None:
+        k = key or text
+        if time.time() - self.last_alert.get(k, 0) < every_s:
+            return
+        self.last_alert[k] = time.time()
+        log.warn("sol_alert", text=text)
+        self.ui.send(f"⚠️ 🪙 {tgfmt.esc(text)}")
+
+    def wanted(self) -> set[str]:
+        return set(self.st.followed) | {p.leader for p in self.st.positions.values()}
+
+    def handle_of(self, a: str) -> str:
+        return self.scorer.handle(a)
+
+    # ---- boot -----------------------------------------------------------------------------------------
+    def boot(self) -> None:
+        log.info("sol_boot", paper=True)
+        if not self.st.genesis_ms:
+            self.rec({"ev": "genesis", "equity0": self.c.start_equity, "btc_px0": 0.0})
+        self.rec({"ev": "boot", "positions": len(self.st.positions), "followed": len(self.st.followed)})
+        problems = list(self.st.uncertain)
+        for iid in list(self.st.open_intents):
+            self.rec({"ev": "intent_abort", "intent": iid})
+        for p in list(self.st.positions.values()):
+            bad = p.stop_px <= 0 or p.stop_px >= p.entry_px
+            if bad:
+                stop = self.gate.stop_for(p.entry_px)
+                self.rec({"ev": "stop_set", "coin": p.coin, "pos_id": p.pos_id, "stop_px": stop})
+                log.error("sol_stop_repaired", token=p.coin, stop=stop)
+        if problems:
+            self.st.uncertain = problems
+            self.rec({"ev": "pause", "reason": "uncertain restart"})
+            self.ui.send("⚠️ 🪙 <b>Solana restart with uncertainty</b> · ⏸️ entries paused, exits keep running\n"
+                         + "\n".join(f"• {tgfmt.esc(x)}" for x in problems[:10]) + "\nCheck, then /solresume.")
+        log.info("sol_state", equity=round(self.st.equity(), 2), positions=len(self.st.positions),
+                 followed=len(self.st.followed), paused=self.st.entries_paused, trades=len(self.st.closed))
+        self.ui.send(f"🪙 <b>Solana book started</b> (paper) · {len(self.st.positions)} open · "
+                     f"{len(self.st.followed)} leaders" + (" · ⏸️ paused" if self.st.entries_paused else ""))
+
+    def start_threads(self) -> None:
+        for name, fn in (("sol-poll", self.poll_worker), ("sol-price", self.price_worker),
+                         ("sol-seed", self.seed_worker)):
+            threading.Thread(target=fn, name=name, daemon=True).start()
+        for a in self.wanted():
+            self.seed_q.put(a)
+        self.scorer.focus = set(self.st.followed)
+        self.scorer.start()
+
+    # ---- workers (never touch state: they only enqueue) -------------------------------------------------
+    def set_auth(self, ok: bool, why: str = "") -> None:
+        if ok != self.auth_ok:
+            self.auth_ok = ok
+            self.q.put(("auth", ok, why))
+
+    def seed_worker(self) -> None:
+        while not self.stop.is_set():
+            try:
+                a = self.seed_q.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            if a in self.ready:
+                continue
+            try:
+                uid = self.scorer.uid(a)
+                if not uid:
+                    raise FomoError(0, "unknown wallet id (not in the cached leaderboard)")
+                legs = self.scorer.history(a, uid)
+                cursor = self.st.cursors.get(a)
+                if cursor is None:
+                    cursor = now_ms()
+                self.q.put(("seeded", a, self.det.seed(a, legs, cursor), cursor))
+                self.set_auth(True)
+            except AuthError as e:
+                self.set_auth(False, str(e))
+                self.stop.wait(30)
+                self.seed_q.put(a)
+            except Exception as e:
+                log.warn("sol_seed_failed", leader=a, err=f"{type(e).__name__}: {e}"[:200])
+                self.stop.wait(15)
+                self.seed_q.put(a)
+
+    def poll_worker(self) -> None:
+        while not self.stop.is_set():
+            ok = True
+            for a in sorted(self.wanted() & self.ready):
+                try:
+                    uid = self.scorer.uid(a)
+                    legs, _ = self.client.swaps(uid, 25)
+                    cur = self.st.cursors.get(a, 0)
+                    if legs and len(legs) >= 25 and legs[0].ts > cur:    # whole page is new: there may be a gap
+                        legs, _ = self.client.swaps(uid, 200)
+                    self.q.put(("legs", a, legs))
+                    self.set_auth(True)
+                except AuthError as e:
+                    ok = False
+                    self.set_auth(False, str(e))
+                except FomoError as e:
+                    ok = False
+                    log.warn("sol_poll_failed", leader=a, err=str(e))
+                except Exception as e:
+                    ok = False
+                    log.warn("sol_poll_error", leader=a, err=f"{type(e).__name__}: {e}"[:200])
+            if ok:
+                self.last_poll_ok = time.time()
+            self.stop.wait(self.c.poll_leader_s)
+
+    def price_worker(self) -> None:
+        while not self.stop.is_set():
+            toks = list(self.st.positions)
+            if toks:
+                self.prices.fetch(toks, timeout=5.0)
+            else:
+                self.prices.last_ok = time.time()      # nothing to price: not stale
+            self.stop.wait(self.c.price_poll_s)
+
+    # ---- trading loop -----------------------------------------------------------------------------------
+    def run(self) -> None:
+        self.boot()
+        self.start_threads()
+        last_ui = last_beat = 0.0
+        while not self.stop.is_set():
+            t0 = time.time()
+            try:
+                self.tick()
+                if time.time() - last_ui >= 1.0:
+                    self.refresh_ui()
+                    last_ui = time.time()
+                if time.time() - last_beat >= 60:
+                    self.heartbeat()
+                    last_beat = time.time()
+            except Exception as e:
+                log.exception("sol_loop_error")
+                self.alert(f"Solana loop error: {type(e).__name__}: {e}"[:300], key=f"loop:{type(e).__name__}")
+            self.stop.wait(max(0.0, 0.25 - (time.time() - t0)))
+
+    def tick(self) -> None:
+        self.trader.check_stops()                      # exits first
+        deadline = time.time() + 0.2
+        while time.time() < deadline:
+            try:
+                item = self.q.get_nowait()
+            except queue.Empty:
+                break
+            self.handle(item)
+        now = now_ms()
+        eq = self.st.equity(self.trader.marks())
+        for kind, key in (("day", day_key(now)), ("week", week_key(now))):
+            if self.st.marks.get(kind, {}).get("key") != key:
+                self.rec({"ev": "mark", "kind": kind, "key": key, "equity": eq})
+        stale = self.trader.stale_marks(120)
+        if stale:
+            self.alert(f"no price for {', '.join(stale[:5])} for 2+ min: stops cannot run on them", key="stale",
+                       every_s=900)
+
+    def handle(self, item) -> None:
+        kind = item[0]
+        if kind == "legs":
+            a, legs = item[1], item[2]
+            if a in self.ready and a in self.wanted():
+                self.process(a, self.det.on_legs(a, legs), legs)
+        elif kind == "seeded":
+            a, later, cursor = item[1], item[2], item[3]
+            self.ready.add(a)
+            if a not in self.st.cursors:
+                self.rec({"ev": "cursor", "leader": a, "t": cursor})
+            self.process(a, self.det.on_legs(a, later), later)
+        elif kind == "auth":
+            ok, why = item[1], item[2]
+            if ok:
+                self.ui.send("✅ 🪙 FOMO session OK again.")
+            else:
+                self.alert(f"FOMO session rejected ({why}). Refresh FOMO_COOKIE. No new Solana wallets until then; "
+                           "exits and stops keep running.", key="auth", every_s=3600)
+        elif kind == "sol_auth":
+            self.auth_ok = item[1]
+        elif kind == "sol_ranking":
+            self.on_ranking(item[1], item[2], item[3])
+        elif kind == "sol_review":
+            n_pre, n_scored, n_el = item[1:]
+            self.ui.send(f"🔎 🪙 <b>Solana review</b> · {n_pre} passed the pre-screen · {n_scored} fully scored · "
+                         f"{n_el} eligible")
+        elif kind == "sol_alert":
+            self.alert(item[1])
+        elif kind == "cmd":
+            self.command(item[1])
+        elif kind == "card":
+            key, mid = item[1], item[2]
+            if mid is None:
+                if key in self.st.cards:
+                    self.rec({"ev": "card_drop", "key": key})
+            elif self.st.cards.get(key) != mid:
+                self.rec({"ev": "card", "key": key, "msg_id": mid})
+
+    def process(self, leader: str, moves, legs) -> None:
+        for m in moves:
+            self.trader.on_move(m)
+        if legs:
+            newest = max(g.ts for g in legs)
+            if newest > self.st.cursors.get(leader, 0):
+                self.rec({"ev": "cursor", "leader": leader, "t": newest})
+        self.trader.reconcile(leader)
+
+    # ---- selection --------------------------------------------------------------------------------------
+    def on_ranking(self, ranking: list[str], n_scored: int, scores: dict) -> None:
+        c = self.c
+        self.ranks = {a: i + 1 for i, a in enumerate(ranking)}
+        self.scores = scores
+        now = now_ms()
+        if n_scored < c.min_scored_to_start or not self.auth_ok:
+            return
+        if now - int(self.st.sel.get("at", 0)) < c.rescore_minutes * 60_000 * 0.9:
+            return
+        adapter = SimpleNamespace(
+            selection=SimpleNamespace(join_rank=c.join_rank, drop_rank=c.drop_rank, confirm_cycles=c.confirm_cycles,
+                                      min_follow_hours=c.min_follow_hours, swaps_per_cycle=1,
+                                      dropped_cooldown_days=c.dropped_cooldown_days),
+            risk=SimpleNamespace(max_leaders=c.max_leaders))
+        plan = select(self.st.sel, ranking, self.st.followed, set(self.st.paused_leaders), self.st.dropped, now, adapter)
+        for a, why in plan.drops:
+            self.rec({"ev": "unfollow", "leader": a, "reason": why})
+            held = sum(1 for p in self.st.positions.values() if p.leader == a)
+            log.info("sol_leader_dropped", leader=a, reason=why, open_copies=held)
+            self.ui.send(f"➖ 🪙 <b>Dropped</b> <code>{tgfmt.short(a)}</code> · {tgfmt.esc(why)}"
+                         + (f" · {held} copy still managed until exit" if held else ""))
+        for a in plan.joins:
+            self.rec({"ev": "follow", "leader": a, "rank": self.ranks.get(a)})
+            self.rec({"ev": "cursor", "leader": a, "t": now})     # follow from now on: never copy older swaps
+            self.seed_q.put(a)
+            s = scores.get(a, {})
+            log.info("sol_leader_followed", leader=a, rank=self.ranks.get(a), score=s.get("score"))
+            self.ui.send(f"➕ 🪙 <b>Following</b> {tgfmt.esc(fmt.who(a, self.handle_of(a)))} · rank #{self.ranks.get(a)}\n"
+                         + tgfmt.pre([
+                             ("Trades", str(s.get("trades", "-"))),
+                             ("Win", f"{s.get('win_rate', 0) * 100:.0f}%"),
+                             ("PF", f"{s.get('profit_factor', 0):.2f}"),
+                             ("Edge", f"{s.get('copy_edge_pct', 0):.1f}% / trade after costs"),
+                             ("Median hold", f"{s.get('median_hold_s', 0) / 60:.0f} min"),
+                             ("Open bag", f"{s.get('open_buy_share', 0) * 100:.0f}% of buys"),
+                         ]))
+        self.rec({"ev": "sel", "state": plan.state})
+        self.scorer.focus = set(self.st.followed)
+        if not ranking:
+            self.alert("no Solana wallet passed the strict scoring: following nobody new", key="no_eligible",
+                       every_s=6 * 3600)
+
+    # ---- notifications from the trader ----------------------------------------------------------------------
+    def on_notify(self, kind: str, **kw) -> None:
+        if kind in ("opened", "updated"):
+            p = self.st.positions.get(kw["token"])
+            if p:
+                self.card_for(p, force=True)
+        elif kind == "closed":
+            t = kw["trade"]
+            key = f"sol:pos:{t['pos_id']}"
+            self.last_body.pop(key, None)
+            self.ui.final_card(key, fmt.closed_card(t, self.handle_of(t["leader"])))
+        elif kind == "leader_paused":
+            self.ui.send(f"⏸️ 🪙 <b>Leader paused</b> <code>{tgfmt.short(kw['leader'])}</code> · "
+                         f"{tgfmt.esc(kw['reason'])}\nNo new copies from it; open copies keep mirroring exits.")
+
+    def card_for(self, p, force: bool = False) -> None:
+        key = f"sol:pos:{p.pos_id}"
+        mark = self.prices.marks().get(p.coin)
+        h = self.handle_of(p.leader)
+        body = fmt.trade_card(p, mark, 0, h)
+        if not force and self.last_body.get(key) == body:
+            return
+        self.last_body[key] = body
+        self.ui.set_card(key, fmt.trade_card(p, mark, now_ms(), h))
+
+    def refresh_ui(self) -> None:
+        for p in list(self.st.positions.values()):
+            self.card_for(p)
+        marks, h = self.prices.marks(), self.health()
+        for key in list(self.live_cards):
+            if key == "sol:status":
+                body = fmt.status_card(self.st, marks, h, 0, self.auth_ok)
+                full = lambda: fmt.status_card(self.st, marks, h, now_ms(), self.auth_ok)
+            else:
+                handles = {a: self.handle_of(a) for a in self.st.followed}
+                body = fmt.leaders_card(self.st, self.ranks, handles, 0)
+                full = lambda: fmt.leaders_card(self.st, self.ranks, handles, now_ms())
+            if self.last_body.get(key) != body:
+                self.last_body[key] = body
+                self.ui.set_card(key, full())
+
+    # ---- commands -----------------------------------------------------------------------------------------------
+    def command(self, c) -> None:
+        now, marks = now_ms(), self.prices.marks()
+        if c.name in ("/sol", "/solleaders"):
+            key = "sol:status" if c.name == "/sol" else "sol:leaders"
+            self.live_cards.add(key)
+            self.last_body.pop(key, None)
+            if key == "sol:status":
+                text = fmt.status_card(self.st, marks, self.health(), now, self.auth_ok)
+            else:
+                text = fmt.leaders_card(self.st, self.ranks, {a: self.handle_of(a) for a in self.st.followed}, now)
+            self.ui.set_card(key, text, new=True)
+        elif c.name == "/solpositions":
+            self.ui.send(fmt.positions_text(self.st, marks))
+        elif c.name == "/solprogress":
+            self.ui.send(fmt.progress_text(self.st, marks, now))
+        elif c.name == "/solpause":
+            self.rec({"ev": "pause", "reason": "/solpause"})
+            self.ui.send("⏸️ 🪙 <b>Solana entries paused.</b> Exits and stops keep running. /solresume to continue.")
+        elif c.name == "/solresume":
+            if self.st.uncertain:
+                self.rec({"ev": "ack", "items": list(self.st.uncertain)})
+            self.rec({"ev": "resume"})
+            self.ui.send("▶️ 🪙 <b>Solana entries resumed.</b>")
+        elif c.name == "/solflatten":
+            if not self.ui.check_pin(c.arg):
+                log.warn("sol_flatten_bad_pin")
+                self.ui.send("⛔ Wrong or missing PIN. Usage: /solflatten &lt;PIN&gt;")
+                return
+            n = len(self.st.positions)
+            self.rec({"ev": "pause", "reason": "/solflatten"})
+            self.trader.flatten("flatten")
+            self.ui.send(f"🛑 🪙 <b>Flattened</b> {n} Solana position(s). ⏸️ Entries paused · /solresume to continue.")
+
+    def heartbeat(self) -> None:
+        h = self.health()
+        log.info("sol_heartbeat", equity=round(self.st.equity(self.prices.marks()), 2), positions=len(self.st.positions),
+                 followed=len(self.st.followed), paused=self.st.entries_paused, trades=len(self.st.closed),
+                 auth=self.auth_ok, price_age_s=round(h.price_age_s, 1), leader_feed_age_s=round(h.leader_feed_age_s, 1),
+                 scored=len(self.scorer.scores), ready=len(self.ready))
+
+    def shutdown(self) -> None:
+        self.stop.set()
+        self.scorer.stop.set()
+        self.ledger.close()

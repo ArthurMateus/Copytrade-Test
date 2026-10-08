@@ -1,0 +1,550 @@
+{
+ "success": true,
+ "message": "30D Leaderboard found",
+ "responseObject": {
+  "leaderboard": [
+   {
+    "id": "d6a85eb5-d3fb-5b8a-8445-019af88ba512",
+    "address": "DPHECQsmgjJEJemEsv28A9D73AzgrgTpJtZe874YAHx6",
+    "evmAddress": "0x21e57a3958ce313e4bf93cd7549a04c82c052ccb",
+    "createdAt": "2026-09-18T16:17:32.398Z",
+    "displayName": "ExactTallTakin",
+    "userHandle": "ExactTallTakin",
+    "profilePictureLink": null,
+    "description": null,
+    "following": 12,
+    "followers": 99762,
+    "activated": false,
+    "verified": false,
+    "isReferred": false,
+    "isRestricted": false,
+    "swapCount": 446,
+    "numTrades": 218,
+    "totalVolume": 1622196.046526,
+    "private": false,
+    "thumbhash": null,
+    "coverPhotoLink": null,
+    "coverPhotoThumbhash": null,
+    "twitter": null,
+    "pnl30d": 803082.5322347687,
+    "clan": null,
+    "totalHoldings": 2,
+    "topHoldings": [
+     {
+      "imageUrl": "https://metadata.mobula.io/assets/logos/solana_solana_CvbQgsLreWuLhLtTWtJag5KbugeCCeVv55MD5gW6JHxc.webp",
+      "tokenAddress": "CvbQgsLreWuLhLtTWtJag5KbugeCCeVv55MD5gW6JHxc",
+      "networkId": 1399811149,
+      "humanAmount": 9388835.882454,
+      "price": 2.3076372494890548e-05,
+      "value": 216.6602741169029,
+      "pnl": 98.01075334781603
+     },
+     {
+      "imageUrl": "https://metadata.mobula.io/assets/logos/c22ae795835a20a8599f49da08f4ca082b58530c7ed6b8b18e6f1d24c1c282e0.png",
+      "tokenAddress": "DEW9dSN6QpWyNthphCpMmAbZP1Q4cEKR9xQXAri98WDP",
+      "networkId": 1399811149,
+      "humanAmount": 3565.627357,
+      "price": 0.022472083891573104,
+      "value": 80.12707709259207,
+      "pnl": -7.9712229074079115
+     }
+    ],
+    "badge": {
+     "type": "top_100_badge",
+     "title": "Top 100",
+     "text": "Awarded to traders who have reached all-time top 100 on the leaderboard",
+     "image": null,
+     "metadata": {
+      "rank": 53,
+      "totalPnL": 803082.5322347687
+     }
+    }
+   },
+   {
+    "id": "6eded5cb-8146-5627-9112-8e954ad3756d",
+    "address": "Bas4cfqXKLANG7gp1ptbfmT3vTHzdSpRde6USk6FF548",
+    "evmAddress": "0x5524cd9a08877749b3750bd82bf8eb2ef2c24b3a",
+    "createdAt": "2026-08-26T01:45:23.931Z",
+    "displayName": "Omakase",
+    "userHandle": "OmakaseOnly",
+    "profilePictureLink": null,
+    "description": "no socials",
+    "following": 92,
+    "followers": 30552,
+    "activated": false,
+    "verified": false,
+    "isReferred": true,
+    "isRestricted": false,
+    "swapCount": 1511,
+    "numTrades": 942,
+    "totalVolume": 3301267.297473,
+    "private": false,
+    "thumbhash": null,
+    "coverPhotoLink": null,
+    "coverPhotoThumbhash": null,
+    "twitter": null,
+    "pnl30d": 578096.4596186229,
+    "clan": {
+     "id": "421f1b09-3f5d-44f4-9350-69c94b3a922b",
+     "name": "mofos",
+     "iconLink": "https://prod-fomo-profile-pics.s3.amazonaws.com/e762eb070e75a95971ae98b1e8c787f9.png?k=281ExW0R4Ft2nf9-vrn05mPAg",
+     "iconThumbhash": "agcSDwDXuId3eIePdYZ4qHh3dn3313cP"
+    },
+    "totalHoldings": 26,
+    "topHoldings": [
+     {
+      "imageUrl": "https://metadata.mobula.io/assets/logos/solana_solana_6Mix12LiHrQFojaQEnfPUC65Qkwd6X4Y5Qg93oFbordr.webp",
+      "tokenAddress": "6Mix12LiHrQFojaQEnfPUC65Qkwd6X4Y5Qg93oFbordr",
+      "networkId": 1399811149,
+      "humanAmount": 7675894.150982,
+      "price": 0.0013640967036021101,
+      "value": 10470.661908553264,
+      "pnl": 12427.830625553266
+     },
+     {
+      "imageUrl": "https://metadata.mobula.io/assets/logos/2afadf326931341a84437d862ab1277e92012fcc418e227aa39438fdc6244d4c.png",
+      "tokenAddress": "BXoHJddsWJLHtAopeiSbKUSELsu8hSFMs8baGMDkpump",
+      "networkId": 1399811149,
+      "humanAmount": 10115359.819219,
+      "price": 0.004533602341744115,
+      "value": 45859.01896399559,
+      "pnl": 2586.9281189956146
+     },
+     {
+      "imageUrl": "https://metadata.mobula.io/assets/logos/solana_solana_HaQdrXRUoxxk1qLFZJNrSyzWNjn16o1r1np5h6jipump.webp",
+      "tokenAddress": "HaQdrXRUoxxk1qLFZJNrSyzWNjn16o1r1np5h6jipump",
+      "networkId": 1399811149,
+      "humanAmount": 10177382.136681,
+      "price": 0.000381154996442529,
+      "value": 3879.1600521009045,
+      "pnl": 1132.5314071009038
+     }
+    ],
+    "badge": {
+     "type": "top_100_badge",
+     "title": "Top 100",
+     "text": "Awarded to traders who have reached all-time top 100 on the leaderboard",
+     "image": null,
+     "metadata": {
+      "rank": 77,
+      "totalPnL": 586856.8742792852
+     }
+    },
+    "clanBadge": {
+     "type": "clan",
+     "title": "mofos",
+     "text": "Awarded for being in a clan",
+     "image": "https://prod-fomo-profile-pics.s3.amazonaws.com/e762eb070e75a95971ae98b1e8c787f9.png?k=281ExW0R4Ft2nf9-vrn05mPAg",
+     "metadata": {
+      "clanId": "421f1b09-3f5d-44f4-9350-69c94b3a922b",
+      "memberType": "member"
+     }
+    }
+   },
+   {
+    "id": "91a44dd1-6d93-55d0-88c9-77695572c9b7",
+    "address": "9ktJDJQk7rkYoGZ88v8Sm9ve8qYyPXeXJVN4uVvgPRYA",
+    "evmAddress": "0x44f70fa29c5efec55d0f97fcab18ae925e7e6104",
+    "createdAt": "2026-07-16T17:43:20.777Z",
+    "displayName": "RareDualJay",
+    "userHandle": "RareDualJay",
+    "profilePictureLink": "https://prod-fomo-profile-pics.s3.amazonaws.com/5aa7659cb7ad6499e8a54329c22c2b61_small.jpg?k=281ExW0R4Ft2nf9-vrn05mPAg",
+    "description": "who?",
+    "following": 23,
+    "followers": 70799,
+    "activated": false,
+    "verified": false,
+    "isReferred": false,
+    "isRestricted": false,
+    "swapCount": 1442,
+    "numTrades": 480,
+    "totalVolume": 1021369.216708,
+    "private": false,
+    "thumbhash": "ZegED46HZ5t4h4iKhmiYF6d6f3z4OHcA",
+    "coverPhotoLink": null,
+    "coverPhotoThumbhash": null,
+    "twitter": null,
+    "pnl30d": 512319.28007403424,
+    "clan": null,
+    "totalHoldings": 63,
+    "topHoldings": [
+     {
+      "imageUrl": "https://metadata.mobula.io/assets/logos/7c070ab98c0313ed0b947fd3f2eb25d4070736d1c720b4ac0793559f2e3e9a59.png",
+      "tokenAddress": "0xaa07a0e9209e16ac99708c3ec70159c6ef3128a3",
+      "networkId": 4663,
+      "humanAmount": 16568419.971710034,
+      "price": 0.04527216098007444,
+      "value": 750088.176144737,
+      "pnl": 1038240.6678000032
+     },
+     {
+      "imageUrl": "https://metadata.mobula.io/assets/logos/527f379e1992e785f0abb5fdcf91bb4f261c9b42b525916180cac117cc51166e.png",
+      "tokenAddress": "0x75e2fc69ff2ac12af65ba7d321bbf4f878c535d2",
+      "networkId": 1,
+      "humanAmount": 11778043.00032869,
+      "price": 0.006077901113248123,
+      "value": 71585.780663582,
+      "pnl": 73100.27532347481
+     },
+     {
+      "imageUrl": "https://metadata.mobula.io/assets/logos/249d656b7a960548d93007afdfed5d9a518ce92a6bbc15961791f39ca90ed1af.png",
+      "tokenAddress": "0x98096d17e191b3da1d5f99a6d7b3584351b11e18",
+      "networkId": 4663,
+      "humanAmount": 543755.4200962607,
+      "price": 0.04880379051454359,
+      "value": 26537.325613525554,
+      "pnl": 36223.99815026988
+     }
+    ],
+    "badge": {
+     "type": "top_100_badge",
+     "title": "Top 100",
+     "text": "Awarded to traders who have reached all-time top 100 on the leaderboard",
+     "image": null,
+     "metadata": {
+      "rank": 35,
+      "totalPnL": 1049548.9209162034
+     }
+    }
+   },
+   {
+    "id": "37d7f7be-a3fb-52a1-80b6-181d668aadfb",
+    "address": "3uuvQQNY8YjwK64M5A26Q8yM4xS31PueM7hq3db1LAUq",
+    "evmAddress": "0xa393b9ff89f4b9fbaddc2d0acaf0f578a567a151",
+    "createdAt": "2026-07-03T23:01:31.356Z",
+    "displayName": "bystevenr",
+    "userHandle": "bystevenr",
+    "profilePictureLink": "https://prod-fomo-profile-pics.s3.amazonaws.com/741f61cdb761b8b9465477fe6f22bb64_small.jpg?k=281ExW0R4Ft2nf9-vrn05mPAg",
+    "description": "All socials: bystevenr",
+    "following": 75,
+    "followers": 31868,
+    "activated": false,
+    "verified": false,
+    "isReferred": false,
+    "isRestricted": false,
+    "swapCount": 6259,
+    "numTrades": 2228,
+    "totalVolume": 6666378.824626,
+    "private": false,
+    "thumbhash": "mgcOJwr7d3djmYiXqLaIiHh5V2BZBpUF",
+    "coverPhotoLink": null,
+    "coverPhotoThumbhash": null,
+    "twitter": null,
+    "pnl30d": 496482.44795180357,
+    "clan": {
+     "id": "2a60ea17-139f-486b-b85e-03b7e61c7ded",
+     "name": "$",
+     "iconLink": "https://prod-fomo-profile-pics.s3.amazonaws.com/clans/2a60ea17-139f-486b-b85e-03b7e61c7ded/icon/d2b9e1e9b05de68bb37399040c8ee3a3.jpg?k=281ExW0R4Ft2nf9-vrn05mPAg",
+     "iconThumbhash": "RscJDwwHyHeHeIiCfIV3eIeIeo/H+HgN"
+    },
+    "totalHoldings": 14,
+    "topHoldings": [
+     {
+      "imageUrl": "https://metadata.mobula.io/assets/logos/17e57ee7431deb8638452da576411b1f7502910279af5e6721a598ad6039ab6f.png",
+      "tokenAddress": "0x4e67db19044549ff420860834c91b45bad298722",
+      "networkId": 1,
+      "humanAmount": 1923768.366927848,
+      "price": 0.020848883184792562,
+      "value": 40108.421956677856,
+      "pnl": 261328.8116255141
+     },
+     {
+      "imageUrl": "https://metadata.mobula.io/assets/logos/d16a49a0b3aa87b6f23aa0e72bbc358c21a77649c9f39cda6553b625dfef279e.png",
+      "tokenAddress": "oreoU2P8bN6jkk3jbaiVxYnG1dCXcYxwhwyK9jSybcp",
+      "networkId": 1399811149,
+      "humanAmount": 872.43579662909,
+      "price": 114.28118862980483,
+      "value": 99702.99984196307,
+      "pnl": 26616.006617698775
+     },
+     {
+      "imageUrl": "https://metadata.mobula.io/assets/logos/9c165d6b0cd3d034872aef8edd02df3127bb496c46ebc83e2bb720b84186f3e2.png",
+      "tokenAddress": "C1mBfBoDkwWfd6uTFZp62ARHLjeVp3bDpCDMfMZtPngE",
+      "networkId": 1399811149,
+      "humanAmount": 2788804.187794,
+      "price": 0.008700220481463985,
+      "value": 24263.211313437892,
+      "pnl": 9338.12131343789
+     }
+    ],
+    "clanBadge": {
+     "type": "clan",
+     "title": "$",
+     "text": "Awarded for being in a clan",
+     "image": "https://prod-fomo-profile-pics.s3.amazonaws.com/clans/2a60ea17-139f-486b-b85e-03b7e61c7ded/icon/d2b9e1e9b05de68bb37399040c8ee3a3.jpg?k=281ExW0R4Ft2nf9-vrn05mPAg",
+     "metadata": {
+      "clanId": "2a60ea17-139f-486b-b85e-03b7e61c7ded",
+      "memberType": "member"
+     }
+    }
+   },
+   {
+    "id": "c3772422-819a-5f6c-8fce-96376139ef69",
+    "address": "B8tB2a5uRHLSTg6hSoc8UDJaL6LeJYCaEVhfq6DEG5FF",
+    "evmAddress": "0x2b43776c2bce67c21ef0f7feb95b267f187ae197",
+    "createdAt": "2026-08-08T13:16:49.851Z",
+    "displayName": "generational fumble",
+    "userHandle": "GenerationalFumbler",
+    "profilePictureLink": "https://prod-fomo-profile-pics.s3.amazonaws.com/84541ea795ea4cd71bb244f2cda6c5e6_small.jpg?k=281ExW0R4Ft2nf9-vrn05mPAg",
+    "description": "follow me for generational wealth fumbles since 2017. My track record include fumbling 6m of $AI , 30m + $matic ,4m of $pons , 2m on $stonk and countless more.",
+    "following": 72,
+    "followers": 3632,
+    "activated": false,
+    "verified": false,
+    "isReferred": false,
+    "isRestricted": false,
+    "swapCount": 2823,
+    "numTrades": 821,
+    "totalVolume": 11689155.954331,
+    "private": false,
+    "thumbhash": "HfgFBwA0nOfEdmqfjCiVh5eY+xvdaJAG",
+    "coverPhotoLink": null,
+    "coverPhotoThumbhash": null,
+    "twitter": null,
+    "pnl30d": 489225.09951002453,
+    "clan": null,
+    "totalHoldings": 3,
+    "topHoldings": [
+     {
+      "imageUrl": "https://metadata.mobula.io/assets/logos/870cf54e693e68118536455b756f779d990d5402b1b69a9129833284be89df88.png",
+      "tokenAddress": "0x07ebb29a38fbcb41563817e5e19f2cec619c90d2",
+      "networkId": 4663,
+      "humanAmount": 1666330.3625741913,
+      "price": 0.06885498894403992,
+      "value": 114735.15869216398,
+      "pnl": 254343.511596879
+     },
+     {
+      "imageUrl": "https://metadata.mobula.io/assets/logos/6ad5ab5b875d16fa7497bad404d742d240bdd53a1a5a996dfd7cfe43bd1c5888.png",
+      "tokenAddress": "0xa26992c4268a8a78a4d872fe4bdad2ed03ac287d",
+      "networkId": 4663,
+      "humanAmount": 7175948.499160801,
+      "price": 0.0004408872090753464,
+      "value": 3163.783906263426,
+      "pnl": -13364.720085736571
+     },
+     {
+      "imageUrl": "https://metadata.mobula.io/assets/logos/e72d16933096a13f07011e1d0f15bc08eb8846adc743040eb8385380a0f8d383.png",
+      "tokenAddress": "0x83a49b808f8d5e02cb2931cd2352988f498e5ba3",
+      "networkId": 4663,
+      "humanAmount": 571694347.9644412,
+      "price": 8.443342774029916e-06,
+      "value": 4827.011341839308,
+      "pnl": -8822.80000016069
+     }
+    ]
+   },
+   {
+    "id": "dcf40072-45ba-5ae3-af7f-7250dd77e215",
+    "address": "CJDjRAjigb3UdsjxaV7AiMchhJV6qAcc3SjrSLFyytE3",
+    "evmAddress": "0x67cb01f8472f4e37d98ef323721a36254c1402e1",
+    "createdAt": "2025-10-25T15:31:16.239Z",
+    "displayName": "big babba johnson",
+    "userHandle": "bigbabba",
+    "profilePictureLink": "https://prod-fomo-profile-pics.s3.amazonaws.com/cf6c809de1858985e850854553c10b69_small.jpg?k=281ExW0R4Ft2nf9-vrn05mPAg",
+    "description": "only gambling here 🟢\npls don’t blindly copytrade",
+    "following": 364,
+    "followers": 81637,
+    "activated": false,
+    "verified": false,
+    "isReferred": true,
+    "isRestricted": false,
+    "swapCount": 14043,
+    "numTrades": 4557,
+    "totalVolume": 19609812.484712023,
+    "private": false,
+    "thumbhash": "2igKFwRJaYi5endQerdmiGpoePlplp8E",
+    "coverPhotoLink": "https://prod-fomo-profile-pics.s3.amazonaws.com/ce9dc5bca985f5270165ae3d88be9e7d.jpg?k=281ExW0R4Ft2nf9-vrn05mPAg",
+    "coverPhotoThumbhash": "2OgFEoCXkGORVpiYlUCopn8=",
+    "twitter": null,
+    "pnl30d": 485957.6768987861,
+    "clan": {
+     "id": "87c22801-d5a6-4e9e-8f18-bceadf8b1040",
+     "name": "Sparsity",
+     "iconLink": "https://prod-fomo-profile-pics.s3.amazonaws.com/bce128d2f92307586aa8eebb32855b83.jpg?k=281ExW0R4Ft2nf9-vrn05mPAg",
+     "iconThumbhash": "BQgCBwCc2EmMUWEZb4Rl30FqBAAAAAAA"
+    },
+    "totalHoldings": 58,
+    "topHoldings": [
+     {
+      "imageUrl": "https://metadata.mobula.io/assets/logos/1e5221e4f484bff69f2bde5d356f3483d59113f841433afb7424642828f84033.png",
+      "tokenAddress": "8PzFWyLpCVEmbZmVJcaRTU5r69XKJx1rd7YGpWvnpump",
+      "networkId": 1399811149,
+      "humanAmount": 29593419.292008,
+      "price": 0.002015712494399036,
+      "value": 59651.82501889,
+      "pnl": 17416.056680889902
+     },
+     {
+      "imageUrl": "https://metadata.mobula.io/assets/logos/40a0fda82288f2457a2cdeabdc3a18909cb92d7056d114cc998146a7d996f7c6.png",
+      "tokenAddress": "8k4sBtEeK4pf26noKqApv8NBTnuSJcbdwpKYknk5PbAA",
+      "networkId": 1399811149,
+      "humanAmount": 10708903.881705,
+      "price": 0.0012376659629009781,
+      "value": 13254.04583436444,
+      "pnl": -9011.904165635544
+     },
+     {
+      "imageUrl": "https://metadata.mobula.io/assets/logos/evm_4663_0x7706c18ee62f64452e779db29a70c32f97e69f49.webp",
+      "tokenAddress": "0x7706c18ee62f64452e779db29a70c32f97e69f49",
+      "networkId": 4663,
+      "humanAmount": 29976658.989666894,
+      "price": 0.0002908881101021384,
+      "value": 8719.85368068048,
+      "pnl": 5759.745308584807
+     }
+    ],
+    "badge": {
+     "type": "top_100_badge",
+     "title": "Top 100",
+     "text": "Awarded to traders who have reached all-time top 100 on the leaderboard",
+     "image": null,
+     "metadata": {
+      "rank": 20,
+      "totalPnL": 1493927.6691874382
+     }
+    },
+    "clanBadge": {
+     "type": "clan",
+     "title": "Sparsity",
+     "text": "Awarded for being in a clan",
+     "image": "https://prod-fomo-profile-pics.s3.amazonaws.com/bce128d2f92307586aa8eebb32855b83.jpg?k=281ExW0R4Ft2nf9-vrn05mPAg",
+     "metadata": {
+      "clanId": "87c22801-d5a6-4e9e-8f18-bceadf8b1040",
+      "memberType": "member"
+     }
+    }
+   },
+   {
+    "id": "69abe9cd-aae4-5208-9869-294d2b88e44b",
+    "address": "CNhr7y14KEqZmXCoa9aD9Vnj1wCMuzfgCq72qMzE2DmY",
+    "evmAddress": "0xcd11997721c4100f77effb06d79f66508616e9fe",
+    "createdAt": "2025-05-02T09:35:16.227Z",
+    "displayName": "k4rl",
+    "userHandle": "kv4rl",
+    "profilePictureLink": "https://prod-fomo-profile-pics.s3.amazonaws.com/4a4d984d427bceedcec2c64b183da042_small.jpg?k=281ExW0R4Ft2nf9-vrn05mPAg",
+    "description": "🪑\nX: @kv4rl",
+    "following": 20,
+    "followers": 44813,
+    "activated": true,
+    "verified": false,
+    "isReferred": true,
+    "isRestricted": false,
+    "swapCount": 355,
+    "numTrades": 121,
+    "totalVolume": 1610448.02721,
+    "private": false,
+    "thumbhash": "pRgODwL3qKeHeHiOe4eHmIiHmYAYCIgC",
+    "coverPhotoLink": null,
+    "coverPhotoThumbhash": null,
+    "twitter": null,
+    "pnl30d": 482267.8608929068,
+    "clan": null,
+    "totalHoldings": 4,
+    "topHoldings": [
+     {
+      "imageUrl": "https://image-renderer.fomo.cloud/hl/ZEC/icon.png",
+      "tokenAddress": "ZEC",
+      "networkId": 1337,
+      "pnl": 1241626.972718
+     },
+     {
+      "imageUrl": "https://metadata.mobula.io/assets/logos/8efd602186211ed624afdde59e6589bae3d3f73872d0687693fac9bf98b8bd4b.png",
+      "tokenAddress": "CARSsxWPkpQWvfyRBwfGMGvysJBHdHGfE46X5MNgmeta",
+      "networkId": 1399811149,
+      "humanAmount": 97878.34683,
+      "price": 0.14455611462550133,
+      "value": 14148.913523712054,
+      "pnl": 2534.6421997120533
+     },
+     {
+      "imageUrl": "https://metadata.mobula.io/assets/logos/evm_4663_0xfef370a7ee49ada9db325e74149dc88223bf8ab9.webp",
+      "tokenAddress": "0xfef370a7ee49ada9db325e74149dc88223bf8ab9",
+      "networkId": 4663,
+      "humanAmount": 80000,
+      "price": 3.380896880717586e-05,
+      "value": 2.704717504574069,
+      "pnl": -10.247014323505931
+     }
+    ],
+    "badge": {
+     "type": "top_100_badge",
+     "title": "Top 100",
+     "text": "Awarded to traders who have reached all-time top 100 on the leaderboard",
+     "image": null,
+     "metadata": {
+      "rank": 28,
+      "totalPnL": 1239642.4908512754
+     }
+    }
+   },
+   {
+    "id": "27000f4b-0bc3-572b-a018-2d6e50c512e0",
+    "address": "F4c8v33gFxnhqLj8J2c8ycsVBRa5N5hpaoF9mcMFPwME",
+    "evmAddress": "0x954177c30223a03e749966504058bcbec0eae217",
+    "createdAt": "2025-10-31T14:58:46.460Z",
+    "displayName": "pricedin",
+    "userHandle": "pricedin",
+    "profilePictureLink": null,
+    "description": "fomo 2026 rising star\nX: @dpricedin",
+    "following": 0,
+    "followers": 59409,
+    "activated": false,
+    "verified": false,
+    "isReferred": false,
+    "isRestricted": false,
+    "swapCount": 238,
+    "numTrades": 188,
+    "totalVolume": 954910.9754,
+    "private": false,
+    "thumbhash": null,
+    "coverPhotoLink": null,
+    "coverPhotoThumbhash": null,
+    "twitter": null,
+    "pnl30d": 467673.8938247103,
+    "clan": null,
+    "totalHoldings": 26,
+    "topHoldings": [
+     {
+      "imageUrl": "https://metadata.mobula.io/assets/logos/7c070ab98c0313ed0b947fd3f2eb25d4070736d1c720b4ac0793559f2e3e9a59.png",
+      "tokenAddress": "0xaa07a0e9209e16ac99708c3ec70159c6ef3128a3",
+      "networkId": 4663,
+      "humanAmount": 17150331.662868395,
+      "price": 0.04527216098007444,
+      "value": 776432.5759030457,
+      "pnl": 864736.5637269866
+     },
+     {
+      "imageUrl": "https://metadata.mobula.io/assets/logos/870cf54e693e68118536455b756f779d990d5402b1b69a9129833284be89df88.png",
+      "tokenAddress": "0x07ebb29a38fbcb41563817e5e19f2cec619c90d2",
+      "networkId": 4663,
+      "humanAmount": 2969454.794354331,
+      "price": 0.06886186984168108,
+      "value": 204482.20954958381,
+      "pnl": 173795.60209658378
+     },
+     {
+      "imageUrl": "https://metadata.mobula.io/assets/logos/evm_1_0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7.webp",
+      "tokenAddress": "0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7",
+      "networkId": 1,
+      "humanAmount": 7582.332825793768,
+      "price": 9.558526590677861,
+      "value": 72475.92993471934,
+      "pnl": 37277.59736571934
+     }
+    ],
+    "badge": {
+     "type": "top_100_badge",
+     "title": "Top 100",
+     "text": "Awarded to traders who have reached all-time top 100 on the leaderboard",
+     "image": null,
+     "metadata": {
+      "rank": 44,
+      "totalPnL": 916318.1306660676
+     }
+    }
+   }
+  ]
+ },
+ "statusCode": 200
+}

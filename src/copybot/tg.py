@@ -19,7 +19,8 @@ from dataclasses import dataclass, field
 from copybot import log
 from copybot.config import Config
 
-COMMANDS = ("/status", "/positions", "/leaders", "/progress", "/pause", "/resume", "/flatten", "/help")
+COMMANDS = ("/status", "/positions", "/leaders", "/progress", "/pause", "/resume", "/flatten", "/help",
+            "/sol", "/solpositions", "/solleaders", "/solprogress", "/solpause", "/solresume", "/solflatten")
 
 
 class TgError(Exception):

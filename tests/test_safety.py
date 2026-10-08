@@ -19,9 +19,18 @@ FORBIDDEN = re.compile(r"eth_account|eth_keys|eth_keyfile|coincurve|ecdsa|nacl|w
 
 
 def test_source_has_no_signing_or_keys():
-    for f in SRC.glob("*.py"):
+    for f in SRC.rglob("*.py"):
         for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
             assert not FORBIDDEN.search(line), f"{f.name}:{i}: {line.strip()}"
+
+
+def test_solana_side_has_no_wallet_keys_or_transaction_signing():
+    """The Solana book is paper only: it never imports a Solana/crypto library or touches a key."""
+    bad = re.compile(r"solders|solana.*import|import solana|nacl|base58|keypair|secretkey|sendTransaction|"
+                     r"signTransaction|simulateTransaction|private_key|mnemonic|seed_phrase", re.I)
+    for f in (SRC / "sol").glob("*.py"):
+        for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+            assert not bad.search(line), f"{f.name}:{i}: {line.strip()}"
 
 
 def test_importing_the_bot_loads_no_signing_library():

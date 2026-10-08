@@ -1,0 +1,61 @@
+# Solana memecoin book (paper only). Wallets come from the FOMO leaderboard, so it needs FOMO_COOKIE in the
+# environment (your logged-in fomo.family cookie; never logged or committed). Without it this whole section stays off.
+# Allowed ranges (hard ceilings, checked at start) are in brackets.
+enabled = true
+api_base = "https://prod-api.fomo.family"
+dex_url = "https://api.dexscreener.com"
+
+# -- the paper book
+start_equity = 300.0          # simulated Solana book, USD, separate from the Hyperliquid wallet   [10, 1e6]
+risk_per_trade_pct = 1.0      # stop distance x size, % of the book                                [0.1, 2]
+stop_pct = 30.0               # stop distance under the fill price (memecoins are noisy)           [5, 60]
+max_position_pct = 6.0        # one token, % of the book                                           [0.5, 10]
+max_positions = 8             #                                                                    [0, 10]
+max_total_risk_pct = 10.0     #                                                                    [0, 10]
+daily_loss_pct = 5.0          #                                                                    [0.1, 5]
+weekly_loss_pct = 10.0        #                                                                    [0.1, 10]
+max_orders_per_min = 30       #                                                                    [1, 30]
+min_notional_usd = 5.0        # smaller copies are skipped and logged                              [1, 1e6]
+min_liquidity_usd = 25000.0   # entries refused below this pool liquidity, or if it is unknown     [10000, 1e9]
+max_impact_pct = 2.0          # entry size clamped so the estimated price impact stays under this  [0.1, 5]
+max_entry_age_s = 30.0        # do not open on a leader swap older than this                       [1, 120]
+max_price_age_s = 10.0        #                                                                    [1, 120]
+max_leader_feed_age_s = 60.0  # leader polling silent longer than this = no entries                [5, 600]
+swap_fee_pct = 1.0            # paper fee per swap, % of notional                                  [0.1, 5]
+extra_slippage_pct = 0.5      # on top of the pool price impact                                    [0, 10]
+exit_fallback_penalty_pct = 30.0   # an exit with no known price fills at the last price minus this
+max_leaders = 5               #                                                                    [0, 7]
+leader_pause_dd_pct = 10.0    #                                                                    [0.1, 10]
+leader_pause_losses = 4       #                                                                    [1, 5]
+poll_leader_s = 4.0           # how often each followed wallet's swaps are read                    [1, 60]
+price_poll_s = 3.0            # one DexScreener call per cycle for all held tokens                  [0.2, 60]
+
+# -- selection (same hysteresis as Hyperliquid)
+rescore_minutes = 60.0
+min_scored_to_start = 6
+join_rank = 5                 #                                                                    [1, 8]
+drop_rank = 10                #                                                                    [2, 15]
+confirm_cycles = 2            #                                                                    [2, 10]
+min_follow_hours = 24.0
+history_days = 60             # swap history used for scoring                                      [30, 180]
+max_candidates = 120
+dropped_cooldown_days = 7.0
+
+# -- scoring strictness: ALL of these must pass (a wallet failing any one is not followed)
+min_pnl_30d = 2000.0          # leaderboard pre-screen, USD
+min_trades = 40               # closed round trips in the history window
+min_active_days = 14
+min_history_days = 21
+min_win_rate = 0.40
+min_profit_factor = 1.5
+min_positive_weeks = 3        # of the last 4 weeks                                                [2, 4]
+max_best_trade_share = 0.20   # best trade / total pnl (no single lucky trade)                     [0.01, 0.30]
+max_top3_share = 0.50
+max_token_share = 0.30        # one token's share of the pnl
+min_median_hold_s = 60.0      # snipers / bundlers hold for seconds
+max_open_buy_share = 0.30     # open cost basis / 30d buy volume: "holding a lot"
+max_open_vs_pnl = 1.0         # open cost basis / realized pnl
+max_drawdown = 0.30
+max_current_drawdown = 0.15   # not in a losing streak right now
+max_recent_loss_pct = 10.0    # last 24h loss tolerated, % of total pnl
+min_copy_edge_pct = 1.0       # mean return per trade after OUR fees, slippage and entry lag

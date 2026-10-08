@@ -1,0 +1,9 @@
+# Discord UI. Token, channel id and your user id come from the environment ONLY:
+#   DISCORD_BOT_TOKEN, DISCORD_CHANNEL_ID, DISCORD_OWNER_ID
+# Commands are text messages with this prefix, e.g. !status !sol !flatten <PIN>. The bot needs the
+# "Message Content Intent" (developer portal) and, to delete a !flatten message, the Manage Messages permission.
+api_base = "https://discord.com/api/v10"
+edit_min_interval_s = 5.0     # at most one edit per message per this many seconds
+min_send_interval_s = 1.1     # global spacing of all messages/edits
+poll_interval_s = 2.0         # how often the channel is read for commands
+prefix = "!"

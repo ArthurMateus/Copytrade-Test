@@ -20,11 +20,14 @@ from pathlib import Path
 from copybot import config, hl, log, tgfmt
 from copybot.broker import PaperBroker
 from copybot.detector import Detector
+from copybot.discord_ui import DiscordUI, UIGroup
 from copybot.feed import Clock, Feed
 from copybot.ledger import Ledger, now_ms
 from copybot.positions import PositionManager
 from copybot.risk import Health, RiskGate
 from copybot.selection import Scorer, select
+from copybot.sol.fmt import SOL_HELP
+from copybot.sol.runner import SolBot
 from copybot.tg import HELP, TelegramUI
 
 
@@ -80,7 +83,15 @@ class Bot:
         self.pm = PositionManager(cfg, self.st, self.ledger, self.gate, self.broker, self.health, self.mids,
                                   self.assets, notify=self.on_notify)
         self.det = Detector()
-        self.ui = TelegramUI(cfg, lambda c: self.q.put(("cmd", c)), lambda k, m: self.q.put(("card", k, m)))
+        tg_ui = TelegramUI(cfg, lambda c: self.q.put(("cmd", c)), lambda k, m: self.q.put(("card", k, m)))
+        dc_ui = DiscordUI(cfg, lambda c: self.q.put(("cmd", c)),
+                          lambda k, m: self.q.put(("card", "dc:" + k, None if m is None else int(m))))
+        self.ui = UIGroup(tg_ui, dc_ui) if dc_ui.enabled else tg_ui
+        self.sol: SolBot | None = None
+        if cfg.sol.enabled and (cfg.fomo_cookie or cfg.fomo_cookie_file):
+            self.sol = SolBot(cfg, self.ui, self.alert)
+        elif cfg.sol.enabled:
+            log.warn("sol_disabled", why="FOMO_COOKIE / FOMO_COOKIE_FILE not set")
         self.scorer = Scorer(cfg, self.info, self.q, self.data / "cache")
         self.ranks: dict[str, int] = {}
         self.scores: dict = {}
@@ -159,6 +170,8 @@ class Bot:
         self.feed.set_users(self.wanted_users())
         self.feed.start()
         self.ui.start()
+        if self.sol:
+            threading.Thread(target=self.sol.run, name="sol", daemon=True).start()
         threading.Thread(target=self.health_worker, name="health", daemon=True).start()
         threading.Thread(target=self.sync_worker, name="sync", daemon=True).start()
         self.scorer.focus = set(self.st.followed)
@@ -370,8 +383,14 @@ class Bot:
     # ---- commands ------------------------------------------------------------------------------------
     def command(self, c) -> None:
         now = now_ms()
+        if c.name.startswith("/sol"):
+            if self.sol:
+                self.sol.q.put(("cmd", c))
+            else:
+                self.ui.send("🪙 Solana is off: set FOMO_COOKIE (and keep sol.enabled = true), then restart.")
+            return
         if c.name == "/help":
-            self.ui.send(HELP)
+            self.ui.send(HELP + ("\n\n" + SOL_HELP if self.sol else ""))
         elif c.name in ("/status", "/leaders"):
             key = c.name[1:]
             self.live_cards.add(key)
@@ -421,6 +440,8 @@ class Bot:
         self.feed.stop.set()
         self.ui.stop.set()
         self.scorer.stop.set()
+        if self.sol:
+            self.sol.shutdown()
         self.ledger.close()
 
 
@@ -433,8 +454,18 @@ def main(argv: list[str] | None = None) -> None:
     except config.ConfigError as e:
         print(f"config error: {e}", file=sys.stderr)
         raise SystemExit(2)
-    for s in (cfg.tg_token, cfg.pin):
+    for s in (cfg.tg_token, cfg.pin, cfg.discord_token, cfg.fomo_cookie):
         log.add_secret(s)
+    for part in cfg.fomo_cookie.split(";"):            # each cookie value on its own, in case one is logged alone
+        log.add_secret(part.partition("=")[2].strip())
+    if cfg.fomo_cookie_file:
+        try:
+            text = Path(cfg.fomo_cookie_file).read_text(encoding="utf-8")
+            log.add_secret(" ".join(text.split()))
+            for part in text.split(";"):
+                log.add_secret(part.partition("=")[2].strip())
+        except OSError:
+            pass
     log.setup(cfg.runtime.log_dir)
     bot = Bot(cfg)
     try:

@@ -4,3 +4,6 @@ data/
 logs/
 *.pyc
 .pytest_cache/
+
+secrets/
+*.cookie
