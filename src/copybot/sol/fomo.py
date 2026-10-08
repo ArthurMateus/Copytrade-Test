@@ -184,6 +184,8 @@ class FomoClient:
         except urllib.error.HTTPError as e:
             if e.code in (401, 403):
                 raise AuthError(f"fomo refused the session (http {e.code})") from None
+            if e.code == 431:
+                raise AuthError("the FOMO cookie is too big (http 431): run tools/fomo_cookie_trim.py") from None
             if e.code == 429:
                 self.blocked_until = time.monotonic() + 30
             raise FomoError(e.code) from None

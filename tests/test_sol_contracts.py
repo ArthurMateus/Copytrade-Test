@@ -129,3 +129,19 @@ def test_cookie_file_is_used_and_re_read_when_it_changes(fake, tmp_path):
     f.unlink()
     assert c.leaderboard("30d")[0].address == "AddrOne"                  # a vanished file keeps the last cookie
     assert c.usable
+
+
+def test_an_oversized_cookie_gets_a_clear_message_and_the_trim_tool_keeps_only_what_is_needed(tmp_path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("trim", "tools/fomo_cookie_trim.py")
+    trim = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(trim)
+    pasted = "cookie: privy-token=AAA; _ga=GA1; ph_x=PH; privy-session=BBB; _dd_s=DD; privy-token=AAA2\n"
+    c = trim.parse(pasted)
+    assert list(c) == ["privy-token", "privy-session", "_ga", "ph_x", "_dd_s"] or set(c) == {
+        "privy-token", "privy-session", "_ga", "ph_x", "_dd_s"}
+    assert c["privy-token"] == "AAA2"                                    # a duplicate: the later one wins
+    assert not any(trim.TRACKING.match(k) for k in ("privy-token", "privy-session"))
+    assert all(trim.TRACKING.match(k) for k in ("_ga", "ph_x", "_dd_s"))
+    assert trim.parse("not a cookie") == {} and trim.header({"a": "1", "b": "2"}) == "a=1; b=2"
+    assert trim.status("x" * 8000) == 431                                # never even sent
