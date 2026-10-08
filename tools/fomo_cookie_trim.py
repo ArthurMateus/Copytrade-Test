@@ -20,7 +20,7 @@ from copybot.sol.fomo import read_cookie_file
 URL = "https://prod-api.fomo.family/v2/leaderboard/24h"
 MAX_HEADER = 7000          # stay far below the server's limit (431)
 TRACKING = re.compile(r"^(_ga|_gid|_gat|_gcl|_fbp|_fbc|_dd|_hj|ph_|amplitude|mp_|intercom|__stripe|_clck|_clsk|"
-                      r"datadog|_scid|_tt|cf_|__cf|_cfuvid|_uet|_pin|ajs_|__hs|hubspot|_rdt)", re.I)
+                      r"datadog|_scid|_tt|_uet|_pin|ajs_|__hs|hubspot|_rdt)", re.I)
 
 
 def parse(text: str) -> dict[str, str]:
@@ -57,6 +57,20 @@ def status(cookie: str) -> int:
 
 
 def minimal(cookies: dict[str, str]) -> dict[str, str] | None:
+    # Cloudflare cookies (__cf_bm, cf_clearance) are kept unless proven unnecessary below: a login can need them.
+    if len(header(cookies)) <= MAX_HEADER:
+        code = status(header(cookies))
+        print(f"the cookie as pasted ({len(header(cookies))} bytes) answers HTTP {code}")
+        if code != 200:
+            print("it is probably EXPIRED (the login token lives only 1 hour): sign in again, copy the cookie "
+                  "again right away, and rerun this")
+            return None
+        keep = dict(cookies)
+        for k in sorted(keep, key=lambda k: -len(keep[k])):        # drop whatever is not needed, biggest first
+            trial = {n: v for n, v in keep.items() if n != k}
+            if trial and status(header(trial)) == 200:
+                keep = trial
+        return keep
     keep = {k: v for k, v in cookies.items() if not TRACKING.match(k)}
     print(f"{len(cookies)} cookies, {len(keep)} after dropping tracking ones, {len(header(keep))} bytes")
     if len(header(keep)) > MAX_HEADER:
