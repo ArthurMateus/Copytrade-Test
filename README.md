@@ -70,7 +70,7 @@ to the start, traders kept, old history archived), `/restart`, `/pause`,
 - **Reviews:** the scorer rescores the followed leaders and the top 15 every hour. A daily review downloads the leaderboard again and screens up to 400 pre-screened wallets (it stops once 100 are scored). A screen result is kept for 7 days.
 - **Restart with doubt:** if the ledger has a torn line, an order intent with no result, or a position without a valid stop, the bot pauses entries, sends a Telegram alert and keeps running stops and exits. `/resume` acknowledges the problem.
 
-## Solana memecoin book (wallets from FOMO) and Discord
+## Solana memecoin book (wallets from FOMO)
 
 A second **paper-only** book copies wallets from the FOMO leaderboard (Solana memecoins), next to the Hyperliquid
 one. It has its own $300, ledger (`data/sol/ledger.jsonl`), risk gate and scoring. It never signs, never holds a key
@@ -86,7 +86,6 @@ Without a FOMO cookie it stays off and the Hyperliquid bot runs exactly as befor
 | The Solana risk gate | `sol/risk.py` |
 | Leader swap detector + position manager (open/add/reduce/close, stop at entry) | `sol/trader.py` |
 | Threads, selection, commands | `sol/runner.py`, `sol/fmt.py` |
-| Discord (same cards as Telegram, edited in place) | `discord_ui.py` |
 
 **How a wallet is chosen.** Pre-screen from the FOMO boards (30d pnl, 7d must be positive, not losing today, not
 holding a big bag, not one-shot luck), then the wallet's swaps are re-checked: every rule in `config/sol.toml` must pass
@@ -110,20 +109,12 @@ the paper fill uses the pool price when the stop is seen.
    (`setx FOMO_COOKIE` also works, but Windows cuts values at 1024 characters, which a login cookie can exceed.)
    When the session expires the bot alerts you on Telegram and Discord, stops adding wallets, and keeps the stops
    running. Save a fresh cookie into the same file: it is picked up within seconds, no restart.
-2. **Discord (optional).** In the Discord developer portal create an application and a bot, switch on **Message Content
-   Intent**, invite it to your server with permissions *Send Messages*, *Read Message History* and *Manage Messages*
-   (the last one deletes a `!solflatten <PIN>` message). Turn on Developer Mode in Discord, then copy the channel id and
-   your own user id:
-   ```powershell
-   setx DISCORD_BOT_TOKEN "<bot token>"
-   setx DISCORD_CHANNEL_ID "<channel id>"
-   setx DISCORD_OWNER_ID "<your user id>"
-   ```
+2. **Discord (optional).** Already set up for the Hyperliquid side (see above): the Solana commands show up as slash
+   commands next to the others, and the Solana cards are posted and edited in place on Discord too.
 3. Open a NEW terminal and `uv run copybot`.
 
-Commands (Telegram `/x`, Discord `!x`; only the owner can use them): `/sol` (live book card), `/solpositions`,
+Commands (Telegram `/x`, Discord slash `/x`; only the owner can use them): `/sol` (live book card), `/solpositions`,
 `/solleaders` (live), `/solprogress`, `/solpause`, `/solresume`, `/solflatten <PIN>`, plus all the Hyperliquid commands.
-On Discord the PIN message is deleted right after it is read.
 
 **Limits to know.** The bot sees a leader's trades by polling FOMO every few seconds (`poll_leader_s`), so the copy lag is
 several seconds, not sub-second; it is measured and shown in `/solprogress`. FOMO is a private, undocumented API and its
