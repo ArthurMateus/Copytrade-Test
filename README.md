@@ -88,54 +88,71 @@ trips in a row, at least 45% of its last 15 round trips won, and no drop above 1
 - **Reviews:** the scorer rescores the followed leaders and the top 15 every hour. A daily review downloads the leaderboard again and screens up to 400 pre-screened wallets (it stops once 100 are scored). A screen result is kept for 7 days.
 - **Restart with doubt:** if the ledger has a torn line, an order intent with no result, or a position without a valid stop, the bot pauses entries, sends a Telegram alert and keeps running stops and exits. `/resume` acknowledges the problem.
 
-## Solana memecoin book (wallets from FOMO)
+## Solana memecoin book (FOMO traders, followed on-chain)
 
-A second **paper-only** book copies wallets from the FOMO leaderboard (Solana memecoins), next to the Hyperliquid
-one. It has its own $300, ledger (`data/sol/ledger.jsonl`), risk gate and scoring. It never signs, never holds a key
-and never sends a transaction: fills are simulated from the real DexScreener pool price and liquidity.
-Without a FOMO cookie it stays off and the Hyperliquid bot runs exactly as before.
+A second **paper-only** book copies FOMO traders (Solana memecoins), next to the Hyperliquid one. It has its own $300,
+ledger (`data/sol/ledger.jsonl`), risk gate and scoring. It never signs, never holds a key and never sends a
+transaction: fills are simulated from the real DexScreener pool price and liquidity. It needs no FOMO login.
+
+**Where the traders come from (found 2026-10-08).** FOMO's own API refuses programs (Cloudflare answers
+`{"authorization":false}` even for public pages), and the wallet address FOMO shows for a trader is not the wallet that
+trades (listed addresses with thousands of FOMO swaps have no on-chain transactions). But FOMO pays the network fee of
+every user swap, so each FOMO trade is a public Solana transaction co-signed by FOMO's fee payer
+(`AgmLJBMD…zN51`, `sol.fomo_fee_payer`) and by the trader's **real** wallet. The bot samples that flow to find active
+FOMO traders, reads their swaps from the chain, ranks them with the strict scoring, follows the best 7 and gets an
+instant websocket alert when one of them trades. Copy tools such as CopyFomo also copy FOMO traders on-chain.
 
 | Part | Module |
 |---|---|
-| FOMO client + parsers (leaderboard 24h/7d/30d, per-trader swaps) | `sol/fomo.py` |
-| Strict scoring from verified swaps | `sol/scoring.py` |
-| Background scorer, disk cache of swap history | `sol/scorer.py` |
+| Solana RPC client, swap parser, FOMO trader discovery, websocket alerts | `sol/chain.py` |
+| Strict scoring from on-chain swaps | `sol/scoring.py` |
+| Background scorer (discovery + history), disk cache | `sol/scorer.py` |
 | DexScreener prices/liquidity + paper broker (price impact + 1% swap fee) | `sol/market.py` |
 | The Solana risk gate | `sol/risk.py` |
 | Leader swap detector + position manager (open/add/reduce/close, stop at entry) | `sol/trader.py` |
 | Threads, selection, commands | `sol/runner.py`, `sol/fmt.py` |
 
-**How a wallet is chosen.** Pre-screen from the FOMO boards (30d pnl, 7d must be positive, not losing today, not
-holding a big bag, not one-shot luck), then the wallet's swaps are re-checked: every rule in `config/sol.toml` must pass
-(60-day history, >= 40 round trips, win rate >= 40%, profit factor >= 1.5, 3 of the last 4 weeks positive, no single trade
-> 20% or token > 30% of the profit, median hold >= 60 s so it is not a sniper, open bag <= 30% of its buys, drawdown limits, and
-a positive copy edge after OUR fees, slippage and entry lag). The same hysteresis as Hyperliquid decides who is followed.
+**Data sources and cost.** With `HELIUS_API_KEY` set, everything goes to Helius (free plan: 1M credits a month,
+10 requests a second): live alerts over its websocket, a safety poll every 120 s (`poll_leader_s`), and the search.
+The search reads histories with Helius' `getTransactionsForAddress` (100 transactions per call, 10 credits); if your
+plan refuses it, one by one (1 credit each), retrying bulk 6 hours later (log `sol_bulk_unavailable`). It may spend at
+most `helius_daily_credits` (30,000) a day; past that it continues on the free public endpoint, so a search can never
+use up the month. Without a key everything runs on the free public endpoint, which only allows about one transaction a
+second: following works, but a search of 200 traders takes days.
+
+**How a wallet is chosen.** A search (`/fomosearch`, at start, then daily) opens `discover_pages x discover_per_page`
+(600) random FOMO transactions, keeps the `max_candidates` (200) traders that moved the most USD, and reads up to 30 days
+of their swaps (`history_days`; a wallet whose newest 2,000 transactions cover less than 21 days is skipped as too busy,
+which costs one cheap call). Every rule in `config/sol.toml` must pass (>= 40 round trips, win rate >= 40%, profit
+factor >= 1.5, 3 of the last 4 weeks positive, no single trade > 20% or token > 30% of the profit, median hold >= 60 s so
+it is not a sniper, open bag <= 30% of its buys, drawdown limits, and a positive copy edge after OUR fees, slippage and
+entry lag). When a search ends after `/fomosearch` (or when nobody is followed yet) the best 7 are followed AT ONCE and
+followed traders outside the new top 7 are dropped (their open copies still exit normally); an empty search drops
+nobody. Otherwise the hourly cycle uses the usual hysteresis. `/fomoleaders` and `/fomo` show the search progress
+("scoring 37/200 FOMO traders · 2 pass so far") and the best traders found but not followed. Swaps priced in SOL
+instead of USDC (about 1 in 40 FOMO trades) are not seen.
 
 **Risk (spot, no leverage).** 1% of the book per trade with a 30% stop = about $9.5 notional at $300; max 6% of the book in
 one token; entries refused below $25k pool liquidity (or when DexScreener has no liquidity figure), when the price or
-the leader feed is stale, or when the FOMO session is in doubt. Exits are never refused. Memecoins can gap through a stop:
+the leader feed is stale, or when the Helius key is refused. Exits are never refused. Memecoins can gap through a stop:
 the paper fill uses the pool price when the stop is seen.
 
 ### Setup (Windows PowerShell)
-1. **FOMO cookie.** Use a throwaway FOMO account (automated use may break FOMO's terms). In Chrome, open fomo.family
-   signed in, press F12, open the Network tab, reload, click any request to `prod-api.fomo.family`, and copy the whole
-   `cookie:` value from Request Headers. Save it as one line in a file inside the repo's `secrets` folder
-   (`secrets/fomo.cookie`, git-ignored), then:
+1. **Helius key (recommended).** Free account at https://dashboard.helius.dev, copy the API key, then:
    ```powershell
-   setx FOMO_COOKIE_FILE "C:\My stuff\Copytrade Test\secrets\fomo.cookie"
+   setx HELIUS_API_KEY "paste-key-here"
    ```
-   (`setx FOMO_COOKIE` also works, but Windows cuts values at 1024 characters, which a login cookie can exceed.)
-   When the session expires the bot alerts you on Telegram and Discord, stops adding wallets, and keeps the stops
-   running. Save a fresh cookie into the same file: it is picked up within seconds, no restart.
+   Open a NEW terminal. Check it without showing it:
+   `[Environment]::GetEnvironmentVariable("HELIUS_API_KEY", "User").Length` (about 36).
 2. **Discord (optional).** Already set up for the Hyperliquid side (see above): the Solana commands show up as slash
    commands next to the others, and the Solana cards are posted and edited in place on Discord too.
-3. Open a NEW terminal and `uv run copybot`.
+3. `uv run copybot` (or the restart loop). The start message says where live trades come from.
 
-Commands: the `/fomo...` column of the table above (only the owner can use them).
+Commands: the `/fomo...` column of the table above (only the owner can use them). `/fomosearch` runs a review now.
 
-**Limits to know.** The bot sees a leader's trades by polling FOMO every few seconds (`poll_leader_s`), so the copy lag is
-several seconds, not sub-second; it is measured and shown in `/fomoprogress`. FOMO is a private, undocumented API and its
-cookie can expire without notice. Both are logged and alerted, never hidden.
+**Limits to know.** FOMO's fee payer address is FOMO's own choice and could change; if `/fomosearch` finds no traders,
+it probably did (the log shows `sol_discovered traders=0`). Copy lag is the websocket alert plus one read (seconds); it is
+measured and shown in `/fomoprogress`. Re-record the Solana test data with `tools/record_chain.py`.
 
 ## Findings from the real API (recorded in `tests/fixtures`, re-record with `tools/record_samples.py`)
 - One websocket can track at most **15 users** (`"Cannot track more than 15 total users."`).

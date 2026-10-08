@@ -1,9 +1,16 @@
-# Solana memecoin book (paper only). Wallets come from the FOMO leaderboard, so it needs FOMO_COOKIE in the
-# environment (your logged-in fomo.family cookie; never logged or committed). Without it this whole section stays off.
+# Solana memecoin book (paper only). FOMO traders are found and followed ON-CHAIN: every FOMO swap is co-signed by
+# FOMO's fee payer, and the other signer is the trader's real wallet. No FOMO login or cookie is needed.
+# History and discovery use the free public Solana endpoint; live trades use Helius when HELIUS_API_KEY is set in the
+# environment (never logged or committed), otherwise the public endpoint too.
 # Allowed ranges (hard ceilings, checked at start) are in brackets.
 enabled = true
-api_base = "https://prod-api.fomo.family"
 dex_url = "https://api.dexscreener.com"
+rpc_url = "https://api.mainnet-beta.solana.com"     # history + discovery (free, about 4 transactions read per second)
+live_rpc_url = "https://mainnet.helius-rpc.com"     # live copying; the key is added as ?api-key=
+live_ws_url = "wss://mainnet.helius-rpc.com"        # instant alert when a followed wallet trades
+fomo_fee_payer = "AgmLJBMDCqWynYnQiPCuj9ewsNNsBJXyzoUhD9LJzN51"
+helius_daily_credits = 30000  # most Helius credits a search may spend per day (free plan: 1M a month)  [0, 200000]
+history_parallel = 6          # transactions read at once during a search (with a Helius key)       [1, 16]
 
 # -- the paper book
 start_equity = 300.0          # simulated Solana book, USD, separate from the Hyperliquid wallet   [10, 1e6]
@@ -20,29 +27,31 @@ min_liquidity_usd = 25000.0   # entries refused below this pool liquidity, or if
 max_impact_pct = 2.0          # entry size clamped so the estimated price impact stays under this  [0.1, 5]
 max_entry_age_s = 30.0        # do not open on a leader swap older than this                       [1, 120]
 max_price_age_s = 10.0        #                                                                    [1, 120]
-max_leader_feed_age_s = 60.0  # leader polling silent longer than this = no entries                [5, 600]
+max_leader_feed_age_s = 300.0 # leader polling silent longer than this = no entries                [5, 600]
 swap_fee_pct = 1.0            # paper fee per swap, % of notional                                  [0.1, 5]
 extra_slippage_pct = 0.5      # on top of the pool price impact                                    [0, 10]
 exit_fallback_penalty_pct = 30.0   # an exit with no known price fills at the last price minus this
-max_leaders = 5               #                                                                    [0, 7]
+max_leaders = 7               #                                                                    [0, 7]
 leader_pause_dd_pct = 10.0    #                                                                    [0.1, 10]
 leader_pause_losses = 4       #                                                                    [1, 5]
-poll_leader_s = 4.0           # how often each followed wallet's swaps are read                    [1, 60]
+poll_leader_s = 120.0         # safety poll of each followed wallet (the websocket wakes it at once) [1, 300]
 price_poll_s = 3.0            # one DexScreener call per cycle for all held tokens                  [0.2, 60]
 
 # -- selection (same hysteresis as Hyperliquid)
 rescore_minutes = 60.0
 min_scored_to_start = 6
-join_rank = 5                 #                                                                    [1, 8]
+join_rank = 7                 # the best 7 are followed                                            [1, 8]
 drop_rank = 10                #                                                                    [2, 15]
 confirm_cycles = 2            #                                                                    [2, 10]
 min_follow_hours = 24.0
-history_days = 60             # swap history used for scoring                                      [30, 180]
-max_candidates = 120
+history_days = 30             # swap history used for scoring (30 keeps a search affordable)       [30, 180]
+max_candidates = 200          # FOMO traders fully scored per review (biggest by sampled USD volume) [1, 1000]
 dropped_cooldown_days = 7.0
+discover_pages = 30           # per review: pages of FOMO's flow walked back (1000 tx = ~2 min each) [1, 500]
+discover_per_page = 20        # transactions opened per page (each one reveals a trader)            [1, 200]
+max_history_txs = 2000        # wallets whose newest 2000 transactions span < min_history_days: skipped [100, 10000]
 
 # -- scoring strictness: ALL of these must pass (a wallet failing any one is not followed)
-min_pnl_30d = 2000.0          # leaderboard pre-screen, USD
 min_trades = 40               # closed round trips in the history window
 min_active_days = 14
 min_history_days = 21

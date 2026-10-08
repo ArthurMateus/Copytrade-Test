@@ -96,7 +96,7 @@ class Chat:
 
 @pytest.fixture
 def sol(tmp_path):
-    cfg = config.load("config", env={"FOMO_COOKIE": "x=y"})
+    cfg = config.load("config", env={})
     cfg.runtime.data_dir = str(tmp_path / "data")
     chat, restarts = Chat(), []
     bot = SolBot(cfg, chat, lambda *a, **k: None, restart=lambda: restarts.append(1))
@@ -107,7 +107,6 @@ def sol(tmp_path):
     bot.rec({"ev": "follow", "leader": B, "ts": 222})
     bot.rec({"ev": "unfollow", "leader": "Old" * 10, "ts": 5})
     bot.rec({"ev": "cursor", "leader": A, "t": 987_654})
-    bot.scorer.users[A] = {"uid": "u-a", "handle": "AlphaTrader"}
     bot.ranks = {A: 1, B: 2}
     bot.scores = {A: {"score": 0.44, "trades": 90, "win_rate": 0.6, "profit_factor": 3.1, "median_hold_s": 1200,
                       "open_buy_share": 0.1, "pnl_7d": 500.0, "pnl_24h": 40.0}}
@@ -127,14 +126,14 @@ def test_fomo_cards_show_the_book_the_trades_the_traders_and_the_wallet(sol):
     open_pos(bot)
     bot.prices.q["Tok1"] = type("Q", (), {"px": 0.012, "liq_usd": 5e5, "symbol": "MEME", "ts": time.time()})()
     for name, key, needles in [
-            ("/fomo", "sol:status", ["FOMO (paper)", "copying", "Wallet", "FOMO session"]),
+            ("/fomo", "sol:status", ["FOMO (paper)", "copying", "Wallet", "Solana data"]),
             ("/fomotrades", "sol:trades", ["FOMO trades", "1 open", "MEME", "⬆️ BUY", "Entry → now", "0.01 → 0.012",
-                                           "Sells when", "AlphaTrader", "if hit", "If every stop hits"]),
-            ("/fomotraders", "sol:traders", ["FOMO traders", "AlphaTrader", "Made for you", "Their record", "90 trades",
+                                           "Sells when", tgfmt.short(A), "if hit", "If every stop hits"]),
+            ("/fomotraders", "sol:traders", ["FOMO traders", tgfmt.short(A), "Made for you", "Their record", "90 trades",
                                              "Typical hold", "This week / today", "Following for"]),
             ("/fomowallet", "sol:wallet", ["FOMO wallet", "Cash", "In open trades", "Fees paid", "Today", "This week",
                                            "stops new copies at −5%", "max 8"]),
-            ("/fomoleaders", "sol:leaders", ["FOMO leaders", "AlphaTrader", "#1"])]:
+            ("/fomoleaders", "sol:leaders", ["FOMO leaders", tgfmt.short(A), "#1"])]:
         bot.command(Command(name))
         assert key in chat.cards and key in bot.live_cards, name
         for n in needles:
@@ -168,28 +167,47 @@ def test_fomo_pause_resume_flatten_and_the_pin(sol):
     assert not bot.st.positions and bot.st.entries_paused and bot.st.closed[-1]["reason"] == "flatten"
 
 
-def test_fomosearch_needs_a_valid_session_and_asks_the_scorer(sol):
+def test_fomosearch_asks_the_scorer_even_while_live_data_is_refused(sol):
     bot, chat, _ = sol
-    bot.auth_ok = False
+    bot.auth_ok = False                   # discovery and history use the public endpoint, not the refused key
     bot.command(Command("/fomosearch"))
-    assert not bot.scorer.search_req.is_set() and "refresh the cookie" in chat.sent[-1]
-    bot.auth_ok = True
-    bot.command(Command("/fomosearch"))
-    assert bot.scorer.search_req.is_set() and bot.search_pending
+    assert bot.scorer.search_req.is_set() and bot.search_pending and "on-chain" in chat.sent[-1]
 
 
-def test_a_search_applies_the_ranking_at_once_and_reports(sol):
+def test_a_search_follows_the_best_at_once_and_reports(sol):
     bot, chat, _ = sol
     bot.rec({"ev": "sel", "state": {"at": now_ms(), "streaks": {}}})      # a cycle ran a moment ago: normally skipped
-    bot.scorer.users["Wallet9"] = {"uid": "u9", "handle": "Nine"}
     ranking = ["Wallet9", A]
     scores = {"Wallet9": {"eligible": True, "score": 0.5}, A: {"eligible": True, "score": 0.4}}
     bot.c.min_scored_to_start = 1
     bot.on_ranking(ranking, 2, scores)
-    assert "FOMO search done" not in " ".join(chat.sent)                  # not searching: the guard skips it
+    assert "Wallet9" not in bot.st.followed                               # hysteresis: not yet (and too soon)
     bot.search_pending = True
-    bot.on_ranking(ranking, 2, scores)
-    assert "FOMO search done" in chat.sent[-1] and not bot.search_pending
+    bot.on_review(2, 2, 2, ranking, scores)                               # the search ends
+    assert not bot.search_pending
+    assert "Wallet9" in bot.st.followed and A in bot.st.followed          # the best, at once, no confirmation cycles
+    assert B not in bot.st.followed                                       # followed but not found again: dropped
+    text = " ".join(chat.sent)
+    assert "Following" in text and "Dropped" in text
+    assert "FOMO search done" in chat.sent[-1] and "+1 new" in chat.sent[-1] and "50 pts" in chat.sent[-1]
+
+
+def test_an_empty_search_drops_nobody(sol):
+    bot, chat, _ = sol
+    bot.search_pending = True
+    bot.on_review(5, 5, 0, [], {})
+    assert set(bot.st.followed) == {A, B} and "Nobody passed" in chat.sent[-1]
+
+
+def test_fomosearch_while_a_search_runs_reports_progress_instead_of_starting_another(sol):
+    bot, chat, _ = sol
+    bot.scorer.progress = {**bot.scorer.progress, "phase": "scoring", "done": 12, "todo": 200, "eligible": 1,
+                           "started": now_ms() - 3_600_000}
+    bot.command(Command("/fomosearch"))
+    assert not bot.scorer.search_req.is_set() and bot.search_pending
+    assert "already running" in chat.sent[-1] and "12/200" in chat.sent[-1]
+    bot.command(Command("/fomoleaders"))
+    assert "12/200 FOMO traders" in chat.cards["sol:leaders"]
 
 
 def test_fomoreset_refuses_without_pin_or_with_open_trades(sol):

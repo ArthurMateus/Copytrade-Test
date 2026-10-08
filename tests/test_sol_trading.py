@@ -3,7 +3,7 @@ import pytest
 
 from copybot import config
 from copybot.ledger import Ledger, now_ms
-from copybot.sol.fomo import Leg
+from copybot.sol.chain import Leg
 from copybot.sol.market import NoQuote, PaperBroker, Prices
 from copybot.sol.risk import Health, SolGate
 from copybot.sol.trader import Detector, Trader

@@ -47,6 +47,8 @@ def write_config(d: Path, hl: FakeHL, tg: FakeTelegram, data: Path) -> Path:
     (cdir / "telegram.toml").write_text(
         f'api_base = "{tg.api_base}"\nedit_min_interval_s = 0.3\nmin_send_interval_s = 0.02\npoll_timeout_s = 1\n',
         encoding="utf-8")
+    # the Solana book needs no secret, so it would start and reach the REAL Solana network: off unless a test turns it on
+    (cdir / "sol.toml").write_text("enabled = false\n", encoding="utf-8")
     return cdir
 
 

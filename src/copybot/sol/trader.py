@@ -20,7 +20,7 @@ from typing import Callable
 from copybot import log
 from copybot.config import Sol
 from copybot.ledger import Ledger, Position, State
-from copybot.sol.fomo import Leg
+from copybot.sol.chain import Leg
 from copybot.sol.market import NoQuote, PaperBroker, Prices
 from copybot.sol.risk import Health, Order, SolGate
 

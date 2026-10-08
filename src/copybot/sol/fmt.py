@@ -19,6 +19,21 @@ def _n(k: int, word: str) -> str:
     return f"{k} {word}" + ("" if k == 1 else "s")
 
 
+def search_line(progress: dict | None, now_ms: float) -> str:
+    """Where the trader search is. `now_ms` 0 = no elapsed times (the card is only edited when something changed)."""
+    pr = progress or {}
+    phase = pr.get("phase", "idle")
+    ago = lambda t: f" · {dur(now_ms - t)} ago" if now_ms and t else ""
+    if phase == "discovering":
+        return "looking at FOMO's recent trades for active traders" + ago(pr.get("started", 0))
+    if phase == "scoring":
+        return (f"scoring {pr.get('done', 0)}/{pr.get('todo', 0)} FOMO traders · {pr.get('eligible', 0)} pass so far"
+                + (f" · started {dur(now_ms - pr['started'])} ago" if now_ms and pr.get("started") else ""))
+    if pr.get("finished"):
+        return "last search done" + ago(pr["finished"]) + " · /fomosearch to search again"
+    return "no search yet · /fomosearch"
+
+
 def who(addr: str, handle: str = "") -> str:
     return f"{handle} ({short(addr)})" if handle else short(addr)
 
@@ -77,20 +92,20 @@ def closed_card(t: dict, handle: str = "") -> str:
 
 
 # ---- wallet-level cards -----------------------------------------------------------------------------------
-def status_card(st: State, marks: dict, h, now_ms: float, auth_ok: bool) -> str:
+def status_card(st: State, marks: dict, h, now_ms: float, auth_ok: bool, progress: dict | None = None) -> str:
     eq = st.equity(marks)
     pnl = eq - st.equity0
     day = st.marks.get("day", {}).get("equity") or st.equity0
     if st.entries_paused or st.uncertain:
         state = f"⏸️ new copies paused: {st.pause_reason or 'uncertain state'}"
     elif not auth_ok:
-        state = "⚠️ FOMO session expired: no new traders, exits and stops still run"
+        state = "⚠️ Solana data refused: no new copies, exits and stops still run"
     else:
         state = "▶️ copying"
     ok = lambda good, bad: "✅" if good else f"⚠️ {bad}"
     conn = (f"prices {ok(h.price_age_s < 15, f'{h.price_age_s:.0f}s old')} · "
-            f"traders feed {ok(h.leader_feed_age_s < 30, f'{h.leader_feed_age_s:.0f}s')} · "
-            f"FOMO session {ok(auth_ok, 'expired')}")
+            f"traders feed {ok(h.leader_feed_age_s < 120, f'{h.leader_feed_age_s:.0f}s')} · "
+            f"Solana data {ok(auth_ok, 'refused')}")
     return f"🪙 <b>FOMO (paper)</b> · {esc(state)}\n" + pre([
         ("Wallet", f"{fusd(eq, sign=False)} of {fusd(st.equity0, sign=False)} · {money(pnl, st.equity0)}"),
         ("Today", money(eq - day, day)),
@@ -98,6 +113,7 @@ def status_card(st: State, marks: dict, h, now_ms: float, auth_ok: bool) -> str:
         ("Traders", f"{len(st.followed)} followed" + (f" ({len(st.paused_leaders)} paused)" if st.paused_leaders else "")),
         ("Closed trades", str(len(st.closed))),
         ("Copy speed", lag_line(st)),
+        ("Search", search_line(progress, now_ms)),
         ("Connection", conn),
     ]) + "\n" + updated(now_ms)
 
@@ -153,7 +169,16 @@ def trades_card(st: State, marks: dict, now_ms: float, handles: dict | None = No
 
 
 def leaders_card(st: State, ranks: dict[str, int], handles: dict[str, str], now_ms: float,
-                 scores: dict | None = None) -> str:
+                 scores: dict | None = None, progress: dict | None = None) -> str:
+    scores = scores or {}
+    search = f"🔎 Search: {esc(search_line(progress, now_ms))}"
+    best = []
+    for a in by_rank([a for a in ranks if a not in st.followed], ranks)[:5]:
+        sc = scores.get(a, {})
+        best.append(f"#{ranks[a]} {esc(short(a))} · {sc.get('score', 0) * 100:.0f} pts · "
+                    f"{sc.get('trades', 0)} trades · {sc.get('win_rate', 0) * 100:.0f}% win · "
+                    f"PF {pf_text(sc.get('profit_factor', 0))}")
+    found = ("\n<b>Best found, not followed</b>\n" + "\n".join(best)) if best else ""
     lines = []
     leaders = list(st.followed) + [p.leader for p in st.positions.values() if p.leader not in st.followed]
     for a in by_rank(leaders, ranks):
@@ -161,12 +186,14 @@ def leaders_card(st: State, ranks: dict[str, int], handles: dict[str, str], now_
         cum = s.cum if s else 0.0
         flag = " ⏸️" if a in st.paused_leaders else ("" if a in st.followed else " ⏳")
         r = ranks.get(a)
-        sc = (scores or {}).get(a, {}).get("score")
+        sc = scores.get(a, {}).get("score")
         lines.append(f"{dot(cum)} {'#' + str(r) if r else '–'} {esc(who(a, handles.get(a, '')))}{flag} · "
                      f"{f'{sc * 100:.0f} pts' if sc else 'no score'} · {_n(s.trades if s else 0, 'trade')} · {fusd(cum)}")
     if not lines:
-        return ("👥 <b>FOMO leaders</b>\nNone followed yet (no wallet passed the strict scoring).\n" + updated(now_ms))
-    return "👥 <b>FOMO leaders</b> · rank · score · copied trades · made for you\n" + "\n".join(lines) + "\n" + updated(now_ms)
+        return (f"👥 <b>FOMO leaders</b>\nNone followed yet (no wallet passed the strict scoring).\n{search}{found}\n"
+                + updated(now_ms))
+    return ("👥 <b>FOMO leaders</b> · rank · score · copied trades · made for you\n" + "\n".join(lines)
+            + f"\n{search}{found}\n" + updated(now_ms))
 
 
 def traders_card(st: State, marks: dict, ranks: dict[str, int], scores: dict | None, handles: dict[str, str],
@@ -250,7 +277,7 @@ FOMO_HELP = ("🪙 <b>FOMO / Solana (paper)</b>\n"
              "/fomotraders – followed traders and what copying them earned (live)\n"
              "/fomowallet – the paper wallet: cash, invested, fees, loss limits (live)\n"
              "/fomopositions · /fomoleaders · /fomoprogress\n"
-             "/fomosearch – look for new traders now\n"
+             "/fomosearch – find active FOMO traders on-chain, rank them, follow the best 7\n"
              "/fomopause · /fomoresume – new entries (exits always run)\n"
              "/fomoflatten &lt;PIN&gt; – close every FOMO trade and pause\n"
              "/fomoreset &lt;PIN&gt; – the FOMO wallet back to the start (no open trades), traders kept")

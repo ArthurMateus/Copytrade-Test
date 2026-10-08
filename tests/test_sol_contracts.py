@@ -1,57 +1,82 @@
-"""FOMO and DexScreener parsers against REAL recorded responses, plus the client against the loopback fake."""
+"""Solana and DexScreener parsers against REAL recorded responses, plus the RPC client against the loopback fake."""
+import copy
+from datetime import datetime
+
 import pytest
 
-from copybot.sol import fomo
+from copybot.sol import chain
 from copybot.sol.market import parse_pairs
 from tests.fakes import fixture
-from tests.fakes_sol import COOKIE, FakeFomo, USDC, make_row, make_swap
+from tests.fakes_sol import FEE_PAYER, KEY, USDC, FakeSolana
 
-NOW = 1_800_000_000_000
-
-
-def test_leaderboard_fixture_parses():
-    rows = fomo.parse_leaderboard("30d", fixture("fomo_leaderboard_30d.json"))
-    assert len(rows) == 8
-    r = rows[0]
-    assert r.handle == "ExactTallTakin" and r.address.startswith("DPHECQ")
-    assert r.uid == "d6a85eb5-d3fb-5b8a-8445-019af88ba512"
-    assert r.pnl == pytest.approx(803082.5322347687) and r.window == "30d"
-    assert r.swap_count == 446 and r.volume > 1e6 and not r.private and not r.restricted
-    assert r.holdings_usd == pytest.approx(296.79, abs=0.01) and r.total_holdings == 2
+DAY = 86_400_000
 
 
-def test_leaderboard_pnl_field_fallback_is_not_silently_zero():
-    body = fixture("fomo_leaderboard_30d.json")
-    rows = fomo.parse_leaderboard("7d", body)        # asked for 7d but the row only has pnl30d
-    assert rows[0].pnl == pytest.approx(803082.5322347687)
+def test_fomo_buy_on_chain_matches_fomos_own_record_of_it():
+    """Ground truth: the recorded transaction is the on-chain side of the first swap in fomo_swaps.json."""
+    tx = fixture("chain_tx_fomo_buy.json")
+    fomo = fixture("fomo_swaps.json")["responseObject"]["swaps"][0]
+    w = chain.trader_of(tx, FEE_PAYER)
+    assert w == "AGdtsMmphhymH5wYW3dWKSkAxpLYRrNDCTFAfuq8ii9v"
+    assert w != fomo["address"]                         # the address FOMO shows is not the trading wallet
+    [g] = chain.parse_tx(tx, w)
+    assert g.side == "buy" and g.token == fomo["outTokenAddress"]
+    assert g.amount == pytest.approx(fomo["outHumanAmount"], abs=0.01)
+    assert g.usd == pytest.approx(89.0483) and g.usd - fomo["inHumanAmount"] == pytest.approx(0.95)   # FOMO's fee
+    fomo_ms = datetime.fromisoformat(fomo["createdAt"].replace("Z", "+00:00")).timestamp() * 1000
+    assert abs(g.ts - fomo_ms) <= 2000
+    assert g.id == tx["transaction"]["signatures"][0]
 
 
-def test_swaps_fixture_parses_into_buy_and_sell_legs():
-    legs, more = fomo.parse_swaps(fixture("fomo_swaps.json"))
-    assert more is True and len(legs) == 25
-    assert legs == sorted(legs, key=lambda g: (g.ts, g.id))                  # oldest first
-    assert {g.side for g in legs} == {"buy", "sell"}
-    newest = legs[-1]
-    assert (newest.side, newest.token) == ("buy", "DEW9dSN6QpWyNthphCpMmAbZP1Q4cEKR9xQXAri98WDP")
-    assert newest.amount == pytest.approx(3565.63) and newest.usd == pytest.approx(88.0983)
-    assert newest.px == pytest.approx(88.0983 / 3565.63)
-    assert all(g.token not in fomo.QUOTES for g in legs)
+def test_fomo_sell_parses():
+    tx = fixture("chain_tx_fomo_sell.json")
+    w = chain.trader_of(tx, FEE_PAYER)
+    [g] = chain.parse_tx(tx, w)
+    assert g.side == "sell" and g.token == "BZFYNPeQAEW3HWQ4DNsTVahC1n4ZjTgn6jB2nnBbB96W"
+    assert g.amount == pytest.approx(152564.440373) and g.usd == pytest.approx(301.295184)
 
 
-def test_token_to_token_swap_becomes_a_sell_and_a_buy():
-    raw = make_swap("buy", "TOKB", 100, 50, NOW, sid="x1")
-    raw.update(inTokenAddress="TOKA", inHumanAmount=10.0, humanUsdAmountIn=50.0, humanUsdAmountOut=50.0)
-    legs, _ = fomo.parse_swaps({"responseObject": {"swaps": [raw], "hasNextPage": False}})
-    assert [(g.side, g.token) for g in legs] == [("sell", "TOKA"), ("buy", "TOKB")] or \
-           sorted((g.side, g.token) for g in legs) == [("buy", "TOKB"), ("sell", "TOKA")]
-    assert {g.id for g in legs} == {"x1:s", "x1:b"}
+def test_a_routed_buy_ignores_the_speck_of_intermediate_token_it_leaves():
+    tx = fixture("chain_tx_fomo_routed.json")
+    w = chain.trader_of(tx, FEE_PAYER)
+    d = chain.deltas(tx, w)
+    assert len([m for m, v in d.items() if m not in chain.USD and v > 0]) == 2      # two tokens came in
+    [g] = chain.parse_tx(tx, w)
+    assert g.side == "buy" and g.token == "3xrw3JKyaSYjzksYc8nrZE1kReQAxoHT3epi3P1mpZVf"
+    assert g.amount == pytest.approx(22750.256053) and g.usd == pytest.approx(10.2)
 
 
-def test_unpriceable_swaps_are_ignored():
-    raw = make_swap("buy", "T", 100, 0.0, NOW)
-    raw["humanUsdAmountOut"] = 0.0
-    assert fomo.parse_swaps({"responseObject": {"swaps": [raw]}})[0] == []
-    assert fomo.parse_swaps(None) == ([], False)
+def test_two_tokens_both_moving_a_lot_is_ambiguous_and_skipped():
+    tx = copy.deepcopy(fixture("chain_tx_fomo_routed.json"))
+    w = chain.trader_of(tx, FEE_PAYER)
+    for b in tx["meta"]["preTokenBalances"]:            # the intermediate token: from 0.0165 to nothing before
+        if b.get("owner") == w and b["mint"].startswith("SPCX"):
+            b["uiTokenAmount"].update(amount="0", uiAmountString="0")
+    assert chain.parse_tx(tx, w) == []
+
+
+def test_failed_transfers_and_unrelated_transactions_give_no_swap():
+    tx = copy.deepcopy(fixture("chain_tx_fomo_buy.json"))
+    w = chain.trader_of(tx, FEE_PAYER)
+    failed = copy.deepcopy(tx)
+    failed["meta"]["err"] = {"InstructionError": [0, "Custom"]}
+    assert chain.parse_tx(failed, w) == []
+    deposit = copy.deepcopy(tx)                          # only USDC moves: a deposit or withdrawal, not a swap
+    for k in ("preTokenBalances", "postTokenBalances"):
+        deposit["meta"][k] = [b for b in deposit["meta"][k] if b["mint"] == USDC]
+    assert chain.parse_tx(deposit, w) == []
+    assert chain.parse_tx(tx, "SomeoneElse111111111111111111111111111111111") == []
+    assert chain.parse_tx(None, w) == []
+    assert chain.trader_of(tx, "NotFomo11111111111111111111111111111111111") is None
+
+
+def test_signature_lists_have_what_the_client_reads():
+    for name in ("chain_sigs_wallet.json", "chain_sigs_feepayer.json"):
+        rows = fixture(name)
+        assert rows and all({"signature", "blockTime", "err"} <= set(r) for r in rows)
+        assert [r["blockTime"] for r in rows] == sorted((r["blockTime"] for r in rows), reverse=True)  # newest first
+    assert fixture("chain_sigs_wallet.json")[-1]["signature"] in {
+        r["signature"] for r in fixture("chain_sigs_wallet.json")}
 
 
 def test_dexscreener_fixture_liquidity_missing_means_unknown():
@@ -69,89 +94,124 @@ def test_dexscreener_picks_the_deepest_pool():
     assert parse_pairs([a, b])[a["baseToken"]["address"]].px == 2.0
 
 
+# ---- client against the loopback node ------------------------------------------------------------------
 @pytest.fixture
 def fake():
-    f = FakeFomo()
+    f = FakeSolana()
     yield f
     f.close()
 
 
-def test_client_reads_leaderboard_and_swaps(fake):
-    fake.rows["30d"] = [make_row("u1", "AddrOne", "one", 5000.0)]
-    fake.swaps["u1"] = [make_swap("buy", "TOK", 10, 5, NOW + i * 1000) for i in range(30)]
-    c = fomo.FomoClient(fake.url, COOKIE, min_interval_s=0)
-    rows = c.leaderboard("30d")
-    assert rows[0].address == "AddrOne" and rows[0].pnl == 5000.0
-    legs, more = c.swaps("u1", 25)
-    assert len(legs) == 25 and more is True
-    legs, more = c.swaps("u1", 100)
-    assert len(legs) == 30 and more is False
+def client(fake, key=""):
+    return chain.ChainClient(chain.Rpc(f"{fake.url}/?api-key={key}" if key else fake.url, 0))
 
 
-def test_client_without_a_valid_session_raises_auth_error(fake):
-    with pytest.raises(fomo.AuthError):
-        fomo.FomoClient(fake.url, "", min_interval_s=0).leaderboard("30d")
-    with pytest.raises(fomo.AuthError):
-        fomo.FomoClient(fake.url, "wrong=cookie", min_interval_s=0).leaderboard("30d")
+def test_swaps_reads_each_transaction_once(fake):
+    t = 1_800_000_000_000
+    fake.swap("W1", "buy", "MintA", 100, 50.0, t)
+    fake.swap("W1", "sell", "MintA", 100, 70.0, t + 60_000)
+    fake.swap("W1", "buy", "MintB", 5, 20.0, t + 120_000, failed=True)
+    c = client(fake)
+    legs, full = c.swaps("W1", 25)
+    assert [(g.side, g.token, g.usd) for g in legs] == [("buy", "MintA", 50.0), ("sell", "MintA", 70.0)]
+    assert not full
+    n = sum(1 for m, _ in fake.calls if m == "getTransaction")
+    assert n == 2                                        # the failed one is never opened (err in the list)
+    c.swaps("W1", 25)
+    assert sum(1 for m, _ in fake.calls if m == "getTransaction") == n
+
+
+def test_fetch_history_pages_back_stops_at_since_and_updates_incrementally(fake):
+    t0 = 1_800_000_000_000
+    for i in range(30):
+        fake.swap("W2", "buy" if i % 2 == 0 else "sell", f"M{i // 2}", 10, 10.0 + i, t0 + i * 3_600_000)
+    c = client(fake)
+    rpc = c.rpc
+    sigs, done = chain.signatures_until(rpc, "W2", 0, max_sigs=12)
+    assert len(sigs) == 12 and not done
+    h = chain.fetch_history(c, "W2", since_ms=t0 + 10 * 3_600_000)
+    assert h.complete and len(h.legs) == 20 and h.legs[0].ts == t0 + 10 * 3_600_000
+    newest = h.newest_sig
+    fake.swap("W2", "buy", "Late", 1, 5.0, t0 + 40 * 3_600_000)
+    h2 = chain.fetch_history(c, "W2", since_ms=0, stop_sig=newest)
+    assert h2.complete and [g.token for g in h2.legs] == ["Late"]
+
+
+def test_a_wallet_too_busy_for_its_history_is_not_downloaded(fake):
+    t0 = 1_800_000_000_000
+    for i in range(50):
+        fake.swap("Busy", "buy", f"T{i}", 1, 1.0, t0 + i * 1000)
+    c = client(fake)
+    h = chain.fetch_history(c, "Busy", since_ms=0, max_sigs=20, min_span_ms=21 * DAY)
+    assert not h.complete and h.legs == [] and h.n_sigs == 20
+    assert not any(m == "getTransaction" for m, _ in fake.calls)
+
+
+def test_sample_fomo_finds_traders_only_through_fomos_fee_payer(fake):
+    t = 1_800_000_000_000
+    fake.swap("Alice", "buy", "X", 10, 100.0, t)
+    fake.swap("Bob", "sell", "Y", 10, 40.0, t + 1000)
+    fake.swap("Carol", "buy", "Z", 10, 30.0, t + 2000, fomo=False)        # not a FOMO trade
+    seen = chain.sample_fomo(client(fake), FEE_PAYER, pages=1, per_page=50)
+    assert sorted((w, [g.usd for g in legs]) for w, legs in seen) == [("Alice", [100.0]), ("Bob", [40.0])]
+
+
+def test_a_refused_key_raises_auth_error_and_the_key_is_sent_only_to_the_live_client(fake):
+    fake.swap("W3", "buy", "M", 1, 2.0, 1_800_000_000_000)
+    assert client(fake, KEY).swaps("W3")[0]
+    assert all(k for _, k in fake.calls)
     fake.refuse = True
-    with pytest.raises(fomo.AuthError):
-        fomo.FomoClient(fake.url, COOKIE, min_interval_s=0).swaps("u1")
+    with pytest.raises(chain.AuthError):
+        client(fake, KEY).swaps("W3")
+    assert client(fake).swaps("W3")[0]                  # the public endpoint (no key) still answers
 
 
-def test_fetch_history_raises_limit_until_it_reaches_the_start(fake):
-    fake.swaps["u1"] = [make_swap("buy", "TOK", 10, 5, NOW + i * 60_000) for i in range(500)]
-    c = fomo.FomoClient(fake.url, COOKIE, min_interval_s=0)
-    h = fomo.fetch_history(c, "u1", since_ms=NOW, max_limit=3000)
-    assert h.complete and len(h.legs) == 500
-    h = fomo.fetch_history(c, "u1", since_ms=NOW + 400 * 60_000)           # only the recent part wanted
-    assert h.complete and len(h.legs) == 100 and h.legs[0].ts >= NOW + 400 * 60_000
+def history_of(fake, wallet, n, t0=1_800_000_000_000):
+    for i in range(n):
+        fake.swap(wallet, "buy" if i % 2 == 0 else "sell", f"M{i // 2}", 10, 10.0 + i, t0 + i * 3_600_000)
 
 
-def test_fetch_history_keeps_what_it_has_when_the_server_refuses_a_big_limit(fake):
-    fake.swaps["u1"] = [make_swap("buy", "TOK", 10, 5, NOW + i * 60_000) for i in range(500)]
-    fake.max_limit = 250
-    c = fomo.FomoClient(fake.url, COOKIE, min_interval_s=0)
-    h = fomo.fetch_history(c, "u1", since_ms=NOW)
-    assert not h.complete and len(h.legs) == 200
+def test_with_a_helius_key_history_comes_in_bulk_pages_of_100(fake):
+    history_of(fake, "W4", 250)
+    c = chain.ChainClient(chain.Rpc(f"{fake.url}/?api-key={KEY}", 0), parallel=4, bulk=True)
+    h = chain.fetch_history(c, "W4", since_ms=0, max_sigs=2000)
+    assert h.complete and len(h.legs) == 250
+    assert [g.ts for g in h.legs] == sorted(g.ts for g in h.legs)
+    bulk = [m for m, _ in fake.calls if m == "getTransactionsForAddress"]
+    assert len(bulk) == 3 and not any(m == "getTransaction" for m, _ in fake.calls)
+    one_by_one = chain.ChainClient(chain.Rpc(fake.url, 0), parallel=4)
+    assert chain.fetch_history(one_by_one, "W4", since_ms=0).legs == h.legs       # same swaps either way
 
 
-def test_cookie_file_is_used_and_re_read_when_it_changes(fake, tmp_path):
-    f = tmp_path / "fomo.cookie"
-    f.write_text("wrong=cookie\n", encoding="utf-8")
-    c = fomo.FomoClient(fake.url, "", min_interval_s=0, cookie_file=str(f))
-    with pytest.raises(fomo.AuthError):
-        c.leaderboard("30d")                         # expired session
-    fake.rows["30d"] = [make_row("u1", "AddrOne", "one", 5000.0)]
-    f.write_text("session=abc123;\n  other=xyz\n", encoding="utf-8")   # the owner pastes a fresh one
-    import os
-    os.utime(f, (f.stat().st_atime, f.stat().st_mtime + 5))
-    assert c.leaderboard("30d")[0].address == "AddrOne"                  # no restart needed
-    f.unlink()
-    assert c.leaderboard("30d")[0].address == "AddrOne"                  # a vanished file keeps the last cookie
-    assert c.usable
+def test_when_bulk_is_refused_history_is_read_one_by_one_and_bulk_rests(fake):
+    history_of(fake, "W5", 30)
+    fake.bulk_refuse = True
+    c = chain.ChainClient(chain.Rpc(f"{fake.url}/?api-key={KEY}", 0), parallel=4, bulk=True)
+    h = chain.fetch_history(c, "W5", since_ms=0)
+    assert len(h.legs) == 30 and not c.bulk_ready()
+    assert sum(1 for m, _ in fake.calls if m == "getTransaction") == 30
+    n = len(fake.calls)
+    chain.fetch_history(chain.ChainClient(c.rpc, bulk=True), "W5", since_ms=0)   # a fresh client tries bulk again
+    assert any(m == "getTransactionsForAddress" for m, _ in fake.calls[n:])
 
 
-def test_an_oversized_cookie_gets_a_clear_message_and_the_trim_tool_keeps_only_what_is_needed(tmp_path):
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("trim", "tools/fomo_cookie_trim.py")
-    trim = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(trim)
-    pasted = "cookie: privy-token=AAA; _ga=GA1; ph_x=PH; privy-session=BBB; _dd_s=DD; privy-token=AAA2\n"
-    c = trim.parse(pasted)
-    assert list(c) == ["privy-token", "privy-session", "_ga", "ph_x", "_dd_s"] or set(c) == {
-        "privy-token", "privy-session", "_ga", "ph_x", "_dd_s"}
-    assert c["privy-token"] == "AAA2"                                    # a duplicate: the later one wins
-    assert not any(trim.TRACKING.match(k) for k in ("privy-token", "privy-session"))
-    assert all(trim.TRACKING.match(k) for k in ("_ga", "ph_x", "_dd_s"))
-    assert trim.parse("not a cookie") == {} and trim.header({"a": "1", "b": "2"}) == "a=1; b=2"
-    assert trim.status("x" * 8000) == 431                                # never even sent
+def test_the_daily_credit_cap_moves_the_search_to_the_free_endpoint(fake):
+    history_of(fake, "W6", 8)
+    helius, public = chain.Rpc(f"{fake.url}/?api-key={KEY}", 0, name="helius"), chain.Rpc(fake.url, 0, name="public")
+    rpc = chain.FallbackRpc(helius, public, daily_credits=5)
+    c = chain.ChainClient(rpc)
+    h = chain.fetch_history(c, "W6", since_ms=0)
+    assert len(h.legs) == 8
+    keyed = [k for m, k in fake.calls]
+    assert keyed[:5] == [True] * 5 and not any(keyed[5:]) and len(keyed) == 9      # 1 list + 8 reads
+    assert rpc.used == 5
 
 
-@pytest.mark.parametrize("enc", ["utf-8", "utf-8-sig", "utf-16", "utf-16-le"])
-def test_cookie_file_is_read_whatever_encoding_windows_saved_it_in(tmp_path, enc):
-    value = "__cf_bm=abc-1.0; _ga=GA1.1.2; privy-token=eyJ.eyJ.sig; privy-session=privy.fomo.family"
-    f = tmp_path / "fomo.cookie"
-    f.write_bytes(("cookie: " + value + "\r\n").encode(enc))
-    assert fomo.read_cookie_file(str(f)) == value
-    f.write_bytes(("\r\n  " + value[:20] + "\r\n" + value[20:] + "\r\n").encode(enc))
-    assert fomo.read_cookie_file(str(f)).replace(" ", "") == value.replace(" ", "")
+def test_a_missing_old_transaction_is_skipped_in_history_but_retried_live(fake):
+    history_of(fake, "W7", 4)
+    sig = fake.sigs["W7"][1]["signature"]
+    del fake.tx[sig]
+    c = client(fake)
+    assert len(chain.fetch_history(c, "W7", since_ms=0).legs) == 3
+    with pytest.raises(chain.ChainError):
+        c.swaps("W7")

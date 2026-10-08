@@ -1,4 +1,4 @@
-"""Deterministic scoring of Solana wallets from their VERIFIED swaps (never from the leaderboard's own pnl).
+"""Deterministic scoring of Solana wallets from their on-chain swaps (sol/chain.py).
 
 Round trips use average cost per token: buys build a position, sells reduce it, flat = a closed trip. Anything
 not closed is an open position (a "bag"). The gates are deliberately strict: a wallet must have a real history,
@@ -11,49 +11,13 @@ import statistics
 from dataclasses import asdict, dataclass, field
 
 from copybot.config import Sol
-from copybot.sol.fomo import Leg, LbRow
+from copybot.sol.chain import Leg
 
 DAY = 86_400_000
 EPS = 1e-9
 
 
-# ---- 1. pre-screen from the leaderboard rows -------------------------------------------------------
-@dataclass
-class Pre:
-    ok: bool
-    reason: str = ""
-    edge: float = 0.0
-
-
-def prescreen(r30: LbRow, r7: LbRow | None, r24: LbRow | None, c: Sol) -> Pre:
-    """r7 / r24 are the same wallet on the 7d / 24h boards (None = not on that board: no profit shown there)."""
-    if r30.private or r30.restricted:
-        return Pre(False, "private_or_restricted")
-    if r30.pnl < c.min_pnl_30d:
-        return Pre(False, "pnl_30d_too_low")
-    if r30.swap_count < c.min_trades:
-        return Pre(False, "too_few_swaps")
-    if r30.volume <= 0 or r30.pnl / r30.volume > 0.6:
-        return Pre(False, "pnl_vs_volume_one_shot")
-    if r7 is None or r7.pnl <= 0:
-        return Pre(False, "not_profitable_7d")
-    if r24 is not None and r24.pnl < -r30.pnl * c.max_recent_loss_pct / 100:
-        return Pre(False, "losing_today")
-    if r30.holdings_usd > r30.pnl * max(c.max_open_vs_pnl, 0.0) + 1e-9:
-        return Pre(False, "holding_a_lot")
-    if r30.holdings_pnl > r30.pnl * 0.5:
-        return Pre(False, "profit_mostly_unrealised")
-    return Pre(True, "", min(r30.pnl / r30.volume, 0.3))
-
-
-def rank_prescreened(rows30: list[LbRow], rows7: list[LbRow], rows24: list[LbRow], c: Sol) -> list[tuple[LbRow, Pre]]:
-    by7 = {r.address: r for r in rows7}
-    by24 = {r.address: r for r in rows24}
-    ok = [(r, p) for r in rows30 for p in [prescreen(r, by7.get(r.address), by24.get(r.address), c)] if p.ok]
-    return sorted(ok, key=lambda x: (-x[1].edge, -x[0].pnl, x[0].address))
-
-
-# ---- 2. round trips -------------------------------------------------------------------------------
+# ---- 1. round trips -------------------------------------------------------------------------------
 @dataclass
 class Trip:
     token: str
@@ -112,7 +76,7 @@ def build(legs: list[Leg]) -> Book:
     return book
 
 
-# ---- 3. the score ----------------------------------------------------------------------------------
+# ---- 2. the score ----------------------------------------------------------------------------------
 @dataclass
 class Score:
     address: str

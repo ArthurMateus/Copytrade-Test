@@ -93,11 +93,10 @@ def test_solana_and_discord_sections_load_with_documented_ranges(tmp_path):
 
 
 def test_new_secrets_come_from_the_environment_and_never_appear_in_public_config():
-    env = {"FOMO_COOKIE": "session=SECRETVALUE", "DISCORD_BOT_TOKEN": "DCTOKEN", "DISCORD_CHANNEL_ID": "1",
+    env = {"HELIUS_API_KEY": " SECRETVALUE ", "DISCORD_BOT_TOKEN": "DCTOKEN", "DISCORD_CHANNEL_ID": "1",
            "DISCORD_OWNER_ID": "2"}
     cfg = config.load("config", env=env)
-    assert (cfg.fomo_cookie, cfg.dc_token, cfg.dc_channel_id, cfg.dc_owner_id) == (
-        "session=SECRETVALUE", "DCTOKEN", "1", "2")
+    assert (cfg.helius_key, cfg.dc_token, cfg.dc_channel_id, cfg.dc_owner_id) == ("SECRETVALUE", "DCTOKEN", "1", "2")
     shown = str(config.public_dict(cfg)) + repr(cfg)
     assert "SECRETVALUE" not in shown and "DCTOKEN" not in shown
 

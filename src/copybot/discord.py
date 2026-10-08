@@ -52,7 +52,7 @@ DESCRIPTIONS = {
     "/fomopause": "FOMO: pause new copies (exits and stops keep running)",
     "/fomoresume": "FOMO: resume new copies",
     "/fomoflatten": "FOMO: close every position and pause (needs the PIN)",
-    "/fomosearch": "FOMO: look for new traders now",
+    "/fomosearch": "FOMO: find and rank FOMO traders on-chain now, follow the best",
     "/fomoreset": "FOMO: the wallet back to the start, no open trades, traders kept (needs the PIN)",
 }
 

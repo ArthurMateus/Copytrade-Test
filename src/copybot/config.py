@@ -1,7 +1,7 @@
 """Config: TOML files in one folder, one file per section, validated against hard ceilings at start.
 
 Unknown keys are an error (typos must not silently fall back to defaults).
-Secrets (Telegram token, chat id, PIN, FOMO cookie, Discord token/channel/owner) come from environment variables ONLY.
+Secrets (Telegram token, chat id, PIN, Discord token/channel/owner, Helius key) come from environment variables ONLY.
 """
 from __future__ import annotations
 
@@ -102,9 +102,19 @@ class Discord:
 
 @dataclass
 class Sol:
-    """Solana memecoin copy-trading (wallets from the FOMO leaderboard). PAPER ONLY, its own $ book."""
-    enabled: bool = True                  # still needs FOMO_COOKIE in the environment, else it stays off
-    api_base: str = "https://prod-api.fomo.family"
+    """Solana memecoin copy-trading of FOMO traders, found and followed on-chain (sol/chain.py). PAPER ONLY."""
+    enabled: bool = True
+    # history + discovery: slow background work on the free public endpoint (no key, no credits)
+    rpc_url: str = "https://api.mainnet-beta.solana.com"
+    rpc_interval_s: float = 0.3           # the public endpoint allows about 4 getTransaction per second
+    # live copying: Helius when HELIUS_API_KEY is set (the key is appended as ?api-key=), else the public endpoint
+    live_rpc_url: str = "https://mainnet.helius-rpc.com"
+    live_ws_url: str = "wss://mainnet.helius-rpc.com"
+    public_ws_url: str = "wss://api.mainnet-beta.solana.com"
+    live_rpc_interval_s: float = 0.11     # Helius free plan: 10 requests per second (live + history share it)
+    helius_daily_credits: int = 30_000    # most Helius credits the search may spend per UTC day (then: public endpoint)
+    history_parallel: int = 6             # transactions read at once during a search (Helius only)
+    fomo_fee_payer: str = "AgmLJBMDCqWynYnQiPCuj9ewsNNsBJXyzoUhD9LJzN51"   # co-signs every FOMO user swap
     dex_url: str = "https://api.dexscreener.com"
     # -- the paper book and its risk limits (enforced in sol/risk.py)
     start_equity: float = 300.0
@@ -121,7 +131,7 @@ class Sol:
     max_impact_pct: float = 2.0           # entry clamped so the estimated price impact stays under this
     max_entry_age_s: float = 30.0         # do not open on a leader swap older than this
     max_price_age_s: float = 10.0
-    max_leader_feed_age_s: float = 60.0   # leader polling silent longer than this = in doubt, no entries
+    max_leader_feed_age_s: float = 300.0  # leader polling silent longer than this = in doubt, no entries
     swap_fee_pct: float = 1.0             # paper fee per swap (platform + network), % of notional
     extra_slippage_pct: float = 0.5
     exit_fallback_penalty_pct: float = 30.0   # exit fill when no price is known: last price minus this
@@ -129,7 +139,7 @@ class Sol:
     leader_pause_dd_pct: float = 10.0
     leader_pause_losses: int = 4
     # -- timing
-    poll_leader_s: float = 4.0
+    poll_leader_s: float = 120.0          # safety poll per followed wallet; the websocket wakes it at once on a trade
     price_poll_s: float = 3.0
     # -- selection (same hysteresis as Hyperliquid)
     rescore_minutes: float = 60.0
@@ -138,11 +148,13 @@ class Sol:
     drop_rank: int = 10
     confirm_cycles: int = 2
     min_follow_hours: float = 24.0
-    history_days: int = 60
-    max_candidates: int = 120
+    history_days: int = 30
+    max_candidates: int = 200             # FOMO traders fully scored per review (most active by sampled volume)
     dropped_cooldown_days: float = 7.0
+    discover_pages: int = 30              # per review: pages of FOMO's fee payer walked back (1000 tx, ~2 min each)
+    discover_per_page: int = 20           # transactions opened per page (each reveals one trader)
+    max_history_txs: int = 2000           # a wallet whose newest 2000 transactions span < min_history_days is skipped
     # -- scoring strictness (sol/scoring.py)
-    min_pnl_30d: float = 2000.0           # leaderboard pre-screen, USD
     min_trades: int = 40
     min_active_days: int = 14
     min_history_days: int = 21
@@ -193,8 +205,7 @@ class Config:
     dc_token: str = field(default="", repr=False)
     dc_channel_id: str = field(default="", repr=False)
     dc_owner_id: str = field(default="", repr=False)
-    fomo_cookie: str = field(default="", repr=False)
-    fomo_cookie_file: str = field(default="", repr=False)    # alternative to FOMO_COOKIE; re-read on change
+    helius_key: str = field(default="", repr=False)          # HELIUS_API_KEY: live Solana data (optional)
 
 
 SECTIONS = ("risk", "broker", "selection", "telegram", "discord", "runtime", "sol")
@@ -273,9 +284,15 @@ CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
     ("sol", "swap_fee_pct"): (0.1, 5.0),
     ("sol", "extra_slippage_pct"): (0, 10),
     ("sol", "max_leaders"): (0, 7),
+    ("sol", "max_candidates"): (1, 1000),
+    ("sol", "discover_pages"): (1, 500),
+    ("sol", "discover_per_page"): (1, 200),
+    ("sol", "max_history_txs"): (100, 10_000),
     ("sol", "leader_pause_dd_pct"): (0.1, 10.0),
     ("sol", "leader_pause_losses"): (1, 5),
-    ("sol", "poll_leader_s"): (1, 60),
+    ("sol", "poll_leader_s"): (1, 300),
+    ("sol", "helius_daily_credits"): (0, 200_000),
+    ("sol", "history_parallel"): (1, 16),
     ("sol", "price_poll_s"): (0.2, 60),
     ("sol", "join_rank"): (1, 8),
     ("sol", "drop_rank"): (2, 15),
@@ -297,7 +314,6 @@ CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
     ("sol", "max_current_drawdown"): (0.01, 0.25),
     ("sol", "max_recent_loss_pct"): (0, 20),
     ("sol", "min_copy_edge_pct"): (0.5, 100),
-    ("sol", "min_pnl_30d"): (500, 1e9),
     ("runtime", "ws_alert_after_s"): (1, 3600),
 }
 
@@ -332,8 +348,7 @@ def load(config_dir: str | os.PathLike, env: dict | None = None) -> Config:
     cfg.dc_token = env.get("DISCORD_BOT_TOKEN", "")
     cfg.dc_channel_id = env.get("DISCORD_CHANNEL_ID", "")
     cfg.dc_owner_id = env.get("DISCORD_OWNER_ID", "")
-    cfg.fomo_cookie = env.get("FOMO_COOKIE", "")
-    cfg.fomo_cookie_file = env.get("FOMO_COOKIE_FILE", "")
+    cfg.helius_key = env.get("HELIUS_API_KEY", "").strip()
     return cfg
 
 
@@ -379,7 +394,6 @@ def scaled(cfg: Config, risk_pct: float) -> Config:
 def public_dict(cfg: Config) -> dict:
     """Config without secrets, safe to log."""
     d = asdict(cfg)
-    for k in ("tg_token", "tg_chat_id", "pin", "dc_token", "dc_channel_id", "dc_owner_id", "fomo_cookie",
-              "fomo_cookie_file"):
+    for k in ("tg_token", "tg_chat_id", "pin", "dc_token", "dc_channel_id", "dc_owner_id", "helius_key"):
         d.pop(k)
     return d

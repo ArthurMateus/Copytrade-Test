@@ -28,7 +28,6 @@ from copybot.risk import Health, RiskGate
 from copybot.selection import Plan, Scorer, rebalance, select
 from copybot.discord import DiscordUI, MultiUI
 from copybot.sol.fmt import FOMO_HELP
-from copybot.sol.fomo import read_cookie_file
 from copybot.sol.runner import SolBot
 from copybot.tg import HELP, TelegramUI
 from copybot.wallets import SideWallet, boot_repair
@@ -96,10 +95,8 @@ class Bot:
                           DiscordUI(cfg, on_cmd, lambda k, m: self.q.put(("card", "dc:" + k, m))))
         tgfmt.set_utc_offset(cfg.telegram.utc_offset_hours)
         self.sol: SolBot | None = None
-        if cfg.sol.enabled and (cfg.fomo_cookie or cfg.fomo_cookie_file):
+        if cfg.sol.enabled:
             self.sol = SolBot(cfg, self.ui, self.alert, restart=lambda: setattr(self, "restart_at", time.time() + 3))
-        elif cfg.sol.enabled:
-            log.warn("sol_disabled", why="FOMO_COOKIE / FOMO_COOKIE_FILE not set")
         self.scorer = Scorer(cfg, self.info, self.q, self.data / "cache")
         self.ranks: dict[str, int] = {}
         self.ranking: list[str] = []
@@ -528,12 +525,11 @@ class Bot:
             if self.sol:
                 self.sol.q.put(("cmd", c))
             else:
-                self.ui.send("🪙 FOMO is off: set FOMO_COOKIE_FILE (or FOMO_COOKIE) and keep sol.enabled = true, "
-                             "then restart.")
+                self.ui.send("🪙 FOMO is off: set enabled = true in config/sol.toml, then restart.")
             return
         if c.name == "/help":
             self.ui.send(HELP + "\n\n" + (FOMO_HELP if self.sol else
-                                          "🪙 <b>FOMO</b> is off (set FOMO_COOKIE_FILE and restart to turn it on)"))
+                                          "🪙 <b>FOMO</b> is off (enabled = true in config/sol.toml, then restart)"))
         elif c.name in ("/status", "/leaders", "/trades", "/traders", "/wallets"):
             key = c.name[1:]
             self.live_cards.add(key)
@@ -664,18 +660,8 @@ def main(argv: list[str] | None = None) -> None:
     except config.ConfigError as e:
         print(f"config error: {e}", file=sys.stderr)
         raise SystemExit(2)
-    for s in (cfg.tg_token, cfg.pin, cfg.dc_token, cfg.fomo_cookie):
+    for s in (cfg.tg_token, cfg.pin, cfg.dc_token, cfg.helius_key):
         log.add_secret(s)
-    for part in cfg.fomo_cookie.split(";"):            # each cookie value on its own, in case one is logged alone
-        log.add_secret(part.partition("=")[2].strip())
-    if cfg.fomo_cookie_file:
-        try:
-            text = read_cookie_file(cfg.fomo_cookie_file)
-            log.add_secret(" ".join(text.split()))
-            for part in text.split(";"):
-                log.add_secret(part.partition("=")[2].strip())
-        except OSError:
-            pass
     log.setup(cfg.runtime.log_dir)
     bot = Bot(cfg)
     try:

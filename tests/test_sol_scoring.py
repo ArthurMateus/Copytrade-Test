@@ -5,11 +5,11 @@ import pytest
 
 from copybot.config import Sol
 from copybot.sol import scoring
-from copybot.sol.fomo import Leg, LbRow
+from copybot.sol.chain import Leg
 
 DAY = 86_400_000
 NOW = 1_800_000_000_000
-C = Sol()
+C = Sol(history_days=60)        # these histories span 60 days
 
 
 def trade(i, token, open_ms, hold_s, cost, ret):
@@ -137,21 +137,3 @@ def test_ranking_is_deterministic_and_only_eligible():
     a.address, b.address, bad.address = "A", "B", "C"
     r1 = scoring.ranking([a, b, bad])
     assert r1 == scoring.ranking([bad, b, a]) and "C" not in r1 and set(r1) == {"A", "B"}
-
-
-def row(pnl=10_000.0, window="30d", swaps=200, volume=60_000.0, holdings=0.0, hpnl=0.0, private=False):
-    return LbRow("u", "A", "h", 100, swaps, swaps // 2, volume, pnl, window, 0, private, False, holdings, hpnl, 0)
-
-
-def test_prescreen_rules():
-    r30, r7, r24 = row(), row(2000.0, "7d"), row(100.0, "24h")
-    assert scoring.prescreen(r30, r7, r24, C).ok
-    assert scoring.prescreen(row(500.0), r7, r24, C).reason == "pnl_30d_too_low"
-    assert scoring.prescreen(row(swaps=10), r7, r24, C).reason == "too_few_swaps"
-    assert scoring.prescreen(row(volume=10_000.0), r7, r24, C).reason == "pnl_vs_volume_one_shot"
-    assert scoring.prescreen(r30, None, r24, C).reason == "not_profitable_7d"
-    assert scoring.prescreen(r30, row(-5.0, "7d"), r24, C).reason == "not_profitable_7d"
-    assert scoring.prescreen(r30, r7, row(-5000.0, "24h"), C).reason == "losing_today"
-    assert scoring.prescreen(row(holdings=50_000.0), r7, r24, C).reason == "holding_a_lot"
-    assert scoring.prescreen(row(holdings=100.0, hpnl=8000.0), r7, r24, C).reason == "profit_mostly_unrealised"
-    assert scoring.prescreen(row(private=True), r7, r24, C).reason == "private_or_restricted"

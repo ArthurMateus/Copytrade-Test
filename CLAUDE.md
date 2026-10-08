@@ -15,8 +15,7 @@ that are not listed there unless the owner asks. The README covers run instructi
 - Never import a signing library, read a wallet key, or call an exchange/order endpoint.
   `tests/test_safety.py` enforces this.
 - Secrets come from environment variables only: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `COPYBOT_PIN`,
-  `DISCORD_BOT_TOKEN`, `DISCORD_CHANNEL_ID`, `DISCORD_OWNER_ID`, and for the Solana book `FOMO_COOKIE` or
-  `FOMO_COOKIE_FILE`.
+  `DISCORD_BOT_TOKEN`, `DISCORD_CHANNEL_ID`, `DISCORD_OWNER_ID`, and for the Solana book `HELIUS_API_KEY` (optional).
   Never log or commit them. `log.py` redacts them.
 - Every order goes through `RiskGate.check` (`risk.py`). Exits (reduce/close/stop) are never refused; entries
   fail closed.
@@ -46,7 +45,7 @@ that are not listed there unless the owner asks. The README covers run instructi
 | `discord.py` | Discord (owner request 2026-10-06), runs NEXT TO Telegram via `MultiUI`: `DiscordUI` subclasses `TelegramUI` (same outbox/card logic) over REST + Gateway (stdlib + `websockets.sync`), guild slash commands, owner-only, ephemeral replies (PIN never shown). Telegram HTML → markdown embeds coloured by money. Discord card ids live in the ledger as `dc:<key>` |
 | `runner.py` | `Bot`: boot/repair, worker threads, trading loop, commands, selection application, heartbeat |
 | `wallets.py` | Side wallets: same moves at other risk levels (`risk.side_wallets_risk_pct`), own ledger in `data/wallets/<name>/`, limits scaled by `config.scaled`; `boot_repair` shared with the main wallet |
-| `sol/` | **Solana memecoin paper book** (own $300, own ledger `data/sol/`, own risk gate). `fomo.py` client + parsers, `scoring.py` strict pure scoring, `scorer.py` thread + cache, `market.py` DexScreener + paper broker, `risk.py` gate, `trader.py` detector + positions, `runner.py` `SolBot` (threads inside the main process), `fmt.py` cards |
+| `sol/` | **Solana memecoin paper book** (own $300, own ledger `data/sol/`, own risk gate). `chain.py` Solana RPC client + swap parser + FOMO trader discovery + websocket alerts, `scoring.py` strict pure scoring, `scorer.py` thread + cache, `market.py` DexScreener + paper broker, `risk.py` gate, `trader.py` detector + positions, `runner.py` `SolBot` (threads inside the main process), `fmt.py` cards |
 
 Runtime state: `data/ledger.jsonl` (the source of truth), `data/cache/`, `data/bot.lock` (single instance) and
 `logs/copybot.log`. All of these are git-ignored. Moving the bot to another PC means copying `data/`. Never run two
@@ -90,10 +89,33 @@ instances on the same wallet.
 - Lag = exchange-clock time of our paper fill minus the leader's fill time.
 
 ## Solana / FOMO / Discord (added 2026-10-07 at the owner's request; not in the original spec)
-- Wallets come from the FOMO leaderboard (`prod-api.fomo.family/v2/leaderboard/{24h,7d,30d}`, 150 rows each) and are
-  re-verified from `/v2/users/{id}/swaps?limit=N` (newest first; `limit` is the ONLY working paging parameter). Both need
-  the owner's logged-in session cookie. The API is private and can change; fixtures in `tests/fixtures/fomo_*.json`
-  are real recordings. pump.fun was checked and has no trader leaderboard (Cloudflare, undocumented endpoints): not used.
+- **On-chain since 2026-10-08 (FOMO's API dropped).** FOMO's API (`prod-api.fomo.family`) refuses every non-browser
+  client with 403 `{"authorization":false}`, even for public pages without a cookie (it is Cloudflare, not the login), and
+  the `address` it shows for a trader is NOT the trading wallet (verified: listed addresses with thousands of swaps have
+  no on-chain transactions). FOMO pays every user swap's fee: each FOMO trade is co-signed by FOMO's fee payer
+  `AgmLJBMDCqWynYnQiPCuj9ewsNNsBJXyzoUhD9LJzN51` (`sol.fomo_fee_payer`) and the trader's real wallet (the other signer).
+  `tests/fixtures/chain_tx_fomo_buy.json` is the on-chain side of the first swap in `fomo_swaps.json` (same amount, +1 s,
+  89.0483 USDC vs FOMO's 88.0983: FOMO's 0.95 fee). The scorer samples the fee payer's flow (`discover_pages` x
+  `discover_per_page` random transactions), keeps the `max_candidates` traders by USD moved, reads their history and
+  scores it (`sol/scoring.py`, unchanged rules; the leaderboard pre-screen is gone). Do not bypass FOMO's Cloudflare.
+- Sources (measured 2026-10-08): the free public RPC allows only ~1 getTransaction/s and answers parallel reads with 429,
+  so with `HELIUS_API_KEY` EVERYTHING uses Helius (one shared `Rpc` limiter, 0.11 s): live, discovery and history. Helius
+  bills getTransaction/getSignaturesForAddress 1 credit (also for old data) and `getTransactionsForAddress` 10 credits
+  per 100 full transactions (used for history, `ChainClient(bulk=True)`; free-plan availability unverified: if refused,
+  one by one and bulk retried after 6 h). `FallbackRpc` caps the search at `helius_daily_credits` per UTC day, then
+  the public RPC. Calls used: getSignaturesForAddress, getTransaction, getTransactionsForAddress, websocket
+  logsSubscribe. `LogWatch` only WAKES the poller; the poller (safety poll `poll_leader_s` = 120 s) reads the swaps,
+  so a dead websocket adds lag but never loses a trade.
+- Search UX (owner request 2026-10-08): `/fomosearch` (or the first review when nobody is followed) ends with
+  `hysteresis.rebalance`: top `max_leaders` (7) followed at once, followed ones outside it dropped, empty ranking drops
+  nobody. `SolScorer.progress` feeds the search line in `/fomo` and `/fomoleaders` (also "best found, not followed");
+  a `/fomosearch` during a running search only reports progress. `history_days` = 30 to keep a search affordable.
+  Seeder and scorer can read one wallet's history together: `SolScorer.history` locks per wallet (Windows refused two
+  writers of one cache file).
+- Swap parsing (`chain.parse_tx`): the wallet's USDC/USDT moves one way and one token the other. A routed swap leaves a
+  speck of the intermediate token (fixture `chain_tx_fomo_routed.json`): the token with the largest relative balance
+  change wins if every other moved < 10%. SOL-priced swaps (~1 in 40) are skipped (no USD price). Leg id = signature.
+- pump.fun was checked and has no trader leaderboard (Cloudflare, undocumented endpoints): not used.
 - Discord is the owner's own implementation (`discord.py`, slash commands over the Gateway, `MultiUI` fan-out); the Solana
   book just talks to the same `ui`. Slash commands `/fomo`, `/fomotrades`, ... are in `tg.COMMANDS`.
 - Ledger reuse: Solana positions are `Position(side=+1, leverage=1, coin=<mint>, sym=<symbol>)` in the same `State`; a
@@ -101,8 +123,8 @@ instances on the same wallet.
 - Entries need DexScreener liquidity >= `min_liquidity_usd`; bonding-curve pools often have none -> refused (fail closed).
 - Reduces are target-based (`k x leader balance`), so a trim too small to trade is caught up by the next one.
 - Bug found and fixed while building it: `_skip(..., kind=...)` collided with `notify(kind, ...)` (also in `positions.py`).
-- Open risks: the FOMO cookie may expire (hours or days unknown); while it is dead the bot cannot see leader sells, only
-  stops protect open copies. Copy lag is poll-based (seconds).
+- Open risks: FOMO could change its fee payer (discovery would find 0 traders: log `sol_discovered traders=0`); followed
+  wallets keep working. The first review on the public RPC takes hours. Copy lag = websocket alert + one read.
 
 ## Command families and resets (2026-10-08)
 - Hyperliquid: `/hyper<x>`; FOMO book: `/fomo<x>` (`tg.ALIASES`/`canon` turn every name into one canonical name
