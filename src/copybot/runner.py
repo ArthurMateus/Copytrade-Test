@@ -28,6 +28,7 @@ from copybot.risk import Health, RiskGate
 from copybot.selection import Plan, Scorer, rebalance, select
 from copybot.discord import DiscordUI, MultiUI
 from copybot.sol.fmt import FOMO_HELP
+from copybot.sol.fomo import read_cookie_file
 from copybot.sol.runner import SolBot
 from copybot.tg import HELP, TelegramUI
 from copybot.wallets import SideWallet, boot_repair
@@ -669,7 +670,7 @@ def main(argv: list[str] | None = None) -> None:
         log.add_secret(part.partition("=")[2].strip())
     if cfg.fomo_cookie_file:
         try:
-            text = Path(cfg.fomo_cookie_file).read_text(encoding="utf-8")
+            text = read_cookie_file(cfg.fomo_cookie_file)
             log.add_secret(" ".join(text.split()))
             for part in text.split(";"):
                 log.add_secret(part.partition("=")[2].strip())

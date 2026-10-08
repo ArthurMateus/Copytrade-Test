@@ -145,3 +145,13 @@ def test_an_oversized_cookie_gets_a_clear_message_and_the_trim_tool_keeps_only_w
     assert all(trim.TRACKING.match(k) for k in ("_ga", "ph_x", "_dd_s"))
     assert trim.parse("not a cookie") == {} and trim.header({"a": "1", "b": "2"}) == "a=1; b=2"
     assert trim.status("x" * 8000) == 431                                # never even sent
+
+
+@pytest.mark.parametrize("enc", ["utf-8", "utf-8-sig", "utf-16", "utf-16-le"])
+def test_cookie_file_is_read_whatever_encoding_windows_saved_it_in(tmp_path, enc):
+    value = "__cf_bm=abc-1.0; _ga=GA1.1.2; privy-token=eyJ.eyJ.sig; privy-session=privy.fomo.family"
+    f = tmp_path / "fomo.cookie"
+    f.write_bytes(("cookie: " + value + "\r\n").encode(enc))
+    assert fomo.read_cookie_file(str(f)) == value
+    f.write_bytes(("\r\n  " + value[:20] + "\r\n" + value[20:] + "\r\n").encode(enc))
+    assert fomo.read_cookie_file(str(f)).replace(" ", "") == value.replace(" ", "")

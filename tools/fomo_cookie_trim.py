@@ -15,6 +15,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from copybot.sol.fomo import read_cookie_file
+
 URL = "https://prod-api.fomo.family/v2/leaderboard/24h"
 MAX_HEADER = 7000          # stay far below the server's limit (431)
 TRACKING = re.compile(r"^(_ga|_gid|_gat|_gcl|_fbp|_fbc|_dd|_hj|ph_|amplitude|mp_|intercom|__stripe|_clck|_clsk|"
@@ -88,7 +90,7 @@ def main() -> int:
     if not path.exists():
         print(f"file not found: {path}")
         return 2
-    cookies = parse(path.read_text(encoding="utf-8", errors="ignore"))
+    cookies = parse(read_cookie_file(str(path)))
     if not cookies:
         print("no cookies found in the file: paste the value of the 'cookie:' request header")
         return 2
@@ -100,7 +102,7 @@ def main() -> int:
         print("could not find a working cookie. Sign in again, copy the cookie again, and rerun this.")
         return 1
     backup = path.with_name(path.name + ".full")
-    backup.write_text(path.read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
+    backup.write_text(read_cookie_file(str(path)) + chr(10), encoding="utf-8")
     path.write_text(header(best) + "\n", encoding="utf-8")
     print(f"OK: kept {len(best)} cookie(s): {', '.join(best)} ({len(header(best))} bytes). Old file: {backup.name}")
     return 0

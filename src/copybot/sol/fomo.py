@@ -26,6 +26,17 @@ SOL_NATIVE = "11111111111111111111111111111111"
 QUOTES = frozenset({USDC, USDT, WSOL, SOL_NATIVE})
 
 
+def read_cookie_file(path: str) -> str:
+    """The cookie as one line. Windows tools save text in several encodings (UTF-8 with or without BOM, UTF-16 from
+    PowerShell's '>'); all are understood. A leading 'cookie:' label and line breaks are dropped."""
+    with open(path, "rb") as f:
+        raw = f.read()
+    utf16 = raw[:2] in (bytes([0xFF, 0xFE]), bytes([0xFE, 0xFF])) or (len(raw) > 1 and raw[1] == 0)
+    text = raw.decode("utf-16" if utf16 else "utf-8-sig", errors="ignore")
+    text = " ".join(text.replace(chr(0), "").split())
+    return text[7:].strip() if text.lower().startswith("cookie:") else text
+
+
 class AuthError(Exception):
     """FOMO refused our session (expired or missing cookie)."""
 
@@ -155,8 +166,7 @@ class FomoClient:
             try:
                 m = os.stat(self._file).st_mtime
                 if m != self._file_mtime:
-                    with open(self._file, encoding="utf-8") as f:
-                        self._cookie = " ".join(f.read().split())      # one line, no stray newlines
+                    self._cookie = read_cookie_file(self._file)
                     self._file_mtime = m
             except OSError:
                 pass       # keep the last cookie we had (an unreadable file must not break a running bot)
