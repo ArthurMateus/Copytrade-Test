@@ -45,7 +45,10 @@ def browser_headers(cookie: str, bearer: bool = False) -> dict:
     """What the website's own page sends, so FOMO (behind Cloudflare) sees an ordinary browser request."""
     h = {"Cookie": cookie, "Accept": "application/json, text/plain, */*", "Accept-Language": "en-US,en;q=0.9",
          "Origin": "https://fomo.family", "Referer": "https://fomo.family/", "User-Agent": CHROME_UA,
-         "Sec-Fetch-Dest": "empty", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Site": "same-site"}
+         "Sec-Fetch-Dest": "empty", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Site": "same-site",
+         # the website's own page sends these two on every API call (seen in the browser); values overridable
+         "app-language": os.environ.get("FOMO_APP_LANGUAGE", "en"),
+         "x-supported-chains": os.environ.get("FOMO_SUPPORTED_CHAINS", "1399811149")}
     if bearer:
         for part in cookie.split(";"):
             name, _, val = part.strip().partition("=")
