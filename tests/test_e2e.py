@@ -114,8 +114,8 @@ def test_full_bot_in_process(env):
         p = bot.st.positions["ETH"]
         assert p.stop_px == pytest.approx(p.entry_px * 0.97)
         assert bot.st.lags_ms[-1] < 5000
-        assert wait_for(lambda: any("🟢 LONG <b>ETH</b>" in m["text"] for m in tg.sent))
-        card = next(m for m in tg.sent if "🟢 LONG <b>ETH</b>" in m["text"])["message_id"]
+        assert wait_for(lambda: any("<b>ETH</b> ⬆️ LONG" in m["text"] for m in tg.sent))
+        card = next(m for m in tg.sent if "<b>ETH</b> ⬆️ LONG" in m["text"])["message_id"]
         # price moves -> the SAME message is edited
         hl.mids["ETH"] = 3030.0
         assert wait_for(lambda: "3,030" in tg.messages[card] or "3030" in tg.messages[card])
@@ -123,6 +123,19 @@ def test_full_bot_in_process(env):
         # commands
         tg.say("/status")
         assert wait_for(lambda: any("📊 <b>Status</b>" in m["text"] for m in tg.sent))
+        tg.say("/trades")
+        assert wait_for(lambda: any("💼 <b>Trades</b> · 1 open" in m["text"] and "<b>ETH</b>" in m["text"]
+                                    for m in tg.sent))
+        tg.say("/traders")
+        assert wait_for(lambda: any("👥 <b>Traders</b>" in m["text"] for m in tg.sent))
+        # side wallets copied the same open at their own risk
+        assert [w.risk_pct for w in bot.sides] == [2.0, 5.0, 10.0, 20.0]
+        assert all("ETH" in w.st.positions for w in bot.sides[:2])
+        r5 = next(w for w in bot.sides if w.risk_pct == 5.0).st.positions["ETH"]
+        assert r5.risk_usd() == pytest.approx(5 * bot.st.positions["ETH"].risk_usd(), rel=0.05)
+        tg.say("/wallets")
+        assert wait_for(lambda: any("💰 <b>Wallets</b>" in m["text"] and "20% risk" in m["text"]
+                                    and "1% risk (main)" in m["text"] for m in tg.sent))
         tg.say("/flatten 0000")
         assert wait_for(lambda: any("Wrong or missing PIN" in m["text"] for m in tg.sent))
         assert "ETH" in bot.st.positions
@@ -136,7 +149,7 @@ def test_full_bot_in_process(env):
         # leader closes -> we close, and the trade card becomes a final summary in place
         hl.push_fills(LEADER, [leader_fill(hl, "ETH", 50, "A")])
         assert wait_for(lambda: "ETH" not in bot.st.positions, timeout=5)
-        assert wait_for(lambda: "✅ WIN" in tg.messages[card] and "leader closed" in tg.messages[card])
+        assert wait_for(lambda: "✅ WIN" in tg.messages[card] and "the trader closed" in tg.messages[card])
         assert not any("ETH" in m["text"] and "WIN" in m["text"] for m in tg.sent[n_sent:])   # no new message
         # flatten with PIN
         hl.push_fills(LEADER, [leader_fill(hl, "BTC", 5, "A")])
@@ -172,6 +185,8 @@ def test_ws_drop_missed_close_is_caught_by_reconcile(env):
         hl.drop_ws()
         assert wait_for(lambda: "BTC" not in bot.st.positions, timeout=10)
         assert bot.st.closed[-1]["reason"] == "reconcile_leader_flat"
+        # a quick reconnect (Hyperliquid's routine "Expired" close) is not worth an alert
+        assert not any("ebsocket" in m["text"] for m in tg.sent)
     finally:
         bot.stop.set()
         th.join(5)
@@ -235,12 +250,13 @@ def test_random_kills_never_lose_a_position_or_its_stop(env):
             proc.kill()
             proc.wait()
             hl.drop_ws()
-        st = Ledger(data / "ledger.jsonl").replay()
-        survived += len(st.positions)
-        for p in st.positions.values():
-            assert p.stop_px > 0 and p.stop_px < p.entry_px     # every surviving long has its stop
-        for u in st.uncertain:
-            assert "truncated" in u or "no recorded result" in u, u
+        for path in [data / "ledger.jsonl", *sorted((data / "wallets").glob("*/ledger.jsonl"))]:
+            st = Ledger(path).replay()                          # the main wallet and every side wallet
+            survived += len(st.positions) if path.parent == data else 0
+            for p in st.positions.values():
+                assert p.stop_px > 0 and p.stop_px < p.entry_px     # every surviving long has its stop
+            for u in st.uncertain:
+                assert "truncated" in u or "no recorded result" in u, u
     assert survived >= 1    # the kills really happened with open positions
     # final run: the leader closes everything; every copy we hold must be closed, none opened twice
     n += 1
@@ -250,12 +266,127 @@ def test_random_kills_never_lose_a_position_or_its_stop(env):
         time.sleep(1.0)
         for coin, szi in list(hl.positions.get(LEADER, {}).items()):
             hl.push_fills(LEADER, [make_fill(coin, hl.mids[coin], abs(szi), "A", szi)])
-        assert wait_for(lambda: not Ledger(data / "ledger.jsonl").replay().positions, timeout=20)
-        evs = ledger_events(data)
-        ids = [e["pos"]["pos_id"] for e in evs if e["ev"] == "open"]
-        assert len(ids) == len(set(ids))
-        coins_open = [e["pos"]["coin"] for e in evs if e["ev"] == "open"]
-        assert len(coins_open) == len(set(coins_open))   # each coin was opened at most once
+        ledgers = [data, *sorted(p for p in (data / "wallets").iterdir())]
+        assert len(ledgers) == 5
+        assert wait_for(lambda: not any(Ledger(d / "ledger.jsonl").replay().positions for d in ledgers), timeout=20)
+        for d in ledgers:                                  # in EVERY wallet: nothing opened twice, nothing left
+            evs = ledger_events(d)
+            ids = [e["pos"]["pos_id"] for e in evs if e["ev"] == "open"]
+            assert len(ids) == len(set(ids))
+            coins_open = [e["pos"]["coin"] for e in evs if e["ev"] == "open"]
+            assert len(coins_open) == len(set(coins_open)), d   # each coin was opened at most once
     finally:
         proc.kill()
         proc.wait()
+
+
+def test_ws_alert_only_when_it_stays_down(env):
+    hl, tg, data, cdir = env
+    seed_ledger(data)
+    (cdir / "runtime.toml").write_text((cdir / "runtime.toml").read_text(encoding="utf-8")
+                                       + "ws_alert_after_s = 2.0\n", encoding="utf-8")
+    cfg = config.load(cdir, env=env_for(tg))
+    log.setup(None)
+    bot = Bot(cfg)
+    th = threading.Thread(target=bot.run, daemon=True)
+    th.start()
+    try:
+        assert wait_for(lambda: LEADER in hl.subscribed_users() and bot.feed.connected)
+        hl.ws_refuse = True
+        hl.drop_ws()
+        assert wait_for(lambda: any("websocket down for" in m["text"] for m in tg.sent), timeout=15)
+        assert sum("websocket down" in m["text"] for m in tg.sent) == 1        # once, not on every retry
+        hl.ws_refuse = False
+        assert wait_for(lambda: any("Websocket back after" in m["text"] for m in tg.sent), timeout=30)
+    finally:
+        bot.stop.set()
+        th.join(5)
+        bot.shutdown()
+
+
+# ---- /search, /reset, /restart -----------------------------------------------------------------------------
+def start_bot(env, scorer=False):
+    hl, tg, data, cdir = env
+    seed_ledger(data)
+    cfg = config.load(cdir, env=env_for(tg))
+    log.setup(str(data / "logs"))
+    bot = Bot(cfg)
+    if not scorer:
+        bot.scorer.stop.set()          # the test feeds rankings itself
+    th = threading.Thread(target=bot.run, daemon=True)
+    th.start()
+    assert wait_for(lambda: LEADER in hl.subscribed_users() and bot.health().clock_ok)
+    return bot, th
+
+
+def stop_bot(bot, th):
+    bot.stop.set()
+    th.join(5)
+    bot.shutdown()
+
+
+TOP = [f"0x{i:040x}" for i in range(1, 10)]
+
+
+def test_search_repicks_the_best_seven_now(env):
+    hl, tg, data, cdir = env
+    bot, th = start_bot(env)
+    try:
+        scores = {a: {"score": 90 - i, "trades": 100, "win_rate": 0.7, "profit_factor": 3} for i, a in enumerate(TOP)}
+        bot.q.put(("ranking", TOP, len(TOP), scores))
+        assert wait_for(lambda: bot.ranking == TOP)
+        tg.say("/search")
+        assert wait_for(lambda: set(bot.st.followed) == set(TOP[:7]))     # at once: no window, no 2 checks
+        assert LEADER in bot.st.dropped                                     # it is not in the ranking any more
+        assert all(set(w.st.followed) == set(TOP[:7]) for w in bot.sides)
+        assert wait_for(lambda: any("following 7 new, dropping 1" in m["text"] for m in tg.sent))
+        assert bot.search_pending
+        better = [f"0x{i:040x}" for i in range(50, 52)] + TOP          # the background search found 2 better ones
+        scores.update({a: {"score": 99, "trades": 100, "win_rate": 0.8, "profit_factor": 4} for a in better[:2]})
+        bot.q.put(("searched", better, len(better), scores))
+        assert wait_for(lambda: set(bot.st.followed) == set(better[:7]))
+        assert TOP[5] in bot.st.dropped and TOP[6] in bot.st.dropped
+        assert wait_for(lambda: any("Search finished" in m["text"] for m in tg.sent)) and not bot.search_pending
+    finally:
+        stop_bot(bot, th)
+
+
+def test_reset_needs_no_open_trades_and_the_pin_then_starts_fresh(env):
+    hl, tg, data, cdir = env
+    bot, th = start_bot(env)
+    try:
+        hl.push_fills(LEADER, [leader_fill(hl, "ETH", 50, "B")])
+        assert wait_for(lambda: "ETH" in bot.st.positions and "ETH" in bot.sides[0].st.positions)
+        tg.say(f"/reset {PIN}")
+        assert wait_for(lambda: any("Reset refused" in m["text"] for m in tg.sent))
+        hl.mids["ETH"] = 3010.0
+        hl.push_fills(LEADER, [leader_fill(hl, "ETH", 50, "A")])
+        assert wait_for(lambda: not bot.st.positions and not any(w.st.positions for w in bot.sides))
+        assert bot.st.closed and bot.st.realized != 0
+        since = bot.st.followed[LEADER]
+        tg.say("/reset 0000")
+        assert wait_for(lambda: any("Wrong or missing PIN. Usage: /reset" in m["text"] for m in tg.sent))
+        tg.say(f"/reset {PIN}")
+        assert wait_for(lambda: any("Reset done" in m["text"] for m in tg.sent))
+        assert wait_for(lambda: bot.stop.is_set(), timeout=8)              # restarts itself
+        th.join(5)
+        arch = next((data / "archive").glob("reset-*"))
+        old = Ledger(arch / "ledger.jsonl").replay()
+        assert old.closed and old.realized != 0                             # nothing deleted
+        assert (arch / "wallets" / "risk_20pct" / "ledger.jsonl").exists() and not (data / "wallets").exists()
+        new = Ledger(data / "ledger.jsonl").replay()
+        assert new.equity() == 300 and not new.closed and not new.positions and not new.uncertain
+        assert new.followed == {LEADER: since}                             # traders kept, with their 'since'
+    finally:
+        stop_bot(bot, th)
+
+
+def test_restart_command_stops_the_loop_for_the_restart_loop(env):
+    hl, tg, data, cdir = env
+    bot, th = start_bot(env)
+    try:
+        tg.say("/restart")
+        assert wait_for(lambda: any("Restarting" in m["text"] for m in tg.sent))
+        assert wait_for(lambda: bot.stop.is_set(), timeout=8)
+    finally:
+        stop_bot(bot, th)

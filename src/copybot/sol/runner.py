@@ -12,14 +12,13 @@ import queue
 import threading
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
 from copybot import log, tgfmt
 from copybot.config import Config
 from copybot.ledger import Ledger, now_ms
-from copybot.selection import select
 from copybot.sol import fmt
 from copybot.sol.fomo import AuthError, FomoClient, FomoError
+from copybot.sol.hysteresis import select
 from copybot.sol.market import PaperBroker, Prices
 from copybot.sol.risk import Health, SolGate
 from copybot.sol.scorer import SolScorer
@@ -52,6 +51,7 @@ class SolBot:
         self.broker = PaperBroker(self.c)
         self.trader = Trader(self.c, self.st, self.ledger, self.gate, self.broker, self.prices, self.health, self.det,
                              notify=self.on_notify)
+        self.started = time.time()
         self.auth_ok = True
         self.last_poll_ok = 0.0
         self.ready: set[str] = set()          # leaders whose balances are seeded (polling starts after this)
@@ -223,7 +223,7 @@ class SolBot:
         for kind, key in (("day", day_key(now)), ("week", week_key(now))):
             if self.st.marks.get(kind, {}).get("key") != key:
                 self.rec({"ev": "mark", "kind": kind, "key": key, "equity": eq})
-        stale = self.trader.stale_marks(120)
+        stale = self.trader.stale_marks(120) if time.time() - self.started > 120 else []   # not before the first fetches
         if stale:
             self.alert(f"no price for {', '.join(stale[:5])} for 2+ min: stops cannot run on them", key="stale",
                        every_s=900)
@@ -286,12 +286,7 @@ class SolBot:
             return
         if now - int(self.st.sel.get("at", 0)) < c.rescore_minutes * 60_000 * 0.9:
             return
-        adapter = SimpleNamespace(
-            selection=SimpleNamespace(join_rank=c.join_rank, drop_rank=c.drop_rank, confirm_cycles=c.confirm_cycles,
-                                      min_follow_hours=c.min_follow_hours, swaps_per_cycle=1,
-                                      dropped_cooldown_days=c.dropped_cooldown_days),
-            risk=SimpleNamespace(max_leaders=c.max_leaders))
-        plan = select(self.st.sel, ranking, self.st.followed, set(self.st.paused_leaders), self.st.dropped, now, adapter)
+        plan = select(self.st.sel, ranking, self.st.followed, set(self.st.paused_leaders), self.st.dropped, now, c)
         for a, why in plan.drops:
             self.rec({"ev": "unfollow", "leader": a, "reason": why})
             held = sum(1 for p in self.st.positions.values() if p.leader == a)

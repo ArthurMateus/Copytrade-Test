@@ -1,140 +1,153 @@
-"""Discord UI against a loopback fake of the REST API: owner-only commands, cards edited in place, rate limits."""
-import time
+"""Discord UI against a loopback fake of Discord's REST API and Gateway (only the network is faked)."""
+import queue
+import threading
 
 import pytest
 
-from copybot import config
-from copybot.discord_ui import DiscordUI, UIGroup, to_markdown
-from copybot.tg import Command
-from tests.fakes_sol import FakeDiscord, wait_for
+from copybot import config, log
+from copybot.discord import BLURPLE, GREEN, RED, DiscordUI, color_for, embed, html_to_md
+from copybot.runner import Bot
+from tests.fakes import FakeDiscord, FakeHL, FakeTelegram
+from tests.test_e2e import LEADER, PIN, env_for, leader_fill, seed_ledger, wait_for, write_config
 
-OWNER = "42"
+
+def dc_cfg(fake: FakeDiscord, **env):
+    cfg = config.load("config", env={"DISCORD_BOT_TOKEN": fake.token, "DISCORD_CHANNEL_ID": fake.channel,
+                                     "DISCORD_OWNER_ID": fake.owner, "COPYBOT_PIN": PIN, **env})
+    cfg.discord.api_base, cfg.discord.gateway_url = fake.api_base, fake.gateway_url
+    cfg.discord.edit_min_interval_s, cfg.discord.min_send_interval_s = 0.3, 0.02
+    return cfg
 
 
 @pytest.fixture
-def dc(tmp_path):
+def dc():
     fake = FakeDiscord()
-    cfg = config.load("config", env={"DISCORD_BOT_TOKEN": "tok-secret", "DISCORD_CHANNEL_ID": fake.channel,
-                                     "DISCORD_OWNER_ID": OWNER, "COPYBOT_PIN": "1234"})
-    cfg.discord.api_base = fake.url
-    cfg.discord.edit_min_interval_s = 0.3
-    cfg.discord.min_send_interval_s = 0.0
-    cfg.discord.poll_interval_s = 0.05
-    cmds, ids = [], []
-    ui = DiscordUI(cfg, cmds.append, lambda k, m: ids.append((k, m)))
+    cmds, cards = queue.Queue(), []
+    ui = DiscordUI(dc_cfg(fake), cmds.put, lambda k, m: cards.append((k, m)))
     ui.start()
-    yield fake, ui, cmds, ids
+    yield fake, ui, cmds, cards
     ui.stop.set()
     fake.close()
 
 
-def test_html_becomes_markdown():
-    t = "📊 <b>Status</b> · x &amp; y\n<pre>Equity  300.00$\nP&amp;L  +1.00$</pre> <code>abc</code> <i>upd</i>"
-    md = to_markdown(t)
-    assert "**Status**" in md and "x & y" in md and "```\nEquity  300.00$\nP&L  +1.00$\n```" in md
-    assert "`abc`" in md and "*upd*" in md and "<" not in md
-    assert len(to_markdown("x" * 5000)) <= 2000
+# ---- formatting -------------------------------------------------------------------------------------
+def test_html_becomes_discord_markdown():
+    md = html_to_md("🟢 <b>BTC</b> ⬆️ LONG\nStop-loss: <b>97,000 · 4.0% away</b>\n<code>0xab…cd</code>\n"
+                    "<i>updated 08:30</i> 5 * 3 _x_ &lt;PIN&gt;")
+    assert md == ("🟢 **BTC** ⬆️ LONG\nStop-loss: **97,000 · 4.0% away**\n`0xab…cd`\n*updated 08:30* "
+                  "5 \\* 3 \\_x\\_ <PIN>")
 
 
-def test_sends_messages_and_edits_cards_in_place(dc):
-    fake, ui, cmds, ids = dc
-    ui.send("<b>hello</b>")
-    ui.set_card("pos:1", "<b>card</b> v1")
-    assert wait_for(lambda: len(fake.sent) == 2)
-    assert fake.sent[0]["content"] == "**hello**"
-    mid = fake.sent[1]["id"]
-    assert ("pos:1", mid) in ids
-    ui.set_card("pos:1", "<b>card</b> v2")
-    assert wait_for(lambda: fake.edits and fake.edits[-1]["content"] == "**card** v2")
-    assert len(fake.sent) == 2                                    # edited, not re-posted
-    ui.final_card("pos:1", "✅ final")
-    assert wait_for(lambda: fake.edits[-1]["content"] == "✅ final")
-    assert wait_for(lambda: ("pos:1", None) in ids)               # the card is forgotten once final
+def test_embed_colour_follows_the_money_and_is_capped():
+    assert color_for("🟢 <b>BTC</b> ⬆️ LONG · +1.00$") == GREEN
+    assert color_for("❌ LOSS · <b>BTC</b>") == RED
+    assert color_for("💼 <b>Trades</b> · 1 open\n🔴 <b>Total: −1.00$</b>") == RED
+    assert color_for("📊 <b>Status</b> · copying") == BLURPLE
+    e = embed("x" * 5000)
+    assert len(e["description"]) <= 4096
 
 
-def test_restored_card_is_edited_not_reposted(dc):
-    fake, ui, cmds, ids = dc
-    m = fake.say("bot", "old card")
-    ui.restore_card("pos:9", m["id"])
-    ui.set_card("pos:9", "new text")
-    assert wait_for(lambda: fake.edits and fake.edits[-1]["content"] == "new text")
-    assert not fake.sent
+# ---- commands --------------------------------------------------------------------------------------
+def test_slash_commands_registered_and_only_the_owner_commands(dc):
+    fake, ui, cmds, _ = dc
+    assert wait_for(lambda: fake.commands is not None and fake.connected())
+    names = {c["name"] for c in fake.commands}
+    assert {"status", "trades", "traders", "wallets", "flatten", "pause", "resume", "help"} <= names
+    flat = next(c for c in fake.commands if c["name"] == "flatten")
+    assert flat["options"][0]["name"] == "pin" and flat["options"][0]["required"]
+    assert fake.identified[0]["intents"] == 0
+    fake.interact("status")
+    c = cmds.get(timeout=5)
+    assert c.name == "/status" and c.arg == ""
+    fake.interact("flatten", {"pin": PIN})
+    c = cmds.get(timeout=5)
+    assert c.name == "/flatten" and c.arg == PIN
+    fake.interact("status", user="1234")                     # someone else in the server
+    assert wait_for(lambda: any("Only the owner" in r["data"]["content"] for r in fake.replies))
+    assert cmds.empty()
+    assert all(r["data"]["flags"] == 64 for r in fake.replies)   # every answer is private (ephemeral)
 
 
-def test_only_the_owner_can_command_and_old_messages_are_ignored(dc):
-    fake, ui, cmds, ids = dc
-    fake.say(OWNER, "!status")                                    # sent before the bot started reading: ignored
-    time.sleep(0.3)
-    assert cmds == []
-    fake.say("999", "!status")                                    # a stranger
-    fake.say(OWNER, "hello there")                                # not a command
-    fake.say(OWNER, "!status")
-    fake.say(OWNER, "!sol")
-    assert wait_for(lambda: [c.name for c in cmds] == ["/status", "/sol"])
+def test_cards_are_edited_in_place_and_reposted_if_deleted(dc):
+    fake, ui, _, cards = dc
+    ui.set_card("pos:1", "🟢 <b>ETH</b> ⬆️ LONG · +1.00$")
+    assert wait_for(lambda: len(fake.sent) == 1)
+    mid = fake.sent[0]["id"]
+    assert wait_for(lambda: ("pos:1", mid) in cards)
+    ui.set_card("pos:1", "🔴 <b>ETH</b> ⬆️ LONG · −2.00$")
+    assert wait_for(lambda: "−2.00$" in fake.text(mid))
+    assert fake.messages[mid]["color"] == RED and len(fake.sent) == 1
+    del fake.messages[mid]                                    # the owner deleted the message
+    ui.set_card("pos:1", "🟢 <b>ETH</b> ⬆️ LONG · +3.00$")
+    assert wait_for(lambda: len(fake.sent) == 2 and "+3.00$" in fake.sent[1]["description"])
 
 
-def test_unknown_command_gets_a_reply(dc):
-    fake, ui, cmds, ids = dc
-    time.sleep(0.2)
-    fake.say(OWNER, "!nope")
-    assert wait_for(lambda: any("Unknown command" in m["content"] for m in fake.sent))
+def test_rate_limit_is_honoured(dc):
+    fake, ui, _, _ = dc
+    fake.fail_429 = 1
+    ui.send("⚠️ hello")
+    assert wait_for(lambda: len(fake.sent) == 1, timeout=6)
+    posts = [t for t, c in fake.calls if c.startswith("POST")]
+    assert posts[1] - posts[0] >= 0.95
 
 
-def test_pin_message_is_deleted_and_never_logged(dc, caplog):
-    fake, ui, cmds, ids = dc
-    time.sleep(0.2)
-    m = fake.say(OWNER, "!flatten 1234")
-    assert wait_for(lambda: cmds and cmds[0] == Command("/flatten", "1234"))
-    assert wait_for(lambda: m["id"] in fake.deleted)
-    assert ui.check_pin("1234") and not ui.check_pin("0000") and not ui.check_pin("")
-    assert "1234" not in caplog.text and "tok-secret" not in caplog.text
+def test_gateway_reconnects_after_a_drop(dc):
+    fake, ui, cmds, _ = dc
+    assert wait_for(fake.connected)
+    fake.drop()
+    assert wait_for(lambda: len(fake.identified) >= 2, timeout=10)
+    assert wait_for(fake.connected)
+    fake.interact("help")
+    assert cmds.get(timeout=5).name == "/help"
 
 
-def test_rate_limit_429_is_waited_out_and_the_message_is_not_lost(dc):
-    fake, ui, cmds, ids = dc
-    fake.fail_429 = 2
-    ui.send("important")
-    assert wait_for(lambda: [m["content"] for m in fake.sent] == ["important"], timeout=10)
-
-
-def test_the_bot_token_is_sent_as_a_bot_authorization_header(dc):
-    fake, ui, cmds, ids = dc
-    ui.send("x")
-    assert wait_for(lambda: fake.sent)
-    assert fake.auth_seen == {"Bot tok-secret"}
-
-
-def test_disabled_without_credentials():
-    cfg = config.load("config", env={})
-    ui = DiscordUI(cfg, lambda c: None, lambda k, m: None)
-    assert not ui.enabled
-    ui.send("x")
-    ui.start()                                                    # no threads, no crash
-    assert ui.outbox.empty()
-
-
-def test_group_fans_out_and_routes_restored_card_ids(dc):
-    fake, ui, cmds, ids = dc
-
-    class Tg:
-        def __init__(self):
-            self.log, self.stop = [], type("E", (), {"set": lambda s: self.log.append("stop")})()
-
-        send = lambda self, t: self.log.append(("send", t))
-        set_card = lambda self, k, t, new=False: self.log.append(("card", k))
-        final_card = lambda self, k, t: self.log.append(("final", k))
-        restore_card = lambda self, k, m: self.log.append(("restore", k, m))
-        has_card = lambda self, k: False
-        check_pin = lambda self, g: g == "1234"
-        start = lambda self: self.log.append("start")
-
-    tg = Tg()
-    g = UIGroup(tg, ui)
-    g.send("hi")
-    g.set_card("sol:status", "s")
-    assert ("send", "hi") in tg.log and wait_for(lambda: any(m["content"] == "hi" for m in fake.sent))
-    g.restore_card("pos:1", 5)
-    g.restore_card("dc:pos:1", 77)
-    assert ("restore", "pos:1", 5) in tg.log and ("restore", "dc:pos:1", 77) not in tg.log
-    assert ui.cards["pos:1"].msg_id == "77"
-    assert g.check_pin("1234")
+# ---- the whole bot on Telegram AND Discord ------------------------------------------------------------
+def test_full_bot_on_telegram_and_discord(tmp_path):
+    hl, tg, fake = FakeHL(), FakeTelegram(), FakeDiscord()
+    data = tmp_path / "data"
+    data.mkdir()
+    cdir = write_config(tmp_path, hl, tg, data)
+    (cdir / "discord.toml").write_text(f'api_base = "{fake.api_base}"\ngateway_url = "{fake.gateway_url}"\n'
+                                       f'edit_min_interval_s = 0.3\nmin_send_interval_s = 0.02\n', encoding="utf-8")
+    seed_ledger(data)
+    e = {**env_for(tg), "DISCORD_BOT_TOKEN": fake.token, "DISCORD_CHANNEL_ID": fake.channel,
+         "DISCORD_OWNER_ID": fake.owner}
+    cfg = config.load(cdir, env=e)
+    log.setup(str(data / "logs"))
+    for s in (cfg.tg_token, cfg.pin, cfg.dc_token):
+        log.add_secret(s)
+    bot = Bot(cfg)
+    th = threading.Thread(target=bot.run, daemon=True)
+    th.start()
+    try:
+        assert wait_for(lambda: LEADER in hl.subscribed_users() and bot.health().clock_ok and fake.connected())
+        assert wait_for(lambda: any("Copybot started" in m["description"] for m in fake.sent))
+        hl.push_fills(LEADER, [leader_fill(hl, "ETH", 50, "B")])
+        # the same live trade card on both platforms
+        assert wait_for(lambda: any("<b>ETH</b> ⬆️ LONG" in m["text"] for m in tg.sent))
+        assert wait_for(lambda: any("**ETH** ⬆️ LONG" in m["description"] for m in fake.sent))
+        card = next(m["id"] for m in fake.sent if "**ETH** ⬆️ LONG" in m["description"])
+        hl.mids["ETH"] = 3030.0
+        assert wait_for(lambda: "3,030" in fake.text(card) or "3030" in fake.text(card))
+        # a Discord command answers in both chats (one bot, one state)
+        fake.interact("trades")
+        assert wait_for(lambda: any("💼 **Trades** · 1 open" in m["description"] for m in fake.sent))
+        assert wait_for(lambda: any("💼 <b>Trades</b> · 1 open" in m["text"] for m in tg.sent))
+        # restart keeps editing the same Discord card (its id is in the ledger under dc:)
+        assert wait_for(lambda: f"dc:pos:{bot.st.positions['ETH'].pos_id}" in bot.st.cards)
+        # /flatten with the PIN from Discord closes everything; the PIN never reaches the log or the channel
+        fake.interact("flatten", {"pin": PIN})
+        assert wait_for(lambda: not bot.st.positions and bot.st.entries_paused)
+        assert wait_for(lambda: "✅ WIN" in fake.text(card) or "❌ LOSS" in fake.text(card))
+        for h in log.log.handlers:
+            h.flush()
+        text = (data / "logs" / "copybot.log").read_text(encoding="utf-8")
+        assert PIN not in text and fake.token not in text and "event=discord_command cmd=/flatten" in text
+        assert not any(PIN in m["description"] for m in fake.sent)
+    finally:
+        bot.stop.set()
+        th.join(5)
+        bot.shutdown()
+        hl.close()
+        tg.close()
+        fake.close()

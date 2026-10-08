@@ -35,13 +35,13 @@ def run(cycles, followed=None, paused=(), dropped=None, sel=None, start=NOW, ste
 R = [f"0x{i:02d}" for i in range(1, 30)]
 
 
-def test_join_needs_two_consecutive_cycles_at_rank_8_or_better():
+def test_join_needs_two_consecutive_cycles_in_the_top_7():
     f, plans, _ = run([R[:10]])
     assert f == {}
     f, plans, _ = run([R[:10], R[:10]])
     assert set(f) == set(R[:7])           # max 7 leaders, free slots fill in one cycle
     f, _, _ = run([R[:10], list(reversed(R[:10]))])
-    assert set(f) == set(R[2:8])         # only wallets at rank <= 8 in BOTH cycles
+    assert set(f) == set(R[3:7])         # only wallets at rank <= 7 in BOTH cycles
 
 
 def test_zero_eligible_follows_nobody():
@@ -80,11 +80,31 @@ def test_no_flip_flop_between_rank_8_and_15():
     assert set(f) == set(R[:7])
 
 
-def test_paused_leader_is_dropped_first_even_if_new():
+def test_paused_leader_is_dropped_at_once_even_if_new():
     followed = {a: NOW - HOUR for a in R[:7]}
-    f, plans, _ = run([R[:10], R[:10]], followed=followed, paused={R[3]})
-    assert plans[0].drops == [(R[3], "paused after a bad streak")]
-    assert R[3] not in f
+    f, plans, _ = run([R[:10], R[:10]], followed=followed, paused={R[3], R[4]})
+    assert plans[0].drops == [(R[3], "paused after a bad streak"), (R[4], "paused after a bad streak")]
+    assert R[3] not in f and R[4] not in f
+    assert not any(p.joins for p in plans)      # replacements wait for the daily change window
+
+
+def test_a_leader_that_no_longer_passes_the_rules_leaves_after_two_cycles():
+    followed = {a: NOW - HOUR for a in R[:7]}   # followed only an hour ago: not protected
+    ranking = R[:4]                             # R[4..6] are no longer eligible
+    f, plans, _ = run([ranking], followed=followed)
+    assert not plans[0].drops                   # one cycle is not enough
+    f, plans, _ = run([ranking, ranking], followed=followed)
+    assert {a for a, _ in plans[1].drops} == set(R[4:7]) and set(f) == set(R[:4])
+
+
+def test_new_leaders_join_at_most_once_a_day():
+    followed = {a: NOW - 2 * HOUR for a in R[:5]}   # two free slots, last join 2 hours ago
+    f, plans, _ = run([R[:10]] * 21, followed=followed)
+    assert set(f) == set(R[:5])                     # 20 hours later: still the same five
+    f, plans, _ = run([R[:10]] * 24, followed=followed)
+    assert set(f) == set(R[:7])                     # once 24 h passed since the last join, both slots fill
+    joins_at = [i for i, p in enumerate(plans) if p.joins]
+    assert len(joins_at) == 1
 
 
 def test_dropped_leader_cooldown():
@@ -182,3 +202,112 @@ def test_scorer_rejects_hash_coin_candles_gracefully(scorer_env):
     fake, cfg, info, tmp, good, bad = scorer_env
     sc = Scorer(cfg, info, queue.Queue(), tmp / "cache")
     assert sc.candles("#140", NOW - 40 * 86_400_000, NOW) == []
+
+
+def test_scorer_stops_at_the_pool_size(scorer_env):
+    fake, cfg, info, tmp, good, bad = scorer_env
+    cfg.selection.pool_size = 7
+    sc = Scorer(cfg, info, queue.Queue(), tmp / "cache")
+    sc.review(weekly=True)
+    assert len(sc.scores) == 7 and set(sc.scores) <= set(good)
+    assert all(1 <= d["score"] <= 100 for d in sc.scores.values() if d["eligible"])
+
+
+def test_scorer_redoes_results_of_an_older_version(scorer_env):
+    fake, cfg, info, tmp, good, bad = scorer_env
+    sc = Scorer(cfg, info, queue.Queue(), tmp / "cache")
+    sc.screened = {good[0]: {"ok": False, "reason": "round_trips<150", "ts": sc.now(), "v": 1}}
+    sc.scores = {good[1]: {"address": good[1], "eligible": True, "score": 0.5, "v": 1}}
+    sc._save()
+    sc2 = Scorer(cfg, info, queue.Queue(), tmp / "cache")
+    assert sc2.screened == {} and sc2.scores == {}
+
+
+def test_scorer_scores_main_coins_only_unless_diversified(scorer_env):
+    fake, cfg, info, tmp, good, bad = scorer_env
+    cfg.selection.main_coins = ["BTC", "ETH"]
+    cfg.selection.alt_min_coins = 1000           # no wallet can unlock the alts
+    sc = Scorer(cfg, info, queue.Queue(), tmp / "cache")
+    sc.screen_and_score(good[0], 200_000)
+    d = sc.scores[good[0]]
+    assert d["eligible"] and not d["diversified"] and set(d["coin_pnl"]) == {"BTC", "ETH", "SOL"}
+    cfg.selection.alt_min_coins = 3              # profitable in BTC, ETH and SOL: unlocked, scored on all three
+    sc2 = Scorer(cfg, info, queue.Queue(), tmp / "cache2")
+    sc2.screen_and_score(good[0], 200_000)
+    assert sc2.scores[good[0]]["diversified"] and sc2.scores[good[0]]["trades"] > d["trades"]
+
+
+def test_a_finished_review_publishes_a_ranking_even_with_few_scored(scorer_env):
+    fake, cfg, info, tmp, good, bad = scorer_env
+    cfg.selection.min_scored_to_start = 50          # more than this review can ever score
+    out = queue.Queue()
+    sc = Scorer(cfg, info, out, tmp / "cache")
+    calls = {"n": 0}
+    real = sc.screen_and_score
+
+    def stop_after_3(a, av):
+        calls["n"] += 1
+        real(a, av)
+        if calls["n"] == 3:
+            sc.stop.set()
+    sc.screen_and_score = stop_after_3
+    sc.review(weekly=True)                           # interrupted: not finished, not ready
+    sc.maybe_cycle()
+    assert not sc.ready() and all(m[0] != "ranking" for m in list(out.queue))
+    sc2 = Scorer(cfg, info, out, tmp / "cache")
+    sc2.review(weekly=True)                          # finished with only ~13 scored
+    sc2.maybe_cycle()
+    rankings = [m for m in list(out.queue) if m[0] == "ranking"]
+    assert sc2.ready() and rankings and rankings[-1][2] < 50 and rankings[-1][1]
+
+
+def test_a_restart_does_not_push_the_hourly_cycle_back(scorer_env):
+    fake, cfg, info, tmp, good, bad = scorer_env
+    out = queue.Queue()
+    sc = Scorer(cfg, info, out, tmp / "cache")
+    sc.review(weekly=True)
+    last = sc.now() - 20 * 60_000                  # the last real cycle was 20 minutes ago
+    sc.meta["last_cycle"] = last
+    sc._save()
+    sc2 = Scorer(cfg, info, out, tmp / "cache")    # restart: republishes the ranking at once ...
+    sc2.maybe_cycle(force=True)
+    assert sc2.meta["last_cycle"] == last          # ... but the next cycle stays 40 minutes away, not 60
+    sc2.meta["last_cycle"] = sc2.now() - 2 * HOUR
+    sc2.maybe_cycle(force=True)                    # long overdue: the forced cycle is the real one
+    assert sc2.meta["last_cycle"] >= sc2.now() - 60_000
+
+
+def test_changing_the_floors_rescores_saved_wallets(scorer_env):
+    fake, cfg, info, tmp, good, bad = scorer_env
+    sc = Scorer(cfg, info, queue.Queue(), tmp / "cache")
+    for a in good[:3]:
+        sc.screen_and_score(a, 200_000)
+    assert len(Scorer(cfg, info, queue.Queue(), tmp / "cache").scores) == 3   # same rules: kept
+    cfg.selection.min_profit_factor = 50.0
+    sc2 = Scorer(cfg, info, queue.Queue(), tmp / "cache")
+    assert sc2.scores == {}                                   # other rules: redone ...
+    n = len(fake.requests)
+    sc2.rescore_missing()                                     # ... from the screen results kept on disk
+    assert set(sc2.scores) == set(good[:3]) and not sc2.ranking()
+    assert all(d["reasons"] == ["profit_factor<50"] for d in sc2.scores.values())
+    assert not any(r["type"] == "userFillsByTime" and r["startTime"] < sc2.now() - 170 * 86_400_000
+                   for r in fake.requests[n:])                # no first-page screen again
+
+
+# ---- /search: re-pick the best now ----------------------------------------------------------------------
+def test_rebalance_follows_the_best_seven_now():
+    from copybot.selection import rebalance
+    followed = {R[0]: NOW - HOUR, R[8]: NOW - HOUR, R[20]: NOW - 48 * HOUR}   # R[20] is no longer eligible
+    p = rebalance(R[:10], followed, set(), {}, NOW, CFG)
+    assert p.joins == R[1:7] and dict(p.drops) == {R[8]: "replaced by a better trader (/search)",
+                                                   R[20]: "no longer passes the rules"}
+    # fewer than 7 eligible: nobody eligible is dropped, free slots fill
+    p = rebalance(R[:3], {R[2]: NOW}, set(), {}, NOW, CFG)
+    assert p.joins == R[:2] and not p.drops
+
+
+def test_rebalance_skips_paused_and_cooling_down_leaders():
+    from copybot.selection import rebalance
+    p = rebalance(R[:10], {R[0]: NOW}, {R[0]}, {R[1]: NOW - HOUR}, NOW, CFG)
+    assert p.drops == [(R[0], "paused after a bad streak")]
+    assert R[1] not in p.joins and p.joins == R[2:9]

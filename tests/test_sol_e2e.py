@@ -12,8 +12,8 @@ import pytest
 from copybot import config, log
 from copybot.ledger import Ledger
 from copybot.runner import Bot
-from tests.fakes import FakeHL, FakeTelegram
-from tests.fakes_sol import COOKIE, FakeDex, FakeDiscord, FakeFomo, make_row, make_swap
+from tests.fakes import FakeDiscord, FakeHL, FakeTelegram
+from tests.fakes_sol import COOKIE, FakeDex, FakeFomo, make_row, make_swap
 from tests.test_e2e import PIN, env_for, wait_for, write_config
 
 DAY = 86_400_000
@@ -45,12 +45,13 @@ class Env:
             'min_scored_to_start = 1\nrescore_minutes = 0.03\nmax_candidates = 10\n', encoding="utf-8")
         if self.dc:
             (cdir / "discord.toml").write_text(
-                f'api_base = "{self.dc.url}"\nedit_min_interval_s = 0.3\nmin_send_interval_s = 0.02\n'
-                'poll_interval_s = 0.1\n', encoding="utf-8")
+                f'api_base = "{self.dc.api_base}"\ngateway_url = "{self.dc.gateway_url}"\n'
+                'edit_min_interval_s = 0.3\nmin_send_interval_s = 0.02\n', encoding="utf-8")
         self.cdir = cdir
         env = {**env_for(self.tg), "FOMO_COOKIE": cookie}
         if self.dc:
-            env.update(DISCORD_BOT_TOKEN="dc-token-xyz", DISCORD_CHANNEL_ID=self.dc.channel, DISCORD_OWNER_ID="42")
+            env.update(DISCORD_BOT_TOKEN=self.dc.token, DISCORD_CHANNEL_ID=self.dc.channel,
+                       DISCORD_OWNER_ID=self.dc.owner)
         self.env = env
         self.bot = None
         self.th = None
@@ -86,7 +87,7 @@ class Env:
         return " ".join(m["text"] for m in self.tg.sent) + " " + " ".join(m["text"] for m in self.tg.edits)
 
     def dc_text(self):
-        return " ".join(m["content"] for m in (self.dc.sent + self.dc.edits)) if self.dc else ""
+        return " ".join(m["description"] for m in (self.dc.sent + self.dc.edits)) if self.dc else ""
 
 
 @pytest.fixture
@@ -109,7 +110,6 @@ def test_discover_follow_copy_close_and_survive_a_restart(env):
     p = bot.sol.st.positions[MINT]
     assert p.sym == "MEME" and p.stop_px < p.entry_px and p.leader == GOOD
     assert wait_for(lambda: "MEME" in env.tg_text() and "MEME" in env.dc_text())     # card on both Telegram + Discord
-    assert env.dc.sent and all(m["author"]["bot"] for m in env.dc.sent)
 
     # restart with the position open: same position, same stop, no double open
     before = (p.size, p.entry_px, p.stop_px)
@@ -134,24 +134,25 @@ def test_discover_follow_copy_close_and_survive_a_restart(env):
 def test_commands_from_telegram_and_discord(env):
     bot = env.start()
     assert wait_for(lambda: GOOD in bot.sol.st.followed, timeout=40)
+    assert wait_for(lambda: env.dc.connected() and env.dc.commands is not None, timeout=10)
+    names = {c["name"] for c in env.dc.commands}
+    assert {"sol", "solleaders", "solflatten"} <= names                      # registered as slash commands
+    assert any(c["name"] == "solflatten" and c.get("options") for c in env.dc.commands)    # which needs the PIN
     env.tg.say("/sol")
-    env.dc.say("42", "!solleaders")
-    env.dc.say("999", "!solpause")                       # a stranger: ignored
-    assert wait_for(lambda: "Solana (paper)" in env.tg_text() and "Solana (paper)" in env.dc_text() or
-                    "Solana leaders" in env.dc_text(), timeout=10)
+    env.dc.interact("solleaders")
+    env.dc.interact("solpause", user="999")                                  # a stranger: refused
+    assert wait_for(lambda: "Solana (paper)" in env.tg_text(), timeout=10)
     assert wait_for(lambda: "Solana leaders" in env.dc_text(), timeout=10)
     assert not bot.sol.st.entries_paused
-    env.dc.say("42", "!solpause")
+    env.dc.interact("solpause")
     assert wait_for(lambda: bot.sol.st.entries_paused, timeout=10)
     env.tg.say("/solresume")
     assert wait_for(lambda: not bot.sol.st.entries_paused, timeout=10)
     env.tg.say("/solflatten wrong")
     assert wait_for(lambda: "Wrong or missing PIN" in env.tg_text(), timeout=10)
-    env.dc.say("42", f"!solflatten {PIN}")
+    env.dc.interact("solflatten", {"pin": PIN})
     assert wait_for(lambda: bot.sol.st.entries_paused, timeout=10)
-    assert wait_for(lambda: len(env.dc.deleted) == 1, timeout=10)        # the message carrying the PIN is removed
-    env.dc.say("42", "!help")
-    assert wait_for(lambda: "/solflatten" in env.dc_text(), timeout=10)
+    assert PIN not in env.dc_text() and PIN not in env.tg_text()
 
 
 def test_expired_fomo_session_alerts_stops_new_wallets_and_keeps_the_stop(env):

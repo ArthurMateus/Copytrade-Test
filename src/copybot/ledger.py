@@ -41,6 +41,9 @@ class Position:
     entry_notional: float = 0.0
     open_lag_ms: float | None = None
     sym: str = ""          # display symbol (Solana tokens; Hyperliquid coins are their own name)
+    # other followed leaders on the SAME side of this coin (consensus):
+    # leader -> {"lpos": their |position|, "oid": their opening order, "frac": share of our size they added}
+    backers: dict = field(default_factory=dict)
 
     def risk_usd(self) -> float:
         return abs(self.entry_px - self.stop_px) * self.size
@@ -173,6 +176,58 @@ class State:
             self.lags_ms.append(float(ev["lag_ms"]))
         self.bump("orders")
 
+    def _ev_back(self, ev):
+        """A second leader opened the same side: record it as a backer, with its extra size if any.
+        Without `sz` it only refreshes the backer's leader position."""
+        p = self._get(ev)
+        if not p:
+            return
+        sz = float(ev.get("sz") or 0.0)
+        if ev["leader"] not in p.backers:
+            self.bump("consensus")
+        b = p.backers.setdefault(ev["leader"], {"lpos": 0.0, "oid": ev.get("oid"), "frac": 0.0})
+        b["lpos"] = float(ev["lpos"])
+        if sz > 0:
+            px, fee = float(ev["px"]), float(ev["fee"])
+            new = p.size + sz
+            for other in p.backers.values():   # earlier shares shrink as the position grows
+                other["frac"] *= p.size / new
+            b["frac"] += sz / new
+            p.entry_px = (p.entry_px * p.size + px * sz) / new
+            p.size = new
+            p.entry_notional += sz * px
+            p.fees += fee
+            p.realized -= fee
+            self.realized -= fee
+            p.k = float(ev["k"])
+            if ev.get("lag_ms") is not None:
+                self.lags_ms.append(float(ev["lag_ms"]))
+            self.bump("orders")
+
+    def _ev_unback(self, ev):
+        """A backer left. Its share is trimmed by a separate reduce, so the others' shares grow back."""
+        p = self._get(ev)
+        if not p:
+            return
+        b = p.backers.pop(ev["leader"], None)
+        if b and b["frac"] < 1:
+            for other in p.backers.values():
+                other["frac"] /= 1 - b["frac"]
+
+    def _ev_handover(self, ev):
+        """The owner left while a backer still holds: the backer becomes the owner (the extra size was
+        already trimmed back to a normal copy, so no share is left with the remaining backers)."""
+        p = self._get(ev)
+        if not p:
+            return
+        b = p.backers.pop(ev["leader"], {})
+        p.leader = ev["leader"]
+        p.k = float(ev["k"])
+        p.open_oid = b.get("oid") or 0
+        for other in p.backers.values():
+            other["frac"] = 0.0
+        self.bump("handovers")
+
     def _ev_rebase(self, ev):
         p = self._get(ev)
         if p:
@@ -283,6 +338,7 @@ class Ledger:
         self._lock = threading.Lock()
         self._seq = 0
         self._f = None
+        self.frozen = False   # set by /reset after archiving: nothing more may be written to this file
 
     def replay(self) -> State:
         st = State()
@@ -317,6 +373,8 @@ class Ledger:
 
     def append(self, ev: dict) -> dict:
         with self._lock:
+            if self.frozen:
+                return {"seq": self._seq, "ts": ev.get("ts") or now_ms(), **ev}
             self._seq += 1
             ev = {"seq": self._seq, "ts": ev.get("ts") or now_ms(), **{k: v for k, v in ev.items() if k != "ts"}}
             line = (json.dumps(ev, separators=(",", ":"), default=_default) + "\n").encode()

@@ -1,3 +1,4 @@
+from pathlib import Path
 import logging
 
 import pytest
@@ -50,12 +51,36 @@ def test_log_redacts_secrets(tmp_path, capsys):
     assert "event=x" in out and "***" in out
 
 
+def test_scaled_side_wallet_config():
+    from copybot import config as c
+    base = c.load("config", env={})
+    s = c.scaled(base, 5.0)
+    assert s.risk.risk_per_trade_pct == 5.0 and s.risk.max_symbol_risk_pct == 7.5 and s.risk.max_total_risk_pct == 50
+    assert s.risk.daily_loss_pct == 25 and s.risk.weekly_loss_pct == 50 and s.risk.consensus_risk_pct == 2.5
+    big = c.scaled(base, 20.0)
+    assert big.risk.daily_loss_pct == 100 and big.risk.weekly_loss_pct == 100
+    assert big.risk.stop_pct == base.risk.stop_pct and big.risk.max_leverage == base.risk.max_leverage
+    assert base.risk.risk_per_trade_pct == 1.0 and base.risk.side_wallets_risk_pct == [2.0, 5.0, 10.0, 20.0]
+
+
+@pytest.mark.parametrize("bad", ["[0.0]", "[60.0]", "[2.0, 2.0]", "[1.0]", '["x"]'])
+def test_side_wallet_levels_are_validated(tmp_path, bad):
+    import shutil
+    for f in Path("config").glob("*.toml"):
+        shutil.copy(f, tmp_path / f.name)
+    p = tmp_path / "risk.toml"
+    p.write_text(p.read_text(encoding="utf-8").replace("side_wallets_risk_pct = [2.0, 5.0, 10.0, 20.0]",
+                                                        f"side_wallets_risk_pct = {bad}"), encoding="utf-8")
+    with pytest.raises(config.ConfigError):
+        config.load(tmp_path, env={})
+
+
 def test_solana_and_discord_sections_load_with_documented_ranges(tmp_path):
     import shutil
     d = tmp_path / "config"
     shutil.copytree("config", d)
     cfg = config.load(d, env={})
-    assert cfg.sol.enabled and cfg.sol.stop_pct == 30.0 and cfg.discord.prefix == "!"
+    assert cfg.sol.enabled and cfg.sol.stop_pct == 30.0
     (d / "sol.toml").write_text("stop_pct = 99.0\n", encoding="utf-8")
     with pytest.raises(config.ConfigError, match="sol.stop_pct"):
         config.load(d, env={})
@@ -71,7 +96,7 @@ def test_new_secrets_come_from_the_environment_and_never_appear_in_public_config
     env = {"FOMO_COOKIE": "session=SECRETVALUE", "DISCORD_BOT_TOKEN": "DCTOKEN", "DISCORD_CHANNEL_ID": "1",
            "DISCORD_OWNER_ID": "2"}
     cfg = config.load("config", env=env)
-    assert (cfg.fomo_cookie, cfg.discord_token, cfg.discord_channel, cfg.discord_owner) == (
+    assert (cfg.fomo_cookie, cfg.dc_token, cfg.dc_channel_id, cfg.dc_owner_id) == (
         "session=SECRETVALUE", "DCTOKEN", "1", "2")
     shown = str(config.public_dict(cfg)) + repr(cfg)
     assert "SECRETVALUE" not in shown and "DCTOKEN" not in shown

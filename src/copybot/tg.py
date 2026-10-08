@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import hmac
+import http.client
 import json
 import queue
 import threading
@@ -19,8 +20,10 @@ from dataclasses import dataclass, field
 from copybot import log
 from copybot.config import Config
 
-COMMANDS = ("/status", "/positions", "/leaders", "/progress", "/pause", "/resume", "/flatten", "/help",
+COMMANDS = ("/status", "/trades", "/traders", "/wallets", "/positions", "/leaders", "/progress", "/search", "/pause",
+            "/resume", "/flatten", "/reset", "/restart", "/help",
             "/sol", "/solpositions", "/solleaders", "/solprogress", "/solpause", "/solresume", "/solflatten")
+ONCE = ("/reset", "/restart", "/flatten", "/solflatten")   # never acted on twice: a stale copy after a restart is ignored
 
 
 class TgError(Exception):
@@ -48,6 +51,9 @@ class TgApi:
             raise TgError(e.code, body.get("description", ""), ra) from None
         except urllib.error.URLError as e:
             raise TgError(0, f"network: {e.reason}") from None
+        except (OSError, http.client.HTTPException, ValueError) as e:
+            # a read timeout, a dropped connection or a broken reply: a network error like any other
+            raise TgError(0, f"network: {type(e).__name__}: {e}") from None
         if not body.get("ok"):
             raise TgError(int(body.get("error_code", 0)), body.get("description", ""))
         return body["result"]
@@ -87,6 +93,9 @@ class TelegramUI:
         self.offset = 0
         self.stop = threading.Event()
         self.wake = threading.Event()
+        self.started = time.time()
+        self.limits = cfg.telegram          # edit_min_interval_s / min_send_interval_s
+        self.name = "telegram"
 
     # ---- API used by the trading loop (non-blocking) ------------------------------------------
     def send(self, text: str) -> None:
@@ -130,21 +139,24 @@ class TelegramUI:
         """One rate-limited write. Blocks this worker thread only."""
         while not self.stop.is_set():
             now = self.clock()
-            wait = max(self.blocked_until - now, self.last_write + self.cfg.telegram.min_send_interval_s - now)
+            wait = max(self.blocked_until - now, self.last_write + self.limits.min_send_interval_s - now)
             if wait > 0:
                 time.sleep(min(wait, 1.0))
                 continue
             self.last_write = self.clock()
             try:
-                return self.api.call(method, {"chat_id": self.chat, "parse_mode": "HTML",
-                                              "disable_web_page_preview": True, **params})
+                return self._call(method, params)
             except TgError as e:
                 if e.code == 429:
                     self.blocked_until = self.clock() + max(1.0, e.retry_after)
-                    log.warn("telegram_429", retry_after=e.retry_after)
+                    log.warn(f"{self.name}_429", retry_after=e.retry_after)
                     continue
                 raise
         return None
+
+    def _call(self, method: str, params: dict):
+        return self.api.call(method, {"chat_id": self.chat, "parse_mode": "HTML",
+                                      "disable_web_page_preview": True, **params})
 
     def _out_loop(self) -> None:
         while not self.stop.is_set():
@@ -153,7 +165,7 @@ class TelegramUI:
             try:
                 self._drain_once()
             except Exception:
-                log.exception("telegram_out_error")
+                log.exception(f"{self.name}_out_error")
                 time.sleep(2)
 
     def _drain_once(self) -> None:
@@ -166,7 +178,7 @@ class TelegramUI:
             try:
                 self._write("sendMessage", {"text": text})
             except TgError as e:
-                log.error("telegram_send_failed", err=e.desc)
+                log.error(f"{self.name}_send_failed", err=e.desc)
         with self.lock:
             cards = list(self.cards.values())
         for c in cards:
@@ -180,11 +192,11 @@ class TelegramUI:
                 try:
                     res = self._write("sendMessage", {"text": c.want})
                 except TgError as e:
-                    log.error("telegram_send_failed", err=e.desc, card=c.key)
+                    log.error(f"{self.name}_send_failed", err=e.desc, card=c.key)
                     continue
                 c.msg_id, c.text, c.last_edit = res["message_id"], c.want, self.clock()
                 self.on_card_id(c.key, c.msg_id)
-            elif c.final or self.clock() - c.last_edit >= self.cfg.telegram.edit_min_interval_s:
+            elif c.final or self.clock() - c.last_edit >= self.limits.edit_min_interval_s:
                 want = c.want
                 try:
                     self._write("editMessageText", {"message_id": c.msg_id, "text": want})
@@ -196,7 +208,7 @@ class TelegramUI:
                         c.msg_id = None   # deleted by the user / too old: post it again
                         continue
                     else:
-                        log.error("telegram_edit_failed", err=e.desc, card=c.key)
+                        log.error(f"{self.name}_edit_failed", err=e.desc, card=c.key)
                 c.last_edit = self.clock()
             if c.final and c.text == c.want:
                 self._forget(c)
@@ -220,9 +232,17 @@ class TelegramUI:
                 time.sleep(backoff)
                 backoff = min(60.0, backoff * 2)
                 continue
+            except Exception:   # never let the command thread die: /flatten must keep working
+                log.exception("telegram_poll_crash")
+                time.sleep(backoff)
+                backoff = min(60.0, backoff * 2)
+                continue
             for u in ups:
                 self.offset = max(self.offset, u["update_id"] + 1)
-                self.handle_update(u)
+                try:
+                    self.handle_update(u)
+                except Exception:
+                    log.exception("telegram_update_error")
 
     def handle_update(self, u: dict) -> None:
         msg = u.get("message") or {}
@@ -238,6 +258,9 @@ class TelegramUI:
         if name not in COMMANDS:
             self.send("❓ Unknown command. /help")
             return
+        if name in ONCE and msg.get("date") and msg["date"] < self.started - 5:
+            log.warn("telegram_stale_command", cmd=name)   # sent before this start (e.g. the /restart itself)
+            return
         log.info("telegram_command", cmd=name)     # never the argument (may be the PIN)
         self.on_command(Command(name, arg.strip()))
 
@@ -247,8 +270,14 @@ class TelegramUI:
 
 HELP = ("🤖 <b>Copybot (paper)</b>\n"
         "/status – wallet, P&amp;L, health (live)\n"
-        "/positions – open positions\n"
+        "/trades – open trades at live prices + P&amp;L vs the start (live)\n"
+        "/traders – followed traders and what copying them earned (live)\n"
+        "/wallets – the same copies at 1/2/5/10/20% risk, compared (live)\n"
+        "/positions – open positions (short list)\n"
         "/leaders – followed wallets (live)\n"
         "/progress – success metrics\n"
         "/pause · /resume – new entries (exits always run)\n"
-        "/flatten &lt;PIN&gt; – close everything and pause")
+        "/flatten &lt;PIN&gt; – close everything and pause\n"
+        "/search – look for new traders now and re-pick the best 7\n"
+        "/reset &lt;PIN&gt; – every wallet back to the start (no open trades), traders kept\n"
+        "/restart – restart the bot")

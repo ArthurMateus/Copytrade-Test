@@ -1,4 +1,4 @@
-"""Loopback fakes of the NETWORK only for the Solana side: FOMO REST, DexScreener and the Discord REST API.
+"""Loopback fakes of the NETWORK only for the Solana side: FOMO REST and DexScreener.
 
 Response shapes are the real recorded ones (tests/fixtures/fomo_*.json, dexscreener_tokens.json). Our own code is
 never mocked.
@@ -163,104 +163,6 @@ class FakeDex:
 
     def set(self, mint: str, px: float, liq: float | None = 500_000.0, sym: str = "MEME"):
         self.tokens[mint] = {"px": px, "liq": liq, "sym": sym}
-
-    def close(self):
-        self.http.shutdown()
-        self.http.server_close()
-
-
-class FakeDiscord:
-    """Just enough of the Discord REST API: channel messages (post, edit, delete, list with `after`)."""
-
-    def __init__(self, channel="777"):
-        self.channel = channel
-        self.messages: list[dict] = []
-        self.sent: list[dict] = []
-        self.edits: list[dict] = []
-        self.deleted: list[str] = []
-        self.auth_seen: set = set()
-        self.fail_429 = 0
-        self.lock = threading.Lock()
-        self._id = 1000
-        fake = self
-
-        class H(BaseHTTPRequestHandler):
-            def log_message(self, *a):
-                pass
-
-            def _send(self, code, obj):
-                b = json.dumps(obj).encode()
-                self.send_response(code)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(b)))
-                self.end_headers()
-                self.wfile.write(b)
-
-            def _body(self):
-                n = int(self.headers.get("Content-Length") or 0)
-                return json.loads(self.rfile.read(n)) if n else {}
-
-            def _route(self, method):
-                fake.auth_seen.add(self.headers.get("Authorization"))
-                u = urlparse(self.path)
-                parts = u.path.strip("/").split("/")          # channels/{c}/messages[/{id}]
-                if parts[0] != "channels" or parts[1] != fake.channel or parts[2] != "messages":
-                    return self._send(404, {"message": "Unknown Channel"})
-                with fake.lock:
-                    if method == "POST":
-                        if fake.fail_429 > 0:
-                            fake.fail_429 -= 1
-                            return self._send(429, {"message": "rate limited", "retry_after": 0.2})
-                        m = fake.add("bot", self._body()["content"], bot=True)
-                        fake.sent.append(m)
-                        return self._send(200, m)
-                    if method == "PATCH":
-                        mid = parts[3]
-                        for m in fake.messages:
-                            if m["id"] == mid:
-                                m["content"] = self._body()["content"]
-                                fake.edits.append(dict(m))
-                                return self._send(200, m)
-                        return self._send(404, {"message": "Unknown Message"})
-                    if method == "DELETE":
-                        fake.deleted.append(parts[3])
-                        fake.messages = [m for m in fake.messages if m["id"] != parts[3]]
-                        self.send_response(204)
-                        self.end_headers()
-                        return
-                    q = parse_qs(u.query)
-                    after, limit = int(q.get("after", ["0"])[0]), int(q.get("limit", ["50"])[0])
-                    msgs = [m for m in fake.messages if int(m["id"]) > after]
-                    msgs = sorted(msgs, key=lambda m: int(m["id"]), reverse=not after)[:limit]
-                    return self._send(200, msgs)
-
-            def do_GET(self):
-                self._route("GET")
-
-            def do_POST(self):
-                self._route("POST")
-
-            def do_PATCH(self):
-                self._route("PATCH")
-
-            def do_DELETE(self):
-                self._route("DELETE")
-
-        self.http = _serve(H)
-
-    def add(self, user_id: str, content: str, bot=False) -> dict:
-        self._id += 1
-        m = {"id": str(self._id), "content": content, "author": {"id": user_id, "bot": bot}}
-        self.messages.append(m)
-        return m
-
-    def say(self, user_id: str, content: str) -> dict:
-        with self.lock:
-            return self.add(user_id, content)
-
-    @property
-    def url(self):
-        return f"http://127.0.0.1:{self.http.server_address[1]}"
 
     def close(self):
         self.http.shutdown()
