@@ -15,7 +15,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from copybot.sol.fomo import read_cookie_file
+from copybot.sol.fomo import browser_headers, read_cookie_file
 
 URL = "https://prod-api.fomo.family/v2/leaderboard/24h"
 MAX_HEADER = 7000          # stay far below the server's limit (431)
@@ -40,20 +40,48 @@ def header(c: dict[str, str]) -> str:
     return "; ".join(f"{k}={v}" for k, v in c.items())
 
 
-def status(cookie: str) -> int:
+MODE = "cookie"       # which way of sending the login works (found by diagnose)
+
+
+def request(cookie: str, mode: str = "") -> tuple[int, str]:
+    """-> (http status, the first part of the answer: the server's words, never our cookie)."""
     if len(cookie) > MAX_HEADER:
-        return 431
-    req = urllib.request.Request(URL, headers={"Cookie": cookie, "Accept": "application/json",
-                                               "Origin": "https://fomo.family", "Referer": "https://fomo.family/",
-                                               "User-Agent": "Mozilla/5.0 (copybot paper)"})
+        return 431, ""
+    req = urllib.request.Request(URL, headers=browser_headers(cookie, bearer=(mode or MODE) == "cookie+bearer"))
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
-            return r.status
+            return r.status, r.read(200).decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
-        return e.code
+        return e.code, e.read(200).decode("utf-8", "replace")
     except Exception as e:      # network problem: say so, do not guess
-        print(f"network error: {type(e).__name__}")
-        return 0
+        return 0, f"network error: {type(e).__name__}"
+
+
+def status(cookie: str) -> int:
+    return request(cookie)[0]
+
+
+def kind(code: int, body: str) -> str:
+    b = body.lower()
+    if code == 200:
+        return "works"
+    if "authorization" in b:
+        return "FOMO says: not logged in (cookie expired, wrong, or incomplete)"
+    if any(w in b for w in ("cloudflare", "just a moment", "challenge", "attention required", "1020", "1010")):
+        return "Cloudflare is blocking this program (looks like a bot to it)"
+    return "refused for another reason"
+
+
+def diagnose(cookie: str) -> bool:
+    """Try the ways a login can be sent and say what FOMO answers. Sets MODE to the one that works."""
+    global MODE
+    for mode in ("cookie", "cookie+bearer"):
+        code, body = request(cookie, mode)
+        print(f"  {mode}: HTTP {code} · {kind(code, body)}" + ("" if code == 200 else f" · answer: {body[:80]!r}"))
+        if code == 200:
+            MODE = mode
+            return True
+    return False
 
 
 def minimal(cookies: dict[str, str]) -> dict[str, str] | None:
@@ -111,6 +139,11 @@ def main() -> int:
     print("cookies in the file (name: size):")
     for k, v in sorted(cookies.items(), key=lambda kv: -len(kv[1])):
         print(f"  {k}: {len(v)}")
+    print("asking FOMO with the cookie exactly as pasted:")
+    if len(header(cookies)) <= MAX_HEADER and not diagnose(header(cookies)):
+        print("FOMO does not accept it. Sign in again, copy a FRESH cookie (it lives 1 hour) and rerun right away.")
+        print("If a brand-new cookie is refused too, send me the two lines above (they hold no secrets).")
+        return 1
     best = minimal(cookies)
     if not best:
         print("could not find a working cookie. Sign in again, copy the cookie again, and rerun this.")
@@ -118,6 +151,8 @@ def main() -> int:
     backup = path.with_name(path.name + ".full")
     backup.write_text(read_cookie_file(str(path)) + chr(10), encoding="utf-8")
     path.write_text(header(best) + "\n", encoding="utf-8")
+    if MODE != "cookie":
+        print(f"NOTE: FOMO only accepts this login with the token also sent as a header: run  setx FOMO_AUTH_MODE {MODE}")
     print(f"OK: kept {len(best)} cookie(s): {', '.join(best)} ({len(header(best))} bytes). Old file: {backup.name}")
     return 0
 

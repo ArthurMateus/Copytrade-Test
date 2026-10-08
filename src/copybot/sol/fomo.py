@@ -37,6 +37,23 @@ def read_cookie_file(path: str) -> str:
     return text[7:].strip() if text.lower().startswith("cookie:") else text
 
 
+CHROME_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+             "Chrome/141.0.0.0 Safari/537.36")
+
+
+def browser_headers(cookie: str, bearer: bool = False) -> dict:
+    """What the website's own page sends, so FOMO (behind Cloudflare) sees an ordinary browser request."""
+    h = {"Cookie": cookie, "Accept": "application/json, text/plain, */*", "Accept-Language": "en-US,en;q=0.9",
+         "Origin": "https://fomo.family", "Referer": "https://fomo.family/", "User-Agent": CHROME_UA,
+         "Sec-Fetch-Dest": "empty", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Site": "same-site"}
+    if bearer:
+        for part in cookie.split(";"):
+            name, _, val = part.strip().partition("=")
+            if name == "privy-token" and val:
+                h["Authorization"] = "Bearer " + val
+    return h
+
+
 class AuthError(Exception):
     """FOMO refused our session (expired or missing cookie)."""
 
@@ -156,6 +173,7 @@ class FomoClient:
         refreshed by saving the new cookie into the file: no restart needed. It wins over `cookie`."""
         self.base, self._cookie = base.rstrip("/"), cookie
         self._file, self._file_mtime = cookie_file, 0.0
+        self.bearer = os.environ.get("FOMO_AUTH_MODE", "") == "cookie+bearer"    # set by tools/fomo_cookie_trim.py
         self.min_interval, self.timeout = min_interval_s, timeout_s
         self._lock = threading.Lock()
         self._last = 0.0
@@ -185,9 +203,7 @@ class FomoClient:
             if wait > 0:
                 time.sleep(wait)
             self._last = time.monotonic()
-        req = urllib.request.Request(self.base + path, headers={
-            "Cookie": cookie, "Accept": "application/json", "Origin": "https://fomo.family",
-            "Referer": "https://fomo.family/", "User-Agent": "Mozilla/5.0 (copybot paper)"})
+        req = urllib.request.Request(self.base + path, headers=browser_headers(cookie, self.bearer))
         try:
             with urllib.request.urlopen(req, timeout=timeout or self.timeout) as r:
                 return json.loads(r.read())
