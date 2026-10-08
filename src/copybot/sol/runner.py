@@ -11,9 +11,11 @@ import datetime as dt
 import queue
 import threading
 import time
+import shutil
 from pathlib import Path
 
 from copybot import log, tgfmt
+from copybot.tgfmt import esc, fusd
 from copybot.config import Config
 from copybot.ledger import Ledger, now_ms
 from copybot.sol import fmt
@@ -35,8 +37,9 @@ def week_key(ms: float) -> str:
 
 
 class SolBot:
-    def __init__(self, cfg: Config, ui, alert):
-        self.cfg, self.c, self.ui, self.alert_fn = cfg, cfg.sol, ui, alert
+    def __init__(self, cfg: Config, ui, alert, restart=lambda: None):
+        self.cfg, self.c, self.ui, self.alert_fn, self.restart = cfg, cfg.sol, ui, alert, restart
+        self.search_pending = False
         self.data = Path(cfg.runtime.data_dir) / "sol"
         self.data.mkdir(parents=True, exist_ok=True)
         self.q: queue.Queue = queue.Queue()
@@ -106,11 +109,11 @@ class SolBot:
         if problems:
             self.st.uncertain = problems
             self.rec({"ev": "pause", "reason": "uncertain restart"})
-            self.ui.send("⚠️ 🪙 <b>Solana restart with uncertainty</b> · ⏸️ entries paused, exits keep running\n"
-                         + "\n".join(f"• {tgfmt.esc(x)}" for x in problems[:10]) + "\nCheck, then /solresume.")
+            self.ui.send("⚠️ 🪙 <b>FOMO restart with uncertainty</b> · ⏸️ entries paused, exits keep running\n"
+                         + "\n".join(f"• {tgfmt.esc(x)}" for x in problems[:10]) + "\nCheck, then /fomoresume.")
         log.info("sol_state", equity=round(self.st.equity(), 2), positions=len(self.st.positions),
                  followed=len(self.st.followed), paused=self.st.entries_paused, trades=len(self.st.closed))
-        self.ui.send(f"🪙 <b>Solana book started</b> (paper) · {len(self.st.positions)} open · "
+        self.ui.send(f"🪙 <b>FOMO book started</b> (paper) · {len(self.st.positions)} open · "
                      f"{len(self.st.followed)} leaders" + (" · ⏸️ paused" if self.st.entries_paused else ""))
 
     def start_threads(self) -> None:
@@ -253,7 +256,7 @@ class SolBot:
             self.on_ranking(item[1], item[2], item[3])
         elif kind == "sol_review":
             n_pre, n_scored, n_el = item[1:]
-            self.ui.send(f"🔎 🪙 <b>Solana review</b> · {n_pre} passed the pre-screen · {n_scored} fully scored · "
+            self.ui.send(f"🔎 🪙 <b>FOMO review</b> · {n_pre} passed the pre-screen · {n_scored} fully scored · "
                          f"{n_el} eligible")
         elif kind == "sol_alert":
             self.alert(item[1])
@@ -284,7 +287,7 @@ class SolBot:
         now = now_ms()
         if n_scored < c.min_scored_to_start or not self.auth_ok:
             return
-        if now - int(self.st.sel.get("at", 0)) < c.rescore_minutes * 60_000 * 0.9:
+        if not self.search_pending and now - int(self.st.sel.get("at", 0)) < c.rescore_minutes * 60_000 * 0.9:
             return
         plan = select(self.st.sel, ranking, self.st.followed, set(self.st.paused_leaders), self.st.dropped, now, c)
         for a, why in plan.drops:
@@ -309,6 +312,12 @@ class SolBot:
                              ("Open bag", f"{s.get('open_buy_share', 0) * 100:.0f}% of buys"),
                          ]))
         self.rec({"ev": "sel", "state": plan.state})
+        if self.search_pending:
+            self.search_pending = False
+            el = sum(1 for s in scores.values() if s.get("eligible"))
+            self.ui.send(f"🔎 🪙 <b>FOMO search done</b> · {n_scored} wallets scored · {el} pass the strict rules · "
+                         f"{len(self.st.followed)} followed" + (f" · +{len(plan.joins)} new" if plan.joins else "")
+                         + (f" · −{len(plan.drops)} dropped" if plan.drops else ""))
         self.scorer.focus = set(self.st.followed)
         if not ranking:
             self.alert("no Solana wallet passed the strict scoring: following nobody new", key="no_eligible",
@@ -339,55 +348,106 @@ class SolBot:
         self.last_body[key] = body
         self.ui.set_card(key, fmt.trade_card(p, mark, now_ms(), h))
 
+    def render(self, key: str, h, marks: dict, now: float) -> str:
+        handles = {a: self.handle_of(a) for a in (*self.st.followed, *(p.leader for p in self.st.positions.values()))}
+        if key == "sol:status":
+            return fmt.status_card(self.st, marks, h, now, self.auth_ok)
+        if key == "sol:trades":
+            return fmt.trades_card(self.st, marks, now, handles)
+        if key == "sol:traders":
+            return fmt.traders_card(self.st, marks, self.ranks, self.scores, handles, now)
+        if key == "sol:wallet":
+            return fmt.wallet_card(self.st, marks, self.c, now)
+        return fmt.leaders_card(self.st, self.ranks, handles, now, self.scores)
+
     def refresh_ui(self) -> None:
         for p in list(self.st.positions.values()):
             self.card_for(p)
         marks, h = self.prices.marks(), self.health()
         for key in list(self.live_cards):
-            if key == "sol:status":
-                body = fmt.status_card(self.st, marks, h, 0, self.auth_ok)
-                full = lambda: fmt.status_card(self.st, marks, h, now_ms(), self.auth_ok)
-            else:
-                handles = {a: self.handle_of(a) for a in self.st.followed}
-                body = fmt.leaders_card(self.st, self.ranks, handles, 0)
-                full = lambda: fmt.leaders_card(self.st, self.ranks, handles, now_ms())
+            body = self.render(key, h, marks, 0)           # time 0: no edit for a time stamp alone
             if self.last_body.get(key) != body:
                 self.last_body[key] = body
-                self.ui.set_card(key, full())
+                self.ui.set_card(key, self.render(key, h, marks, now_ms()))
 
     # ---- commands -----------------------------------------------------------------------------------------------
+    LIVE = {"/fomo": "sol:status", "/fomotrades": "sol:trades", "/fomotraders": "sol:traders",
+            "/fomowallet": "sol:wallet", "/fomoleaders": "sol:leaders"}
+
     def command(self, c) -> None:
         now, marks = now_ms(), self.prices.marks()
-        if c.name in ("/sol", "/solleaders"):
-            key = "sol:status" if c.name == "/sol" else "sol:leaders"
+        if c.name in self.LIVE:
+            key = self.LIVE[c.name]
             self.live_cards.add(key)
             self.last_body.pop(key, None)
-            if key == "sol:status":
-                text = fmt.status_card(self.st, marks, self.health(), now, self.auth_ok)
-            else:
-                text = fmt.leaders_card(self.st, self.ranks, {a: self.handle_of(a) for a in self.st.followed}, now)
-            self.ui.set_card(key, text, new=True)
-        elif c.name == "/solpositions":
+            self.ui.set_card(key, self.render(key, self.health(), marks, now), new=True)
+        elif c.name == "/fomopositions":
             self.ui.send(fmt.positions_text(self.st, marks))
-        elif c.name == "/solprogress":
+        elif c.name == "/fomoprogress":
             self.ui.send(fmt.progress_text(self.st, marks, now))
-        elif c.name == "/solpause":
-            self.rec({"ev": "pause", "reason": "/solpause"})
-            self.ui.send("⏸️ 🪙 <b>Solana entries paused.</b> Exits and stops keep running. /solresume to continue.")
-        elif c.name == "/solresume":
+        elif c.name == "/fomosearch":
+            if not self.auth_ok:
+                self.ui.send("⚠️ 🪙 The FOMO session is not valid: refresh the cookie file first, then /fomosearch.")
+                return
+            self.scorer.search_req.set()
+            self.search_pending = True
+            self.ui.send("🔎 🪙 Checking the FOMO leaderboards now; I will say what changed when it finishes.")
+        elif c.name == "/fomopause":
+            self.rec({"ev": "pause", "reason": "/fomopause"})
+            self.ui.send("⏸️ 🪙 <b>FOMO entries paused.</b> Exits and stops keep running. /fomoresume to continue.")
+        elif c.name == "/fomoresume":
             if self.st.uncertain:
                 self.rec({"ev": "ack", "items": list(self.st.uncertain)})
             self.rec({"ev": "resume"})
-            self.ui.send("▶️ 🪙 <b>Solana entries resumed.</b>")
-        elif c.name == "/solflatten":
+            self.ui.send("▶️ 🪙 <b>FOMO entries resumed.</b>")
+        elif c.name == "/fomoflatten":
             if not self.ui.check_pin(c.arg):
                 log.warn("sol_flatten_bad_pin")
-                self.ui.send("⛔ Wrong or missing PIN. Usage: /solflatten &lt;PIN&gt;")
+                self.ui.send("⛔ Wrong or missing PIN. Usage: /fomoflatten &lt;PIN&gt;")
                 return
             n = len(self.st.positions)
-            self.rec({"ev": "pause", "reason": "/solflatten"})
+            self.rec({"ev": "pause", "reason": "/fomoflatten"})
             self.trader.flatten("flatten")
-            self.ui.send(f"🛑 🪙 <b>Flattened</b> {n} Solana position(s). ⏸️ Entries paused · /solresume to continue.")
+            self.ui.send(f"🛑 🪙 <b>Flattened</b> {n} FOMO trade(s). ⏸️ Entries paused · /fomoresume to continue.")
+        elif c.name == "/fomoreset":
+            if not self.ui.check_pin(c.arg):
+                log.warn("sol_reset_bad_pin")
+                self.ui.send("⛔ Wrong or missing PIN. Usage: /fomoreset &lt;PIN&gt;")
+                return
+            if self.st.positions:
+                self.ui.send(f"⛔ <b>FOMO reset refused</b>: {len(self.st.positions)} open trade(s). Wait for them to "
+                             f"close, or /fomoflatten &lt;PIN&gt; first.")
+                return
+            where = self.reset_book()
+            self.ui.send(f"♻️ 🪙 <b>FOMO reset done</b> · the wallet is back to "
+                         f"{fusd(self.c.start_equity, sign=False)}, traders kept. Old history saved in "
+                         f"<code>{esc(where)}</code>.\n🔄 Restarting… back in about 15 seconds.")
+            self.restart()
+
+    def reset_book(self) -> str:
+        """Archive the Solana ledger and start a fresh one that keeps the followed traders (with their 'since'), pauses,
+        drop cooldowns, selection streaks and swap cursors (so old swaps are never copied). Nothing is deleted.
+        The caller restarts the process."""
+        st = self.st
+        seed = [{"ev": "genesis", "equity0": self.c.start_equity, "btc_px0": 0.0}]
+        seed += [{"ev": "unfollow", "leader": a, "reason": "kept across /fomoreset", "ts": t} for a, t in st.dropped.items()]
+        seed += [{"ev": "follow", "leader": a, "ts": t} for a, t in st.followed.items()]
+        seed += [{"ev": "leader_pause", "leader": a, "reason": why} for a, why in st.paused_leaders.items()]
+        seed += [{"ev": "cursor", "leader": a, "t": t} for a, t in st.cursors.items()]
+        seed.append({"ev": "sel", "state": st.sel})
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+        arch = self.data / "archive" / f"reset-{stamp}"
+        arch.mkdir(parents=True, exist_ok=True)
+        seed.append({"ev": "note", "text": f"reset; previous history in {arch.as_posix()}"})
+        self.ledger.frozen = True       # nothing more is written to the old file before the restart
+        self.ledger.close()
+        shutil.move(str(self.data / "ledger.jsonl"), str(arch / "ledger.jsonl"))
+        fresh = Ledger(self.data / "ledger.jsonl")
+        for ev in seed:
+            fresh.append(ev)
+        fresh.close()
+        log.info("sol_reset", archive=arch.as_posix(), followed=len(st.followed))
+        return arch.as_posix()
 
     def heartbeat(self) -> None:
         h = self.health()

@@ -352,8 +352,15 @@ def progress_text(st: State, mids: dict, btc_px: float | None, now_ms: float) ->
     unexpl = st.counters.get("unexplained_mismatch", 0)
     kill = (n >= 50 and pnl < 0) or missed > 0 or unexpl > 0
     verdict = "🛑 KILL criterion met" if kill else ("🟡 too early to judge" if n < 50 else "🟢 on track")
+    longs = [t for t in st.closed if t["side"] > 0]
+    shorts = [t for t in st.closed if t["side"] < 0]
+    open_long = sum(1 for p in st.positions.values() if p.side > 0)
+    open_short = len(st.positions) - open_long
+    one_sided = (n + len(st.positions)) >= 8 and not shorts and not open_short
     return f"🎯 <b>Progress</b> · day {days:.1f} · {verdict}\n" + pre([
         ("Closed trades", f"{n} (target 50-100) · {wins} won, {n - wins} lost"),
+        ("Longs", f"{len(longs)} closed · {fusd(sum(t['pnl'] for t in longs))} · {open_long} open"),
+        ("Shorts", f"{len(shorts)} closed · {fusd(sum(t['pnl'] for t in shorts))} · {open_short} open"),
         ("Result", f"{money(pnl, st.equity0)} after all costs"),
         ("Just holding BTC", fusd(bh) if bh is not None else "-"),
         ("Missed exits", f"{missed} {'✅' if not missed else '❌'}"),
@@ -361,4 +368,6 @@ def progress_text(st: State, mids: dict, btc_px: float | None, now_ms: float) ->
                                 f"({st.counters.get('reconcile_exits', 0)} caught by the checks)"),
         ("Copy speed", (f"{med:.1f}s {'✅' if med <= 5 else '⚠️'}") if med is not None else "-"),
         ("Too small to copy", str(st.counters.get("skipped_min_notional", 0))),
-    ]) + "\n<i>A few dozen paper trades show the bot works, not that an edge exists.</i>"
+    ]) + ("\n⚠️ <i>Every copy so far was a long: check /hypertraders. The followed traders may all be long right now "
+          "(shorts are copied the same way).</i>" if one_sided else "") \
+        + "\n<i>A few dozen paper trades show the bot works, not that an edge exists.</i>"

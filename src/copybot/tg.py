@@ -20,10 +20,28 @@ from dataclasses import dataclass, field
 from copybot import log
 from copybot.config import Config
 
+# The bot has two books. Hyperliquid commands are /hyper<x> (the short originals /status, /trades, ... still work),
+# the Solana/FOMO book's are /fomo<x>. Everything is turned into one canonical name by `canon` before it is handled.
+ALIASES = {"/hyperstatus": "/status", "/hypertrades": "/trades", "/hypertraders": "/traders",
+           "/hyperwallet": "/wallets", "/hyperwallets": "/wallets", "/hyperpositions": "/positions",
+           "/hyperleaders": "/leaders", "/hyperprogress": "/progress", "/hypersearch": "/search",
+           "/hyperpause": "/pause", "/hyperresume": "/resume", "/hyperflatten": "/flatten", "/hyperreset": "/reset",
+           "/fomostatus": "/fomo", "/fomowallets": "/fomowallet"}
+HYPER_COMMANDS = ("/hyperstatus", "/hypertrades", "/hypertraders", "/hyperwallet", "/hyperpositions",
+                  "/hyperleaders", "/hyperprogress", "/hypersearch", "/hyperpause", "/hyperresume", "/hyperflatten",
+                  "/hyperreset")
+FOMO_COMMANDS = ("/fomo", "/fomotrades", "/fomotraders", "/fomowallet", "/fomopositions", "/fomoleaders",
+                 "/fomoprogress", "/fomosearch", "/fomopause", "/fomoresume", "/fomoflatten", "/fomoreset")
 COMMANDS = ("/status", "/trades", "/traders", "/wallets", "/positions", "/leaders", "/progress", "/search", "/pause",
-            "/resume", "/flatten", "/reset", "/restart", "/help",
-            "/sol", "/solpositions", "/solleaders", "/solprogress", "/solpause", "/solresume", "/solflatten")
-ONCE = ("/reset", "/restart", "/flatten", "/solflatten")   # never acted on twice: a stale copy after a restart is ignored
+            "/resume", "/flatten", "/reset", "/restart", "/help") + tuple(ALIASES) + FOMO_COMMANDS
+# what Discord shows in its slash-command list (the short Hyperliquid originals stay Telegram-only)
+SLASH_COMMANDS = ("/help", "/restart") + HYPER_COMMANDS + FOMO_COMMANDS
+PIN_COMMANDS = ("/flatten", "/reset", "/fomoflatten", "/fomoreset")
+ONCE = ("/reset", "/restart", "/flatten", "/fomoflatten", "/fomoreset")   # never acted on twice after a restart
+
+
+def canon(name: str) -> str:
+    return ALIASES.get(name, name)
 
 
 class TgError(Exception):
@@ -258,6 +276,7 @@ class TelegramUI:
         if name not in COMMANDS:
             self.send("❓ Unknown command. /help")
             return
+        name = canon(name)
         if name in ONCE and msg.get("date") and msg["date"] < self.started - 5:
             log.warn("telegram_stale_command", cmd=name)   # sent before this start (e.g. the /restart itself)
             return
@@ -268,16 +287,17 @@ class TelegramUI:
         return bool(self.cfg.pin) and hmac.compare_digest(given.encode(), self.cfg.pin.encode())
 
 
-HELP = ("🤖 <b>Copybot (paper)</b>\n"
-        "/status – wallet, P&amp;L, health (live)\n"
-        "/trades – open trades at live prices + P&amp;L vs the start (live)\n"
-        "/traders – followed traders and what copying them earned (live)\n"
-        "/wallets – the same copies at 1/2/5/10/20% risk, compared (live)\n"
-        "/positions – open positions (short list)\n"
-        "/leaders – followed wallets (live)\n"
-        "/progress – success metrics\n"
-        "/pause · /resume – new entries (exits always run)\n"
-        "/flatten &lt;PIN&gt; – close everything and pause\n"
-        "/search – look for new traders now and re-pick the best 7\n"
-        "/reset &lt;PIN&gt; – every wallet back to the start (no open trades), traders kept\n"
+HELP = ("🤖 <b>Copybot (paper)</b>\n\n"
+        "⚡ <b>Hyperliquid</b> (the short names /status, /trades ... work too)\n"
+        "/hyperstatus – wallet, P&amp;L, health (live)\n"
+        "/hypertrades – open trades at live prices + P&amp;L vs the start (live)\n"
+        "/hypertraders – followed traders and what copying them earned (live)\n"
+        "/hyperwallet – the same copies at 1/2/5/10/20% risk, compared (live)\n"
+        "/hyperpositions – open positions (short list)\n"
+        "/hyperleaders – followed wallets (live)\n"
+        "/hyperprogress – success metrics, long vs short\n"
+        "/hyperpause · /hyperresume – new entries (exits always run)\n"
+        "/hyperflatten &lt;PIN&gt; – close everything and pause\n"
+        "/hypersearch – look for new traders now and re-pick the best 7\n"
+        "/hyperreset &lt;PIN&gt; – every Hyperliquid wallet back to the start (no open trades), traders kept\n\n"
         "/restart – restart the bot")

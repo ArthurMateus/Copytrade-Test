@@ -12,6 +12,12 @@ min_profit_factor = 2.0       # ... and a profit factor (money won / money lost)
 max_drawdown = 0.30           # ... and a biggest fall from a peak of at most this (0.30 = 30%)  [0.05, 1]
 max_open_loss = 0.15          # ... and open (not yet closed) losses of at most this share of its account. A losing
                               # position it keeps open also counts as a lost trade in its win rate.  [0.01, 1]
+# "Is it losing RIGHT NOW?" gates: a long good history does not excuse a bad week (all must pass).
+max_loss_7d = 0.03            # lost at most this share of its account over 7 days (current open losses count)  [0, 0.10]
+max_loss_24h = 0.015          # ... and at most this over the last 24 hours  [0, 0.05]
+max_loss_streak = 4           # ... at most this many losing round trips in a row, latest first  [1, 8]
+min_recent_win_rate = 0.45    # ... and it won at least this share of its last 15 round trips  [0.30, 1]
+max_dd_7d = 0.10              # ... and its hourly equity never fell more than this within 7 days  [0.01, 0.20]
 # Changing these rescores the saved wallets automatically at the next start.
 swaps_per_cycle = 1           #                                              [1, 1]
 history_days = 180            # fills history used for scoring               [60, 180]

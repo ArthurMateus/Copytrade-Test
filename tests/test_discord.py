@@ -52,17 +52,19 @@ def test_slash_commands_registered_and_only_the_owner_commands(dc):
     fake, ui, cmds, _ = dc
     assert wait_for(lambda: fake.commands is not None and fake.connected())
     names = {c["name"] for c in fake.commands}
-    assert {"status", "trades", "traders", "wallets", "flatten", "pause", "resume", "help"} <= names
-    flat = next(c for c in fake.commands if c["name"] == "flatten")
+    assert {"hyperstatus", "hypertrades", "hypertraders", "hyperwallet", "hyperflatten", "hyperpause", "hyperresume",
+            "hyperreset", "fomo", "fomotrades", "fomotraders", "fomowallet", "fomoreset", "help"} <= names
+    assert "status" not in names and "flatten" not in names            # Discord lists the clear /hyper* and /fomo* names
+    flat = next(c for c in fake.commands if c["name"] == "hyperflatten")
     assert flat["options"][0]["name"] == "pin" and flat["options"][0]["required"]
     assert fake.identified[0]["intents"] == 0
-    fake.interact("status")
+    fake.interact("hyperstatus")                              # /hyperstatus is /status for the bot
     c = cmds.get(timeout=5)
     assert c.name == "/status" and c.arg == ""
-    fake.interact("flatten", {"pin": PIN})
+    fake.interact("hyperflatten", {"pin": PIN})
     c = cmds.get(timeout=5)
     assert c.name == "/flatten" and c.arg == PIN
-    fake.interact("status", user="1234")                     # someone else in the server
+    fake.interact("hyperstatus", user="1234")                     # someone else in the server
     assert wait_for(lambda: any("Only the owner" in r["data"]["content"] for r in fake.replies))
     assert cmds.empty()
     assert all(r["data"]["flags"] == 64 for r in fake.replies)   # every answer is private (ephemeral)
@@ -130,13 +132,13 @@ def test_full_bot_on_telegram_and_discord(tmp_path):
         hl.mids["ETH"] = 3030.0
         assert wait_for(lambda: "3,030" in fake.text(card) or "3030" in fake.text(card))
         # a Discord command answers in both chats (one bot, one state)
-        fake.interact("trades")
+        fake.interact("hypertrades")
         assert wait_for(lambda: any("💼 **Trades** · 1 open" in m["description"] for m in fake.sent))
         assert wait_for(lambda: any("💼 <b>Trades</b> · 1 open" in m["text"] for m in tg.sent))
         # restart keeps editing the same Discord card (its id is in the ledger under dc:)
         assert wait_for(lambda: f"dc:pos:{bot.st.positions['ETH'].pos_id}" in bot.st.cards)
         # /flatten with the PIN from Discord closes everything; the PIN never reaches the log or the channel
-        fake.interact("flatten", {"pin": PIN})
+        fake.interact("hyperflatten", {"pin": PIN})
         assert wait_for(lambda: not bot.st.positions and bot.st.entries_paused)
         assert wait_for(lambda: "✅ WIN" in fake.text(card) or "❌ LOSS" in fake.text(card))
         for h in log.log.handlers:

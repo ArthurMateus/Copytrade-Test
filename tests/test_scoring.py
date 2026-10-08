@@ -315,3 +315,94 @@ def test_open_loss_cap_and_empty_account():
     s = scoring.full_score("0xa", fl, c, 200_000, NOW, p, hl.Account(0.0, ()))   # moved its money out
     assert not s.eligible and s.reasons == ["account_empty"]
     assert scoring.full_score("0xa", fl, c, 200_000, NOW, p, hl.Account(50.0, (hl.OpenPos("BTC", 1.0, 900, 5),))).eligible
+
+
+# ---- "is it losing right now?" gates ----------------------------------------------------------------
+STRICT = dict(max_loss_7d=0.03, max_loss_24h=0.015, max_loss_streak=4, min_recent_win_rate=0.45, max_dd_7d=0.10)
+ACCOUNT = 200_000
+
+
+def with_losing_tail(n_losses: int, loss_usd: float, hours_ago_first: float = 20.0, wins_after: int = 0):
+    """A good wallet whose latest round trips are `n_losses` losers, `hours_ago_first` hours ago and later."""
+    raw, cs = trader(NOW, trips=500, win=0.75, seed=11)
+    coin, px = "DOGE", 0.2          # a coin the generator does not trade, so nothing overlaps
+    t0 = NOW - int(hours_ago_first * 3_600_000)
+    oid = 9_000_000
+    raw = [f for f in raw if f["time"] < t0 - 5 * 3_600_000]      # the generator's own latest trades must not follow
+    for i in range(n_losses + wins_after):
+        loss = i < n_losses
+        t = t0 + i * 600_000
+        oid += 2
+        size = 100_000.0
+        pnl = -loss_usd if loss else loss_usd
+        raw.append(make_fill(coin, px, size, "B", 0.0, t=t, oid=oid, closed_pnl=0.0))
+        raw.append(make_fill(coin, px, size, "A", size, t=t + 120_000, oid=oid + 1, closed_pnl=pnl))
+    raw.sort(key=lambda f: (f["time"], f["tid"]))
+    return raw, cs
+
+
+def score_with(raw, cs, **kw):
+    p = scoring.ScoreParams(**{**STRICT, **kw})
+    return scoring.full_score("0xw", parse(raw), cand(cs), ACCOUNT, NOW, p)
+
+
+def test_a_clean_wallet_passes_the_recent_gates_and_reports_its_week():
+    raw, cs = trader(NOW, trips=500, win=0.75, seed=11)
+    s = score_with(raw, cs)
+    assert s.eligible, s.reasons
+    assert s.loss_streak <= 2 and s.recent_win_rate >= 0.45 and s.loss_24h_pct <= 0.015
+
+
+def test_losing_too_much_this_week_is_rejected_even_with_a_great_history():
+    raw, cs = with_losing_tail(2, 5_000.0, hours_ago_first=50)       # -10k on 200k = 5% this week
+    s = score_with(raw, cs, max_loss_streak=99, min_recent_win_rate=0.0)
+    assert any(r.startswith("lost>3%_this_week") for r in s.reasons) and s.loss_7d_pct > 0.03
+    assert not s.eligible
+
+
+def test_losing_today_is_rejected():
+    raw, cs = with_losing_tail(1, 4_000.0, hours_ago_first=3)         # -2% today
+    s = score_with(raw, cs, max_loss_7d=1.0, max_loss_streak=99, min_recent_win_rate=0.0)
+    assert any("_today" in r for r in s.reasons) and s.loss_24h_pct == pytest.approx(0.02, abs=0.001)
+
+
+def test_a_losing_streak_is_rejected_and_a_win_breaks_it():
+    raw, cs = with_losing_tail(5, 100.0)
+    s = score_with(raw, cs, max_loss_7d=1.0, max_loss_24h=1.0, min_recent_win_rate=0.0)
+    assert s.loss_streak == 5 and "5+_losses_in_a_row" in s.reasons
+    raw, cs = with_losing_tail(5, 100.0, wins_after=1)                # the latest trade won
+    s = score_with(raw, cs, max_loss_7d=1.0, max_loss_24h=1.0, min_recent_win_rate=0.0)
+    assert s.loss_streak == 0 and not any("in_a_row" in r for r in s.reasons)
+
+
+def test_a_cold_recent_stretch_is_rejected_by_the_recent_win_rate():
+    raw, cs = with_losing_tail(10, 50.0)                              # 10 of the last 15 trips lost
+    s = score_with(raw, cs, max_loss_7d=1.0, max_loss_24h=1.0, max_loss_streak=99)
+    assert s.recent_win_rate < 0.45 and any(r.startswith("recent_win_rate<45%") for r in s.reasons)
+
+
+def test_open_losses_count_towards_the_week():
+    raw, cs = trader(NOW, trips=500, win=0.75, seed=11)
+    acct = hl.Account(value=ACCOUNT, positions=[hl.OpenPos("BTC", 1.0, 100_000.0, -8_000.0)]) \
+        if hasattr(hl, "OpenPos") else None
+    if acct is None:
+        pytest.skip("live account type not available")
+    p = scoring.ScoreParams(**{**STRICT, "max_open_loss": 1.0})
+    s = scoring.full_score("0xw", parse(raw), cand(cs), ACCOUNT, NOW, p, live=acct)
+    # open losses are netted against this week's realized gains, and still push it over the 3% line
+    assert 0.03 < s.loss_7d_pct <= 0.04 and any("_this_week" in r for r in s.reasons)
+
+
+def test_the_default_params_leave_the_new_gates_off():
+    raw, cs = with_losing_tail(5, 5_000.0)
+    s = scoring.full_score("0xw", parse(raw), cand(cs), ACCOUNT, NOW)
+    assert not any(k in " ".join(s.reasons) for k in ("_this_week", "_today", "in_a_row", "recent_win_rate", "week_drawdown"))
+
+
+def test_repo_config_turns_the_gates_on_and_changing_them_redoes_cached_scores():
+    from copybot import config
+    c = config.load("config", env={})
+    assert (c.selection.max_loss_7d, c.selection.max_loss_streak) == (0.03, 4)
+    a = scoring.ScoreParams(**STRICT).rules()
+    b = scoring.ScoreParams(**{**STRICT, "max_loss_7d": 0.05}).rules()
+    assert a != b                      # a score made under other floors is recomputed

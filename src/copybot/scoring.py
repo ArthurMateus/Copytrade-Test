@@ -254,6 +254,13 @@ class Score:
     open_losers: int = 0          # losing positions still open (counted as lost trades)
     open_loss_pct: float = 0.0    # unrealized losses of all open positions / account value
     live: bool = False            # the live account was checked
+    pnl_7d: float = 0.0           # net pnl of the round trips closed in the last 7 days
+    pnl_24h: float = 0.0
+    loss_7d_pct: float = 0.0      # 7-day realized loss + open losses, as a share of the account (0 when it is up)
+    loss_24h_pct: float = 0.0
+    loss_streak: int = 0          # most recent consecutive losing round trips
+    recent_win_rate: float = 1.0  # win rate of the last 15 round trips
+    dd_7d: float = 0.0            # worst drawdown of the hourly equity curve over the last 7 days
     shrink: float = 0.0
     scored_ms: int = 0
     points: dict = field(default_factory=dict)   # component -> points; they add up to `score` (0-100)
@@ -284,12 +291,20 @@ class ScoreParams:
     min_profit_factor: float = 1.0 # hard floor on the profit factor (above 1 is always required)
     max_dd_cap: float = 1.0        # hard cap on the max drawdown (1.0 = none)
     max_open_loss: float = 1.0     # hard cap on live unrealized losses / account value (1.0 = none)
+    # "recently losing" gates (neutral defaults = off): a long good history does not excuse a bad week
+    max_loss_7d: float = 1.0       # 7-day realized loss + current open losses / account value
+    max_loss_24h: float = 1.0      # 24-hour realized loss / account value
+    max_loss_streak: int = 99      # consecutive losing round trips, most recent first
+    min_recent_win_rate: float = 0.0   # win rate of the last 15 round trips
+    max_dd_7d: float = 1.0         # drawdown of the hourly equity curve within the last 7 days
 
     def rules(self) -> dict:
         """The eligibility floors: a cached score made under other floors is redone."""
         return {"min_win_rate": self.min_win_rate, "min_score": self.min_score,
                 "min_profit_factor": self.min_profit_factor, "max_dd_cap": self.max_dd_cap,
-                "max_open_loss": self.max_open_loss}
+                "max_open_loss": self.max_open_loss, "max_loss_7d": self.max_loss_7d,
+                "max_loss_24h": self.max_loss_24h, "max_loss_streak": self.max_loss_streak,
+                "min_recent_win_rate": self.min_recent_win_rate, "max_dd_7d": self.max_dd_7d}
 
 
 # component -> weight; the weights add up to 100
@@ -413,6 +428,21 @@ def full_score(address: str, fills: list[Fill], candles: dict[str, list[Candle]]
     base = max(account_value - s.pnl, account_value * 0.1, 1.0)
     curve = equity_curve(fl, candles, base, start, now_ms)
     s.max_dd, s.cur_dd = drawdowns(curve)
+    # ---- how it is doing RIGHT NOW (the history above can be years old)
+    ordered = sorted(trips, key=lambda t: t.close_ms)
+    s.pnl_7d = sum(t.net for t in ordered if t.close_ms >= now_ms - 7 * DAY)
+    s.pnl_24h = sum(t.net for t in ordered if t.close_ms >= now_ms - DAY)
+    scale = max(live.value if live is not None else 0.0, account_value, 1.0)
+    open_lost = s.open_loss_pct * scale if live is not None else 0.0
+    s.loss_7d_pct = max(0.0, -s.pnl_7d + open_lost) / scale
+    s.loss_24h_pct = max(0.0, -s.pnl_24h) / scale
+    for t in reversed(ordered):
+        if t.net >= 0:
+            break
+        s.loss_streak += 1
+    last = ordered[-15:]
+    s.recent_win_rate = sum(1 for t in last if t.net > 0) / len(last)
+    s.dd_7d = drawdowns(curve[-168:])[0] if len(curve) >= 2 else 0.0
     s.concentration = max(nets) / s.pnl if s.pnl > 0 else 1.0
     rets = [copy_return(t, candles.get(t.coin), p.stop_pct / 100) for t in trips]
     s.copy_edge_bps = sum(rets) / n * 1e4 - p.cost_bps
@@ -428,6 +458,11 @@ def full_score(address: str, fills: list[Fill], candles: dict[str, list[Candle]]
         (s.max_dd <= p.max_dd_cap, f"max_drawdown>{p.max_dd_cap * 100:.0f}%"),
         (live is None or bool(live.positions) or live.value >= EMPTY_USD, "account_empty"),
         (s.open_loss_pct <= p.max_open_loss, f"open_losses>{p.max_open_loss * 100:.0f}%"),
+        (s.loss_7d_pct <= p.max_loss_7d, f"lost>{p.max_loss_7d * 100:g}%_this_week"),
+        (s.loss_24h_pct <= p.max_loss_24h, f"lost>{p.max_loss_24h * 100:g}%_today"),
+        (s.loss_streak <= p.max_loss_streak, f"{p.max_loss_streak + 1}+_losses_in_a_row"),
+        (s.recent_win_rate >= p.min_recent_win_rate, f"recent_win_rate<{p.min_recent_win_rate * 100:.0f}%"),
+        (s.dd_7d <= p.max_dd_7d, f"week_drawdown>{p.max_dd_7d * 100:g}%"),
     ]
     s.points = points(s, p)
     if sum(s.points.values()) < p.min_score:

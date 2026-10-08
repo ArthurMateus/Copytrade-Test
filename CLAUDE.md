@@ -95,7 +95,7 @@ instances on the same wallet.
   the owner's logged-in session cookie. The API is private and can change; fixtures in `tests/fixtures/fomo_*.json`
   are real recordings. pump.fun was checked and has no trader leaderboard (Cloudflare, undocumented endpoints): not used.
 - Discord is the owner's own implementation (`discord.py`, slash commands over the Gateway, `MultiUI` fan-out); the Solana
-  book just talks to the same `ui`. Slash commands `/sol`, `/solpositions`, ... are in `tg.COMMANDS`.
+  book just talks to the same `ui`. Slash commands `/fomo`, `/fomotrades`, ... are in `tg.COMMANDS`.
 - Ledger reuse: Solana positions are `Position(side=+1, leverage=1, coin=<mint>, sym=<symbol>)` in the same `State`; a
   `cursor` event stores the newest handled swap time per leader so a restart never re-copies old swaps.
 - Entries need DexScreener liquidity >= `min_liquidity_usd`; bonding-curve pools often have none -> refused (fail closed).
@@ -103,6 +103,18 @@ instances on the same wallet.
 - Bug found and fixed while building it: `_skip(..., kind=...)` collided with `notify(kind, ...)` (also in `positions.py`).
 - Open risks: the FOMO cookie may expire (hours or days unknown); while it is dead the bot cannot see leader sells, only
   stops protect open copies. Copy lag is poll-based (seconds).
+
+## Command families and resets (2026-10-08)
+- Hyperliquid: `/hyper<x>`; FOMO book: `/fomo<x>` (`tg.ALIASES`/`canon` turn every name into one canonical name
+  before `Bot.command`; `/fomo*` goes to `SolBot.command`). Discord lists only `/hyper*`, `/fomo*`, `/help`, `/restart`.
+- `/hyperreset` (HL ledgers + side wallets) and `/fomoreset` (`data/sol/`) each archive the old ledger under their own
+  `archive/reset-<stamp>/`, keep followed traders, pauses, cooldowns and swap cursors, are refused while a trade is open,
+  and restart the process (`restart_at`). Neither touches the other book.
+- HL eligibility now also needs: loss_7d <= 3%, loss_24h <= 1.5%, <= 4 losses in a row, last-15 win rate >= 45%, 7d
+  drawdown <= 10% (`selection.max_loss_7d` ... `max_dd_7d`; in `ScoreParams.rules()` so cached scores are redone).
+- `/hyperprogress` shows longs vs shorts and warns when every copy was a long. Code path checked: the detector and the
+  open path treat shorts exactly like longs (real fills: shorts detected). An all-long run is a data effect (the followed
+  traders were all long, or the market) until a ledger shows otherwise: send `data/ledger.jsonl` to investigate.
 
 ## Findings from the real API (2026-10-05)
 - `tests/test_telegram.py::test_card_is_edited_in_place_rate_limited_and_skips_unchanged` is timing-based and can

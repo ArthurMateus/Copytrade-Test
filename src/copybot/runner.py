@@ -27,7 +27,7 @@ from copybot.positions import PositionManager
 from copybot.risk import Health, RiskGate
 from copybot.selection import Plan, Scorer, rebalance, select
 from copybot.discord import DiscordUI, MultiUI
-from copybot.sol.fmt import SOL_HELP
+from copybot.sol.fmt import FOMO_HELP
 from copybot.sol.runner import SolBot
 from copybot.tg import HELP, TelegramUI
 from copybot.wallets import SideWallet, boot_repair
@@ -96,7 +96,7 @@ class Bot:
         tgfmt.set_utc_offset(cfg.telegram.utc_offset_hours)
         self.sol: SolBot | None = None
         if cfg.sol.enabled and (cfg.fomo_cookie or cfg.fomo_cookie_file):
-            self.sol = SolBot(cfg, self.ui, self.alert)
+            self.sol = SolBot(cfg, self.ui, self.alert, restart=lambda: setattr(self, "restart_at", time.time() + 3))
         elif cfg.sol.enabled:
             log.warn("sol_disabled", why="FOMO_COOKIE / FOMO_COOKIE_FILE not set")
         self.scorer = Scorer(cfg, self.info, self.q, self.data / "cache")
@@ -523,14 +523,16 @@ class Bot:
     # ---- commands ------------------------------------------------------------------------------------
     def command(self, c) -> None:
         now = now_ms()
-        if c.name.startswith("/sol"):
+        if c.name.startswith("/fomo"):
             if self.sol:
                 self.sol.q.put(("cmd", c))
             else:
-                self.ui.send("🪙 Solana is off: set FOMO_COOKIE (and keep sol.enabled = true), then restart.")
+                self.ui.send("🪙 FOMO is off: set FOMO_COOKIE_FILE (or FOMO_COOKIE) and keep sol.enabled = true, "
+                             "then restart.")
             return
         if c.name == "/help":
-            self.ui.send(HELP + ("\n\n" + SOL_HELP if self.sol else ""))
+            self.ui.send(HELP + "\n\n" + (FOMO_HELP if self.sol else
+                                          "🪙 <b>FOMO</b> is off (set FOMO_COOKIE_FILE and restart to turn it on)"))
         elif c.name in ("/status", "/leaders", "/trades", "/traders", "/wallets"):
             key = c.name[1:]
             self.live_cards.add(key)

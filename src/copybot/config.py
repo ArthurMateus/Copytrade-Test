@@ -65,6 +65,12 @@ class Selection:
     min_profit_factor: float = 2.0        # ... and won at least this much per 1$ lost ...
     max_drawdown: float = 0.30            # ... and never fell more than this from a peak (low swings) ...
     max_open_loss: float = 0.15           # ... and is not sitting on open losses above this share of its account
+    # ... and is not in a bad stretch right now (a long good history does not excuse a bad week):
+    max_loss_7d: float = 0.03             # lost no more than this share of its account in 7 days (open losses count)
+    max_loss_24h: float = 0.015           # ... and no more than this in the last 24 hours
+    max_loss_streak: int = 4              # ... no more than this many losing round trips in a row (latest first)
+    min_recent_win_rate: float = 0.45     # ... won at least this share of its last 15 round trips
+    max_dd_7d: float = 0.10               # ... and its hourly equity never fell more than this within 7 days
     swaps_per_cycle: int = 1
     history_days: int = 180
     max_candidates: int = 2000            # prescreened wallets sent to fill screening per review
@@ -244,6 +250,11 @@ CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
     ("runtime", "trading_timeout_s"): (0.1, 2.0),
     ("runtime", "weight_per_min"): (1, 1200),
     ("runtime", "tick_s"): (0.01, 1.0),
+    ("selection", "max_loss_7d"): (0.0, 0.10),
+    ("selection", "max_loss_24h"): (0.0, 0.05),
+    ("selection", "max_loss_streak"): (1, 8),
+    ("selection", "min_recent_win_rate"): (0.30, 1.0),
+    ("selection", "max_dd_7d"): (0.01, 0.20),
     ("sol", "start_equity"): (10, 1_000_000),
     ("sol", "risk_per_trade_pct"): (0.1, 2.0),
     ("sol", "stop_pct"): (5.0, 60.0),

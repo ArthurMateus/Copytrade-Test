@@ -136,21 +136,21 @@ def test_commands_from_telegram_and_discord(env):
     assert wait_for(lambda: GOOD in bot.sol.st.followed, timeout=40)
     assert wait_for(lambda: env.dc.connected() and env.dc.commands is not None, timeout=10)
     names = {c["name"] for c in env.dc.commands}
-    assert {"sol", "solleaders", "solflatten"} <= names                      # registered as slash commands
-    assert any(c["name"] == "solflatten" and c.get("options") for c in env.dc.commands)    # which needs the PIN
-    env.tg.say("/sol")
-    env.dc.interact("solleaders")
-    env.dc.interact("solpause", user="999")                                  # a stranger: refused
-    assert wait_for(lambda: "Solana (paper)" in env.tg_text(), timeout=10)
-    assert wait_for(lambda: "Solana leaders" in env.dc_text(), timeout=10)
+    assert {"fomo", "fomoleaders", "fomoflatten", "fomoreset", "hyperwallet", "hyperreset"} <= names                      # registered as slash commands
+    assert any(c["name"] == "fomoflatten" and c.get("options") for c in env.dc.commands)    # which needs the PIN
+    env.tg.say("/fomo")
+    env.dc.interact("fomoleaders")
+    env.dc.interact("fomopause", user="999")                                  # a stranger: refused
+    assert wait_for(lambda: "FOMO (paper)" in env.tg_text(), timeout=10)
+    assert wait_for(lambda: "FOMO leaders" in env.dc_text(), timeout=10)
     assert not bot.sol.st.entries_paused
-    env.dc.interact("solpause")
+    env.dc.interact("fomopause")
     assert wait_for(lambda: bot.sol.st.entries_paused, timeout=10)
-    env.tg.say("/solresume")
+    env.tg.say("/fomoresume")
     assert wait_for(lambda: not bot.sol.st.entries_paused, timeout=10)
-    env.tg.say("/solflatten wrong")
+    env.tg.say("/fomoflatten wrong")
     assert wait_for(lambda: "Wrong or missing PIN" in env.tg_text(), timeout=10)
-    env.dc.interact("solflatten", {"pin": PIN})
+    env.dc.interact("fomoflatten", {"pin": PIN})
     assert wait_for(lambda: bot.sol.st.entries_paused, timeout=10)
     assert PIN not in env.dc_text() and PIN not in env.tg_text()
 
@@ -174,8 +174,8 @@ def test_without_a_fomo_cookie_the_solana_book_stays_off_and_says_so(tmp_path):
     try:
         bot = e.start()
         assert bot.sol is None
-        e.tg.say("/sol")
-        assert wait_for(lambda: "Solana is off" in e.tg_text(), timeout=10)
+        e.tg.say("/fomo")
+        assert wait_for(lambda: "FOMO is off" in e.tg_text(), timeout=10)
         assert not (e.data / "sol" / "ledger.jsonl").exists()
     finally:
         e.close()
@@ -196,3 +196,60 @@ def test_a_wallet_that_fails_the_strict_rules_is_never_followed(tmp_path):
         assert not bot.sol.st.followed
     finally:
         e.close()
+
+
+def test_fomo_commands_end_to_end_including_the_reset_and_a_restart_after_it(env):
+    bot = env.start()
+    assert wait_for(lambda: GOOD in bot.sol.st.followed and GOOD in bot.sol.ready, timeout=40)
+    env.fomo.swaps[UID].append(make_swap("buy", MINT, 5_000_000, 50_000.0, int(time.time() * 1000), wallet=GOOD))
+    assert wait_for(lambda: MINT in bot.sol.st.positions, timeout=20)
+    env.tg.say("/fomotrades")
+    env.tg.say("/fomowallet")
+    env.tg.say("/fomotraders")
+    env.dc.interact("fomotrades")
+    assert wait_for(lambda: "FOMO trades" in env.tg_text() and "FOMO wallet" in env.tg_text()
+                    and "FOMO traders" in env.tg_text() and "GoodTrader" in env.tg_text(), timeout=15)
+    assert wait_for(lambda: "FOMO trades" in env.dc_text() and "MEME" in env.dc_text(), timeout=15)
+    # a reset is refused while a trade is open, and without the PIN
+    env.tg.say("/fomoreset wrong")
+    assert wait_for(lambda: "Wrong or missing PIN" in env.tg_text(), timeout=10)
+    env.tg.say(f"/fomoreset {PIN}")
+    assert wait_for(lambda: "FOMO reset refused" in env.tg_text(), timeout=10)
+    assert MINT in bot.sol.st.positions and bot.restart_at == 0
+    # flatten, then the reset goes through, archives the history and restarts the process
+    env.tg.say(f"/fomoflatten {PIN}")
+    assert wait_for(lambda: MINT not in bot.sol.st.positions, timeout=10)
+    env.tg.say(f"/fomoreset {PIN}")
+    assert wait_for(lambda: "FOMO reset done" in env.tg_text() and bot.restart_at > 0, timeout=10)
+    assert wait_for(lambda: not env.th.is_alive(), timeout=15)                      # the loop ended: the wrapper restarts it
+    arch = list((env.data / "sol" / "archive").iterdir())
+    assert len(arch) == 1 and (arch[0] / "ledger.jsonl").exists()
+    assert (env.data / "ledger.jsonl").exists() and not (env.data / "archive").exists()    # Hyperliquid untouched
+    env.stop()
+    bot = env.start()                                                                # what the wrapper does next
+    assert wait_for(lambda: GOOD in bot.sol.st.followed and GOOD in bot.sol.ready, timeout=30)
+    assert bot.sol.st.equity0 == 300.0 and not bot.sol.st.closed and not bot.sol.st.positions
+    assert bot.sol.st.realized == 0
+
+
+def test_hyper_commands_work_and_reset_only_hyperliquid(env):
+    bot = env.start()
+    assert wait_for(lambda: GOOD in bot.sol.st.followed, timeout=40)
+    sol_before = (env.data / "sol" / "ledger.jsonl").read_bytes()[:200]
+    for cmd, needle in [("/hyperstatus", "Status"), ("/hypertrades", "Trades"), ("/hypertraders", "Traders"),
+                        ("/hyperwallet", "Wallets"), ("/hyperprogress", "Longs"), ("/hyperpositions", "No open trades")]:
+        env.tg.say(cmd)
+        assert wait_for(lambda: needle in env.tg_text(), timeout=15), cmd
+    env.dc.interact("hyperwallet")
+    assert wait_for(lambda: "Wallets" in env.dc_text(), timeout=15)
+    env.tg.say("/hyperpause")
+    assert wait_for(lambda: bot.st.entries_paused, timeout=10)
+    env.tg.say("/hyperresume")
+    assert wait_for(lambda: not bot.st.entries_paused, timeout=10)
+    env.tg.say("/hyperreset wrong")
+    assert wait_for(lambda: "Wrong or missing PIN" in env.tg_text(), timeout=10)
+    env.tg.say(f"/hyperreset {PIN}")
+    assert wait_for(lambda: "Reset done" in env.tg_text() and bot.restart_at > 0, timeout=10)
+    assert (env.data / "archive").exists()                                           # the Hyperliquid history is archived
+    assert not (env.data / "sol" / "archive").exists()                               # the FOMO book is not
+    assert (env.data / "sol" / "ledger.jsonl").read_bytes()[:200] == sol_before

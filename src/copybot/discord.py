@@ -22,33 +22,38 @@ from websockets.sync.client import connect
 
 from copybot import log
 from copybot.config import Config
-from copybot.tg import COMMANDS, Command, TelegramUI, TgError
+from copybot.tg import COMMANDS, PIN_COMMANDS, SLASH_COMMANDS, Command, TelegramUI, TgError, canon
 
 GREEN, RED, ORANGE, BLURPLE = 0x2ECC71, 0xE74C3C, 0xF39C12, 0x5865F2
 MAX_EMBED = 4096
 
 DESCRIPTIONS = {
-    "/status": "Wallet, P&L and health (live)",
-    "/trades": "Open trades at live prices and P&L vs the start (live)",
-    "/traders": "Followed traders and what copying them made (live)",
-    "/wallets": "The same copies at 1/2/5/10/20% risk, compared (live)",
-    "/positions": "Short list of open trades",
-    "/leaders": "Followed traders, one line each (live)",
-    "/progress": "Success metrics of the test",
-    "/pause": "Pause new copies (exits and stops keep running)",
-    "/resume": "Resume new copies",
-    "/flatten": "Close EVERYTHING in every wallet and pause (needs the PIN)",
-    "/search": "Look for new traders now and re-pick the best 7",
-    "/reset": "Every wallet back to the start (no open trades); traders kept (needs the PIN)",
+    "/hyperstatus": "Hyperliquid: wallet, P&L and health (live)",
+    "/hypertrades": "Hyperliquid: open trades at live prices and P&L vs the start (live)",
+    "/hypertraders": "Hyperliquid: followed traders and what copying them made (live)",
+    "/hyperwallet": "Hyperliquid: the same copies at 1/2/5/10/20% risk, compared (live)",
+    "/hyperpositions": "Hyperliquid: short list of open trades",
+    "/hyperleaders": "Hyperliquid: followed traders, one line each (live)",
+    "/hyperprogress": "Hyperliquid: success metrics, long vs short",
+    "/hyperpause": "Hyperliquid: pause new copies (exits and stops keep running)",
+    "/hyperresume": "Hyperliquid: resume new copies",
+    "/hyperflatten": "Hyperliquid: close EVERYTHING in every wallet and pause (needs the PIN)",
+    "/hypersearch": "Hyperliquid: look for new traders now and re-pick the best 7",
+    "/hyperreset": "Hyperliquid: every wallet back to the start, no open trades, traders kept (needs the PIN)",
     "/restart": "Restart the bot",
     "/help": "List the commands",
-    "/sol": "Solana paper book: equity, P&L, health (live)",
-    "/solpositions": "Open Solana positions",
-    "/solleaders": "Followed Solana wallets (live)",
-    "/solprogress": "Solana book: success metrics",
-    "/solpause": "Pause new Solana copies (exits and stops keep running)",
-    "/solresume": "Resume new Solana copies",
-    "/solflatten": "Close every Solana position and pause (needs the PIN)",
+    "/fomo": "FOMO/Solana book: equity, P&L and health (live)",
+    "/fomotrades": "FOMO: open trades at live prices and P&L vs the start (live)",
+    "/fomotraders": "FOMO: followed traders and what copying them made (live)",
+    "/fomowallet": "FOMO: the paper wallet: cash, invested, realized, unrealized (live)",
+    "/fomopositions": "FOMO: short list of open trades",
+    "/fomoleaders": "FOMO: followed traders, one line each (live)",
+    "/fomoprogress": "FOMO: success metrics",
+    "/fomopause": "FOMO: pause new copies (exits and stops keep running)",
+    "/fomoresume": "FOMO: resume new copies",
+    "/fomoflatten": "FOMO: close every position and pause (needs the PIN)",
+    "/fomosearch": "FOMO: look for new traders now",
+    "/fomoreset": "FOMO: the wallet back to the start, no open trades, traders kept (needs the PIN)",
 }
 
 _TAG = re.compile(r"(</?(?:b|i|code|pre)>)")
@@ -212,9 +217,9 @@ class DiscordUI(TelegramUI):
         """Guild slash commands appear at once (global ones can take an hour)."""
         guild = self.api.call("GET", f"/channels/{self.channel}")["guild_id"]
         cmds = []
-        for c in COMMANDS:
+        for c in SLASH_COMMANDS:
             cmd = {"name": c[1:], "description": DESCRIPTIONS.get(c, c[1:]), "type": 1}
-            if c in ("/flatten", "/reset", "/solflatten"):
+            if canon(c) in PIN_COMMANDS:
                 cmd["options"] = [{"type": 3, "name": "pin", "description": "Your COPYBOT_PIN", "required": True}]
             cmds.append(cmd)
         self.api.call("PUT", f"/applications/{app_id}/guilds/{guild}/commands", cmds)
@@ -237,9 +242,10 @@ class DiscordUI(TelegramUI):
             return self._reply(d, "⛔ Only the owner can command this bot.")
         if name not in COMMANDS:
             return self._reply(d, "❓ Unknown command.")
+        name = canon(name)
         opts = {o["name"]: o.get("value", "") for o in (d.get("data") or {}).get("options") or []}
         log.info("discord_command", cmd=name)     # never the argument (may be the PIN)
-        self._reply(d, f"👍 {name}" + (" (results in the channel)" if name not in ("/pause", "/resume", "/restart")
+        self._reply(d, f"👍 {name}" + (" (results in the channel)" if name not in ("/pause", "/resume", "/restart", "/fomopause", "/fomoresume")
                                         else ""))
         self.on_command(Command(name, str(opts.get("pin", "")).strip()))
 

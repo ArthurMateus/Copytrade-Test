@@ -136,7 +136,12 @@ class Scorer:
                                           min_win_rate=cfg.selection.min_win_rate, min_score=cfg.selection.min_score,
                                           min_profit_factor=cfg.selection.min_profit_factor,
                                           max_dd_cap=cfg.selection.max_drawdown,
-                                          max_open_loss=cfg.selection.max_open_loss)
+                                          max_open_loss=cfg.selection.max_open_loss,
+                                          max_loss_7d=cfg.selection.max_loss_7d,
+                                          max_loss_24h=cfg.selection.max_loss_24h,
+                                          max_loss_streak=cfg.selection.max_loss_streak,
+                                          min_recent_win_rate=cfg.selection.min_recent_win_rate,
+                                          max_dd_7d=cfg.selection.max_dd_7d)
         # results of an older screen/score version, or scored under other eligibility floors, are redone
         # (screened wallets are rescored from the disk cache at startup: see rescore_missing)
         self.screened: dict = {a: d for a, d in self.cache.get("screened.json", {}).items()

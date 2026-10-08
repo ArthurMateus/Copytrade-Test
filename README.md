@@ -47,13 +47,31 @@ Run the tests: `uv run pytest` (about 2 minutes; this includes real-process kill
 | Telegram commands and in-place edited cards | `tg.py`, `tgfmt.py` |
 | Threads and the trading loop | `runner.py` |
 
-Telegram commands: `/status`, `/trades` (open trades at live prices and P&L against the $300 start), `/traders`
-(followed traders: score, copied trades, wins/losses, money made), `/wallets` (the same copies at 1/2/5/10/20% risk,
-compared) and `/leaders` (live cards, edited in place),
-`/positions`, `/progress`, `/search` (look for new traders now and re-pick the best 7), `/reset <PIN>` (every wallet back
-to the start, traders kept, old history archived), `/restart`, `/pause`,
-`/resume`, and `/flatten <PIN>`. Each open trade gets one message, which is edited until it becomes the final
-✅/❌ summary.
+Commands (Telegram `/x`; Discord shows the same names as slash commands). The bot has two books that run at the same
+time in one process, each with its own family of commands:
+
+| Hyperliquid | FOMO (Solana) | What it does |
+|---|---|---|
+| `/hyperstatus` | `/fomo` | wallet, P&L, health (live card) |
+| `/hypertrades` | `/fomotrades` | open trades at live prices and P&L against the $300 start (live) |
+| `/hypertraders` | `/fomotraders` | followed traders: score, copied trades, wins/losses, money made (live) |
+| `/hyperwallet` | `/fomowallet` | Hyperliquid: the same copies at 1/2/5/10/20% risk, compared. FOMO: cash, invested, fees, loss limits |
+| `/hyperpositions` | `/fomopositions` | short list of open trades |
+| `/hyperleaders` | `/fomoleaders` | followed wallets, one line each (live) |
+| `/hyperprogress` | `/fomoprogress` | success metrics (Hyperliquid also shows longs and shorts separately) |
+| `/hypersearch` | `/fomosearch` | look for new traders now |
+| `/hyperpause`, `/hyperresume` | `/fomopause`, `/fomoresume` | stop / allow new entries (exits always run) |
+| `/hyperflatten <PIN>` | `/fomoflatten <PIN>` | close everything of that book and pause it |
+| `/hyperreset <PIN>` | `/fomoreset <PIN>` | that book back to the start ($300, no history, traders kept, old history archived; refused while a trade is open) |
+
+Plus `/help` and `/restart`. The short Hyperliquid names (`/status`, `/trades`, `/reset`, ...) still work on Telegram.
+Each open trade gets one message, which is edited until it becomes the final ✅/❌ summary. A reset restarts the
+process, so run the bot in the restart loop below. `/hyperreset` never touches FOMO and `/fomoreset` never touches Hyperliquid.
+
+**Is the trader losing right now?** Besides the long history, a Hyperliquid wallet is only eligible if it is not in a bad
+stretch: at most 3% of its account lost in 7 days (open losses count), 1.5% in 24 hours, no more than 4 losing round
+trips in a row, at least 45% of its last 15 round trips won, and no drop above 10% of its hourly equity within 7 days
+(`config/selection.toml`, with hard ranges).
 
 ### Design choices the spec left open
 - **Copy size:** each open risks 1% of equity: size = 1% × equity / (3% stop distance), which is about $100 notional at $300.
@@ -113,11 +131,10 @@ the paper fill uses the pool price when the stop is seen.
    commands next to the others, and the Solana cards are posted and edited in place on Discord too.
 3. Open a NEW terminal and `uv run copybot`.
 
-Commands (Telegram `/x`, Discord slash `/x`; only the owner can use them): `/sol` (live book card), `/solpositions`,
-`/solleaders` (live), `/solprogress`, `/solpause`, `/solresume`, `/solflatten <PIN>`, plus all the Hyperliquid commands.
+Commands: the `/fomo...` column of the table above (only the owner can use them).
 
 **Limits to know.** The bot sees a leader's trades by polling FOMO every few seconds (`poll_leader_s`), so the copy lag is
-several seconds, not sub-second; it is measured and shown in `/solprogress`. FOMO is a private, undocumented API and its
+several seconds, not sub-second; it is measured and shown in `/fomoprogress`. FOMO is a private, undocumented API and its
 cookie can expire without notice. Both are logged and alerted, never hidden.
 
 ## Findings from the real API (recorded in `tests/fixtures`, re-record with `tools/record_samples.py`)

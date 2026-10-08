@@ -35,6 +35,7 @@ class SolScorer:
         self.stop = threading.Event()
         self.focus: set[str] = set()
         self.auth_ok = True
+        self.search_req = threading.Event()      # /fomosearch: review the leaderboards now
 
     def uid(self, address: str) -> str | None:
         return (self.users.get(address) or {}).get("uid")
@@ -51,7 +52,11 @@ class SolScorer:
             self.maybe_cycle(force=True)
         while not self.stop.is_set():
             try:
-                if self.now() - self.meta["last_review"] >= DAY:
+                if self.search_req.is_set():
+                    self.search_req.clear()
+                    self.review()
+                    self.maybe_cycle(force=True)
+                elif self.now() - self.meta["last_review"] >= DAY:
                     self.review()
                 self.maybe_cycle()
             except AuthError as e:
