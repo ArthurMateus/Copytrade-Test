@@ -15,7 +15,7 @@ API (recorded from the web app 2026-10-09, tests/fixtures/invo_*.json), all POST
                                          -> {"investmentsTicker": [{"id", "ticker", "directionLong", "leverage",
                                              "entryPrice", "priceTarget", "stopLoss", "positionSize", "isOpen",
                                              "createdAt", "closedAt", "closingPrice", "reasonClosed", ...}]}
-Auth (from the app's code): requests carry "Authorization: Bearer <access token>"; POST /v1_0/auth/refresh_token with
+Auth (from the app's code): requests carry "Authorization: Bearer <access token>"; GET /v1_0/auth/refresh_token with
 "Authorization: Bearer <refresh token>" answers {"accessToken", "refreshToken", "success", "error"}. Every refresh
 hands out a NEW refresh token (written back to INVO_TOKEN_FILE), which is why the bot needs its own account: two
 programs sharing one login would keep logging each other out.
@@ -156,9 +156,10 @@ class InvoClient:
         return tok
 
     def refresh(self) -> None:
-        req = urllib.request.Request(self.base + "/auth/refresh_token", b"{}",
-                                     {"Authorization": "Bearer " + self._refresh_token(),
-                                      "Content-Type": "application/json", "User-Agent": "copybot-paper/1"})
+        # GET (verified 2026-10-09: POST answers 405 Method Not Allowed)
+        req = urllib.request.Request(self.base + "/auth/refresh_token", method="GET",
+                                     headers={"Authorization": "Bearer " + self._refresh_token(),
+                                              "User-Agent": "copybot-paper/1"})
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
                 body = json.loads(r.read())

@@ -50,11 +50,9 @@ class FakeInvo:
                 self.end_headers()
                 self.wfile.write(b)
 
-            def do_POST(self):
-                n = int(self.headers.get("Content-Length") or 0)
-                body = json.loads(self.rfile.read(n) or b"{}")
+            def do_GET(self):                     # the real API renews the login with GET only
                 path = self.path.split("/v1_0", 1)[-1]
-                fake.requests.append((path, body))
+                fake.requests.append((path, {}))
                 auth = self.headers.get("Authorization", "")
                 if path == "/auth/refresh_token":
                     if fake.refuse_refresh or auth != "Bearer " + fake.valid_refresh:
@@ -63,6 +61,16 @@ class FakeInvo:
                     fake.valid_access, fake.valid_refresh = f"ACCESS{k}", f"REFRESH{k}"
                     return self._send(200, {"accessToken": fake.valid_access, "refreshToken": fake.valid_refresh,
                                             "success": True, "error": None})
+                return self._send(405, {"detail": "Method Not Allowed"})
+
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(n) or b"{}")
+                path = self.path.split("/v1_0", 1)[-1]
+                fake.requests.append((path, body))
+                auth = self.headers.get("Authorization", "")
+                if path == "/auth/refresh_token":
+                    return self._send(405, {"detail": "Method Not Allowed"})       # as the real API answers
                 if not fake.valid_access or auth != "Bearer " + fake.valid_access:
                     return self._send(401, {"status": "error", "message": "Missing authorization header"})
                 return self._send(200, fake.answer(path, body))
