@@ -356,7 +356,8 @@ class SolBot:
                      + (f" · +{len(plan.joins)} new" if plan and plan.joins else "")
                      + (f" · −{len(plan.drops)} dropped" if plan and plan.drops else "")
                      + (f"\nBest: {esc(top)}" if top else
-                        "\nNobody passed the strict rules this time; the next search runs in 24 h (or /fomosearch)."))
+                        "\nNobody passed the strict rules this time; the next search runs in 24 h (or /fomosearch).")
+                     + (f"\n{why}" if (why := fmt.reject_summary(scores)) else ""))
 
     def apply_plan(self, plan, scores: dict) -> None:
         now = now_ms()

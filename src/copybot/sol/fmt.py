@@ -283,3 +283,32 @@ FOMO_HELP = ("🪙 <b>FOMO / Solana (paper)</b>\n"
              "/fomoreset &lt;PIN&gt; – the FOMO wallet back to the start (no open trades), traders kept")
 
 SOL_HELP = FOMO_HELP     # old name
+
+
+REJECT_TEXT = (("pnl<=0", "lost money (30 d)"), ("not_profitable_7d", "lost money this week"),
+               ("losing_today", "losing today"), ("win_rate<", "win rate too low"),
+               ("profit_factor<", "profit factor too low"), ("positive_weeks<", "under 3 winning weeks of 4"),
+               ("one_trade_too_big", "profit from one lucky trade"), ("top3_trades_too_big", "profit from 3 trades"),
+               ("one_token_too_big", "profit from one token"), ("sniper_holds_too_short", "holds for seconds"),
+               ("holding_a_lot", "holding a big bag"), ("open_bag_vs_pnl", "open bag bigger than its profit"),
+               ("max_drawdown", "big drop"), ("current_drawdown", "in a drop right now"),
+               ("copy_edge_too_low", "would not pay after our costs"), ("trades<", "too few trades"),
+               ("active_days<", "too few active days"), ("history<", "history too short"),
+               ("too_busy", "trades too often to read"), ("no_swaps", "no USDC trades seen"),
+               ("no_round_trips", "no finished trades"))
+
+
+def reject_text(code: str) -> str:
+    return next((t for k, t in REJECT_TEXT if code.startswith(k)), code)
+
+
+def reject_summary(scores: dict, top: int = 6) -> str:
+    """Why the scored wallets failed: the most common rules, and how many missed by a single rule."""
+    from collections import Counter
+    bad = [s for s in scores.values() if not s.get("eligible")]
+    if not bad:
+        return ""
+    n = Counter(reject_text(r) for s in bad for r in dict.fromkeys(s.get("reasons") or []))
+    one = sum(1 for s in bad if len(s.get("reasons") or []) == 1)
+    parts = " · ".join(f"{esc(k)} {v}" for k, v in n.most_common(top))
+    return f"Why they failed (out of {len(bad)}): {parts}" + (f"\n{one} missed by just one rule" if one else "")

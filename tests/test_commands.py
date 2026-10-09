@@ -273,3 +273,15 @@ def test_a_partial_ranking_during_a_search_does_not_say_nobody_passed(sol):
     bot.rec({"ev": "sel", "state": {"at": 0, "streaks": {}}})
     bot.on_ranking([], 10, {"W": {"eligible": False}})                    # an hourly cycle after the search: says it
     assert any("passed the strict scoring" in m for m in chat.sent)
+
+
+def test_search_done_says_why_the_wallets_failed(sol):
+    bot, chat, _ = sol
+    scores = {"W1": {"eligible": False, "reasons": ["pnl<=0", "win_rate<40%"]},
+              "W2": {"eligible": False, "reasons": ["pnl<=0"]},
+              "W3": {"eligible": False, "reasons": ["too_busy>2000tx"]}}
+    bot.on_review(3, 3, 0, [], scores)
+    msg = chat.sent[-1]
+    assert "Nobody passed" in msg and "Why they failed (out of 3)" in msg
+    assert "lost money (30 d) 2" in msg and "win rate too low 1" in msg and "trades too often to read 1" in msg
+    assert "2 missed by just one rule" in msg
