@@ -846,6 +846,9 @@ class Bot:
             w.ledger.close()
 
 
+DEFAULT_INVO_TOKEN = os.path.join("secrets", "invo.token")   # used when INVO_TOKEN_FILE is not set
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description="Hyperliquid copy-trading bot - PAPER MODE ONLY")
     ap.add_argument("--config", default="config")
@@ -858,6 +861,10 @@ def main(argv: list[str] | None = None) -> None:
     for s in (cfg.tg_token, cfg.pin, cfg.dc_token, cfg.helius_key):
         log.add_secret(s)
     log.setup(cfg.runtime.log_dir)
+    if not cfg.invo_token_file and os.path.exists(DEFAULT_INVO_TOKEN):
+        # same default as tools/invo_check.py: a terminal opened before `setx INVO_TOKEN_FILE` still finds it
+        cfg.invo_token_file = os.path.abspath(DEFAULT_INVO_TOKEN)
+        log.info("invo_token_file", source="default secrets/invo.token")
     bot = Bot(cfg)
     try:
         bot.run()
