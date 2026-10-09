@@ -37,11 +37,13 @@ class PositionManager:
     def __init__(self, cfg: Config, st: State, ledger: Ledger, gate: RiskGate, broker: PaperBroker,
                  health: Callable[[], Health], mids: dict[str, float], assets: dict[str, Asset],
                  notify: Callable[..., None] = lambda *a, **k: None,
-                 score_of: Callable[[str], float] = lambda leader: 0.0, pause_leaders: bool = True):
+                 score_of: Callable[[str], float] = lambda leader: 0.0, pause_leaders: bool = True,
+                 sizer: Callable[[Move, float, float], float] | None = None):
         self.cfg, self.st, self.ledger, self.gate, self.broker = cfg, st, ledger, gate, broker
         self.health, self.mids, self.assets, self.notify = health, mids, assets, notify
         self.score_of = score_of   # wallet score 0-100 of a leader (0 when unknown)
         self.pause_leaders = pause_leaders   # False for side wallets: they follow the main wallet's pauses
+        self.sizer = sizer   # (move, price, our equity) -> wanted size; None = fixed risk (the gate still clamps)
 
     # ---- ledger helpers -----------------------------------------------------------------------
     def _rec(self, ev: dict) -> dict:
@@ -207,7 +209,8 @@ class PositionManager:
         side = m.new_side
         asset = self.assets.get(m.coin)
         px = self.mids.get(m.coin) or m.px
-        want = self.gate.entry_size(self.st.equity(self.mids), px)
+        eq = self.st.equity(self.mids)
+        want = self.sizer(m, px, eq) if self.sizer else self.gate.entry_size(eq, px)
         d = self.gate.check(Order("open", m.coin, side, want, px, leader=m.leader, fill_time_ms=m.time_ms),
                             self.st, h, self.mids, asset)
         if not d:

@@ -406,3 +406,15 @@ def test_repo_config_turns_the_gates_on_and_changing_them_redoes_cached_scores()
     a = scoring.ScoreParams(**STRICT).rules()
     b = scoring.ScoreParams(**{**STRICT, "max_loss_7d": 0.05}).rules()
     assert a != b                      # a score made under other floors is recomputed
+
+
+def test_one_big_win_carrying_the_profit_is_rejected_when_the_owner_caps_it():
+    """Owner request 2026-10-09: a lower win-rate floor, but no wallet whose profit is one lucky trade."""
+    raw, cs = trader(NOW, trips=300, win=0.55, seed=5, big_winner=400)
+    p = scoring.ScoreParams(max_best_trade_share=0.30)
+    s = scoring.full_score("0xluck", parse(raw), cand(cs), 200_000, NOW, p)
+    assert s.concentration > 0.30 and "one_trade>30%_of_profit" in s.reasons and not s.eligible
+    good, gcs = trader(NOW, trips=500, win=0.75)
+    g = scoring.full_score("0xgood", parse(good), cand(gcs), 200_000, NOW, p)
+    assert g.concentration <= 0.30 and g.eligible, g.reasons
+    assert p.rules()["max_best_trade_share"] == 0.30          # part of the rules: cached scores are redone

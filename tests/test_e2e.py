@@ -131,7 +131,8 @@ def test_full_bot_in_process(env):
         tg.say("/traders")
         assert wait_for(lambda: any("👥 <b>Traders</b>" in m["text"] for m in tg.sent))
         # side wallets copied the same open at their own risk
-        assert [w.risk_pct for w in bot.sides] == [2.0, 5.0, 10.0, 20.0]
+        assert [w.risk_pct for w in bot.sides if not w.name.startswith("mirror")] == [2.0, 5.0, 10.0, 20.0]
+        assert [w.name for w in bot.sides if w.name.startswith("mirror")] == ["mirror_x10"]
         assert all("ETH" in w.st.positions for w in bot.sides[:2])
         r5 = next(w for w in bot.sides if w.risk_pct == 5.0).st.positions["ETH"]
         assert r5.risk_usd() == pytest.approx(5 * bot.st.positions["ETH"].risk_usd(), rel=0.05)
@@ -269,7 +270,7 @@ def test_random_kills_never_lose_a_position_or_its_stop(env):
         for coin, szi in list(hl.positions.get(LEADER, {}).items()):
             hl.push_fills(LEADER, [make_fill(coin, hl.mids[coin], abs(szi), "A", szi)])
         ledgers = [data, *sorted(p for p in (data / "wallets").iterdir())]
-        assert len(ledgers) == 5
+        assert len(ledgers) == 6            # main + 4 risk levels + the mirror wallet
         assert wait_for(lambda: not any(Ledger(d / "ledger.jsonl").replay().positions for d in ledgers), timeout=20)
         for d in ledgers:                                  # in EVERY wallet: nothing opened twice, nothing left
             evs = ledger_events(d)
@@ -340,7 +341,7 @@ def test_search_repicks_the_best_seven_now(env):
         tg.say("/search")
         assert wait_for(lambda: set(bot.st.followed) == set(TOP[:7]))     # at once: no window, no 2 checks
         assert LEADER in bot.st.dropped                                     # it is not in the ranking any more
-        assert all(set(w.st.followed) == set(TOP[:7]) for w in bot.sides)
+        assert wait_for(lambda: all(set(w.st.followed) == set(TOP[:7]) for w in bot.sides))   # synced just after
         assert wait_for(lambda: any("following 7 new, dropping 1" in m["text"] for m in tg.sent))
         assert bot.search_pending
         better = [f"0x{i:040x}" for i in range(50, 52)] + TOP          # the background search found 2 better ones
@@ -407,10 +408,36 @@ def test_hyperadd_queues_the_wallet_and_follows_it_when_it_passes(env):
         good = {"eligible": True, "score": 88, "trades": 120, "win_rate": 0.7, "profit_factor": 3}
         bot.q.put(("added", new.lower(), {"ok": True}, good, [new.lower()], {new.lower(): good}))
         assert wait_for(lambda: new.lower() in bot.st.followed)
-        assert all(new.lower() in w.st.followed for w in bot.sides)
+        assert wait_for(lambda: all(new.lower() in w.st.followed for w in bot.sides))
         bad = "0x" + "d2" * 20
         bot.q.put(("added", bad, {"ok": True}, {"eligible": False, "reasons": ["win_rate<60%"]}, [], {}))
         assert wait_for(lambda: any("fails the strict rules: win_rate&lt;60%" in m["text"] for m in tg.sent))
         assert bad not in bot.st.followed
+    finally:
+        stop_bot(bot, th)
+
+
+def test_mirror_wallet_sizes_copies_by_the_leaders_share_of_its_account(env):
+    """The leader's account is worth ~541,765$ (recorded clearinghouseState). A 1 ETH buy (~3,000$) is 0.55% of it:
+    the mirror wallet buys 10 x 0.55% = 5.5% of its 300$ (~16.6$). A tiny buy is lifted to the 10$ minimum, and
+    the main wallet keeps its fixed-risk size."""
+    hl, tg, data, cdir = env
+    bot, th = start_bot(env)
+    try:
+        mirror = next(w for w in bot.sides if w.name.startswith("mirror"))
+        assert wait_for(lambda: bot.leader_value.get(LEADER, 0) > 500_000, timeout=10)
+        hl.push_fills(LEADER, [leader_fill(hl, "ETH", 1, "B")])
+        assert wait_for(lambda: "ETH" in mirror.st.positions and "ETH" in bot.st.positions, timeout=10)
+        p = mirror.st.positions["ETH"]
+        share = 1 * 3000.0 / bot.leader_value[LEADER]
+        assert p.size * p.entry_px == pytest.approx(share * 10 * 300, rel=0.05)
+        main = bot.st.positions["ETH"]
+        assert main.size * main.entry_px > 60                               # fixed 1% risk at a 3% stop: ~100$
+        hl.push_fills(LEADER, [leader_fill(hl, "SOL", 0.5, "B")])          # 75$ of 541k: 0.014% -> lifted to 10$
+        assert wait_for(lambda: "SOL" in mirror.st.positions, timeout=10)
+        q = mirror.st.positions["SOL"]
+        assert 10 <= q.size * q.entry_px < 12
+        tg.say("/hyperwallet")
+        assert wait_for(lambda: any("mirror x10 (their % of account)" in m["text"] for m in tg.sent + tg.edits))
     finally:
         stop_bot(bot, th)

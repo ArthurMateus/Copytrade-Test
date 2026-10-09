@@ -297,6 +297,7 @@ class ScoreParams:
     max_loss_streak: int = 99      # consecutive losing round trips, most recent first
     min_recent_win_rate: float = 0.0   # win rate of the last 15 round trips
     max_dd_7d: float = 1.0         # drawdown of the hourly equity curve within the last 7 days
+    max_best_trade_share: float = 1.0  # best round trip / total pnl (one lucky trade must not carry the wallet)
 
     def rules(self) -> dict:
         """The eligibility floors: a cached score made under other floors is redone."""
@@ -304,7 +305,8 @@ class ScoreParams:
                 "min_profit_factor": self.min_profit_factor, "max_dd_cap": self.max_dd_cap,
                 "max_open_loss": self.max_open_loss, "max_loss_7d": self.max_loss_7d,
                 "max_loss_24h": self.max_loss_24h, "max_loss_streak": self.max_loss_streak,
-                "min_recent_win_rate": self.min_recent_win_rate, "max_dd_7d": self.max_dd_7d}
+                "min_recent_win_rate": self.min_recent_win_rate, "max_dd_7d": self.max_dd_7d,
+                "max_best_trade_share": self.max_best_trade_share}
 
 
 # component -> weight; the weights add up to 100
@@ -463,6 +465,7 @@ def full_score(address: str, fills: list[Fill], candles: dict[str, list[Candle]]
         (s.loss_streak <= p.max_loss_streak, f"{p.max_loss_streak + 1}+_losses_in_a_row"),
         (s.recent_win_rate >= p.min_recent_win_rate, f"recent_win_rate<{p.min_recent_win_rate * 100:.0f}%"),
         (s.dd_7d <= p.max_dd_7d, f"week_drawdown>{p.max_dd_7d * 100:g}%"),
+        (s.concentration <= p.max_best_trade_share, f"one_trade>{p.max_best_trade_share * 100:g}%_of_profit"),
     ]
     s.points = points(s, p)
     if sum(s.points.values()) < p.min_score:

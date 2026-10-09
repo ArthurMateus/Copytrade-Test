@@ -6,7 +6,8 @@ drop_rank = 15                # drop when rank > this ...                   [8, 
 confirm_cycles = 2            # ... for this many consecutive cycles         [2, 10]
 min_follow_hours = 24.0       # never drop a good leader followed for less than this (bad ones leave at once)
 change_cooldown_hours = 24.0  # new leaders join at most once per this many hours  [0, 168]
-min_win_rate = 0.60           # a wallet needs at least this win rate to be eligible  [0, 1]
+min_win_rate = 0.45           # a wallet needs at least this win rate to be eligible  [0, 1]
+max_best_trade_share = 0.30   # ... and no single trade may be more than this share of its profit  [0.05, 1]
 min_score = 70.0              # ... at least this score out of 100  [1, 100]
 min_profit_factor = 2.0       # ... and a profit factor (money won / money lost) of at least this  [1, 10]
 max_drawdown = 0.30           # ... and a biggest fall from a peak of at most this (0.30 = 30%)  [0.05, 1]

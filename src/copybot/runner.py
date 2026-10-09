@@ -90,6 +90,13 @@ class Bot:
         self.sides = [SideWallet(cfg, r, self.data, side_broker, self.health, self.mids, self.assets,
                                  alts_ok=self.gate.alts_ok, score_of=self.score_of)
                       for r in cfg.risk.side_wallets_risk_pct]
+        self.leader_value: dict[str, float] = {}   # followed leader -> perp account value (refreshed every 5 min)
+        if cfg.risk.mirror_wallet:
+            m = cfg.risk.mirror_mult
+            self.sides.append(SideWallet(cfg, cfg.risk.mirror_limits_pct, self.data, side_broker, self.health,
+                                         self.mids, self.assets, alts_ok=self.gate.alts_ok, score_of=self.score_of,
+                                         name=f"mirror_x{m:g}", label=f"mirror x{m:g} (their % of account)",
+                                         sizer=self.mirror_size))
         self.det = Detector()
         on_cmd = lambda c: self.q.put(("cmd", c))
         self.ui = MultiUI(TelegramUI(cfg, on_cmd, lambda k, m: self.q.put(("card", k, m))),
@@ -187,7 +194,7 @@ class Bot:
             w.rec({"ev": "boot", "positions": len(w.st.positions), "followed": len(w.st.followed)})
             side_problems = boot_repair(w.st, w.rec, w.gate, w.name)
             if side_problems:
-                self.ui.send(f"⚠️ <b>Side wallet {w.risk_pct:g}% restarted with uncertainty</b> · ⏸️ its entries "
+                self.ui.send(f"⚠️ <b>Side wallet {tgfmt.esc(w.label)} restarted with uncertainty</b> · ⏸️ its entries "
                              f"paused\n" + "\n".join(f"• {tgfmt.esc(x)}" for x in side_problems[:5])
                              + "\n/resume resumes every wallet.")
             if self.st.entries_paused and not w.st.entries_paused:
@@ -225,6 +232,21 @@ class Bot:
         return {a for st in (self.st, *(w.st for w in self.sides)) for p in st.positions.values()
                 for a in (p.leader, *p.backers)}
 
+    def mirror_size(self, m, px: float, equity: float) -> float:
+        """Mirror wallet: the leader's new position as a share of its account value (leverage included), times
+        mirror_mult, of our equity; at least the minimum notional. Unknown account value: the fixed 1% risk size.
+        The wallet's RiskGate then clamps it like any other copy."""
+        r = self.cfg.risk
+        v = self.leader_value.get(m.leader, 0.0)
+        if v <= 0 or px <= 0:
+            log.info("mirror_size_fallback", leader=m.leader, coin=m.coin, why="account value unknown")
+            return equity * r.risk_per_trade_pct / 100 / (px * r.stop_pct / 100)
+        share = abs(m.end_pos) * (m.px or px) / v
+        notional = max(share * r.mirror_mult * equity, r.min_notional_usd * 1.05)
+        log.info("mirror_size", leader=m.leader, coin=m.coin, leader_pct=round(share * 100, 3),
+                 want_usd=round(notional, 2))
+        return notional / px
+
     def score_dict(self, leader: str) -> dict:
         return self.scores.get(leader) or self.scorer.scores.get(leader) or {}
 
@@ -251,7 +273,7 @@ class Bot:
 
     def sync_worker(self) -> None:
         rt = self.cfg.runtime
-        last_rec, last_meta = 0.0, 0.0
+        last_rec, last_meta, last_values = 0.0, 0.0, 0.0
         while not self.stop.is_set():
             try:
                 hour_start = (time.time() // 3600) * 3600
@@ -263,6 +285,13 @@ class Bot:
                     last_rec = time.time()
                     for leader in sorted(self.leaders_with_positions):
                         self.q.put(("leader_pos", leader, self.info.positions(leader, rt.trading_timeout_s)))
+                if self.cfg.risk.mirror_wallet and time.time() - last_values >= 300:
+                    last_values = time.time()
+                    for leader in sorted(self.st.followed):        # BULK class: never competes with exits
+                        try:
+                            self.leader_value[leader] = self.info.account(leader, timeout=10).value
+                        except Exception as e:
+                            log.warn("leader_value_failed", leader=leader, err=f"{type(e).__name__}"[:60])
             except Exception as e:
                 log.warn("sync_worker", err=f"{type(e).__name__}: {e}"[:200])
             self.stop.wait(1.0)
@@ -541,7 +570,7 @@ class Bot:
             return tgfmt.traders_card(self.st, self.mids, self.ranks, self.scores, now)
         if key == "wallets":
             return tgfmt.wallets_card([(self.cfg.risk.risk_per_trade_pct, self.st, True)]
-                                      + [(w.risk_pct, w.st, False) for w in self.sides], self.mids, now)
+                                      + [(w.risk_pct, w.st, False, w.label) for w in self.sides], self.mids, now)
         return tgfmt.leaders_card(self.st, self.ranks, now, self.scores)
 
     # ---- commands ------------------------------------------------------------------------------------

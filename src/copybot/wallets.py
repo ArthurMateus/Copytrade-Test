@@ -23,9 +23,12 @@ def wallet_name(risk_pct: float) -> str:
 
 class SideWallet:
     def __init__(self, base: config.Config, risk_pct: float, data_dir: Path, broker: PaperBroker, health,
-                 mids: dict, assets: dict, alts_ok: Callable[[str], bool], score_of: Callable[[str], float]):
+                 mids: dict, assets: dict, alts_ok: Callable[[str], bool], score_of: Callable[[str], float],
+                 name: str = "", label: str = "", sizer=None):
+        """`sizer` (the mirror wallet): its own copy sizes; `risk_pct` then only sets the limits that clamp them."""
         self.risk_pct = risk_pct
-        self.name = wallet_name(risk_pct)
+        self.name = name or wallet_name(risk_pct)
+        self.label = label or f"{risk_pct:g}% risk"
         self.cfg = config.scaled(base, risk_pct)
         path = Path(data_dir) / "wallets" / self.name
         path.mkdir(parents=True, exist_ok=True)
@@ -33,7 +36,7 @@ class SideWallet:
         self.st: State = self.ledger.replay()
         self.gate = RiskGate(self.cfg, alts_ok=alts_ok)
         self.pm = PositionManager(self.cfg, self.st, self.ledger, self.gate, broker, health, mids, assets,
-                                  score_of=score_of, pause_leaders=False)
+                                  score_of=score_of, pause_leaders=False, sizer=sizer)
 
     def rec(self, ev: dict) -> dict:
         ev = self.ledger.append(ev)

@@ -55,7 +55,7 @@ time in one process, each with its own family of commands:
 | `/hyperstatus` | `/fomo` | wallet, P&L, health (live card) |
 | `/hypertrades` | `/fomotrades` | open trades at live prices and P&L against the $300 start (live) |
 | `/hypertraders` | `/fomotraders` | followed traders: score, copied trades, wins/losses, money made (live) |
-| `/hyperwallet` | `/fomowallet` | Hyperliquid: the same copies at 1/2/5/10/20% risk, compared. FOMO: cash, invested, fees, loss limits |
+| `/hyperwallet` | `/fomowallet` | Hyperliquid: the same copies at 1/2/5/10/20% risk, plus the **mirror x10** wallet (each copy sized as the trader's position / its account value x 10 of our 300$, at least 10$, capped like the 5% wallet), compared. FOMO: cash, invested, fees, loss limits |
 | `/hyperpositions` | `/fomopositions` | short list of open trades |
 | `/hyperleaders` | `/fomoleaders` | followed wallets, one line each (live) |
 | `/hyperprogress` | `/fomoprogress` | success metrics (Hyperliquid also shows longs and shorts separately) |

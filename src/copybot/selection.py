@@ -138,6 +138,7 @@ class Scorer:
                                           max_dd_cap=cfg.selection.max_drawdown,
                                           max_open_loss=cfg.selection.max_open_loss,
                                           max_loss_7d=cfg.selection.max_loss_7d,
+                                          max_best_trade_share=cfg.selection.max_best_trade_share,
                                           max_loss_24h=cfg.selection.max_loss_24h,
                                           max_loss_streak=cfg.selection.max_loss_streak,
                                           min_recent_win_rate=cfg.selection.min_recent_win_rate,

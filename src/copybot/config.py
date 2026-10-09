@@ -42,6 +42,11 @@ class Risk:
     consensus_risk_pct: float = 0.5       # extra risk when a 2nd followed leader opens the same side (symbol cap still applies)
     # extra paper wallets copying the same moves at these risk levels (every limit scaled, see `scaled`)
     side_wallets_risk_pct: list = field(default_factory=lambda: [2.0, 5.0, 10.0, 20.0])
+    # mirror side wallet (owner request 2026-10-09): sizes each copy as the leader's position / its account value,
+    # times mirror_mult, of our equity (at least min_notional_usd); the caps are those of a mirror_limits_pct wallet
+    mirror_wallet: bool = True
+    mirror_mult: float = 10.0
+    mirror_limits_pct: float = 5.0
 
 
 @dataclass
@@ -60,7 +65,8 @@ class Selection:
     confirm_cycles: int = 2
     min_follow_hours: float = 24.0
     change_cooldown_hours: float = 24.0   # new leaders join at most this often (bad ones still leave at once)
-    min_win_rate: float = 0.60            # eligible only with at least this win rate ...
+    min_win_rate: float = 0.45            # eligible only with at least this win rate (60% until 2026-10-09) ...
+    max_best_trade_share: float = 0.30    # ... and no single trade made more than this share of its profit ...
     min_score: float = 70.0               # ... at least this score (0-100) ...
     min_profit_factor: float = 2.0        # ... and won at least this much per 1$ lost ...
     max_drawdown: float = 0.30            # ... and never fell more than this from a peak (low swings) ...
@@ -268,6 +274,9 @@ CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
     ("selection", "max_loss_streak"): (1, 8),
     ("selection", "min_recent_win_rate"): (0.30, 1.0),
     ("selection", "max_dd_7d"): (0.01, 0.20),
+    ("selection", "max_best_trade_share"): (0.05, 1.0),
+    ("risk", "mirror_mult"): (1.0, 50.0),
+    ("risk", "mirror_limits_pct"): (0.5, 20.0),
     ("sol", "start_equity"): (10, 1_000_000),
     ("sol", "risk_per_trade_pct"): (0.1, 2.0),
     ("sol", "stop_pct"): (5.0, 60.0),

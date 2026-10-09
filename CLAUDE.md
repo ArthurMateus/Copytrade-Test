@@ -87,6 +87,15 @@ instances on the same wallet.
   cards, and get the main wallet's moves after it (books reused for 1 s). A side-wallet error is logged/alerted and
   never reaches the main wallet. /pause, /resume and /flatten act on every wallet.
 - Lag = exchange-clock time of our paper fill minus the leader's fill time.
+- Mirror side wallet (owner request 2026-10-09): `mirror_x10` in `data/wallets/`, sized by `Bot.mirror_size` =
+  leader's new position notional / its perp account value (leverage included) x `risk.mirror_mult` (10) x our
+  equity, lifted to `min_notional_usd` (so small bets are not skipped). Limits = a `mirror_limits_pct` (5%) side
+  wallet's (they clamp big bets). Account values of followed leaders: `sync_worker` every 5 min (BULK); unknown value
+  -> the fixed 1% risk size (log `mirror_size_fallback`). Adds/reduces follow `k` like every wallet. Shown in
+  /hyperwallet as "mirror x10 (their % of account)".
+- HL floors changed (owner request 2026-10-09): `min_win_rate` 0.60 -> 0.45, plus a NEW hard gate
+  `max_best_trade_share` 0.30 (best round trip / total pnl, "one_trade>30%_of_profit"). Both are in
+  `ScoreParams.rules()`, so cached scores are redone at the next start. `tools/hyper_why.py` explains rejections.
 
 ## Solana / FOMO / Discord (added 2026-10-07 at the owner's request; not in the original spec)
 - **On-chain since 2026-10-08 (FOMO's API dropped).** FOMO's API (`prod-api.fomo.family`) refuses every non-browser
