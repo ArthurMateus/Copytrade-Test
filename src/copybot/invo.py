@@ -35,6 +35,7 @@ from pathlib import Path
 from copybot import log
 
 PREFIX = "invo:"          # leader name of an Invo trader in the ledger: "invo:<username>"
+RESIZE_MIN = 0.02         # a committed size change smaller than 2% is noise, not an add or a trim
 
 
 class InvoAuthError(Exception):
@@ -57,6 +58,7 @@ class Portfolio:
     open_assets: tuple
     win_rate: float         # percent, Invo's own number
     closed: int
+    updated_ms: int = 0     # changes when the trader edits a call (add, trim, target...)
 
 
 @dataclass(frozen=True)
@@ -67,7 +69,7 @@ class Call:
     ticker: str
     long: bool
     leverage: float
-    size: float             # positionSize: share of the trader's portfolio (0.05 = 5%)
+    size: float             # positionSize: share of the portfolio NOW (moves with the price)
     entry: float
     target: float | None
     stop: float | None
@@ -76,11 +78,18 @@ class Call:
     closed_ms: int | None
     closing_price: float | None
     reason_closed: str | None
+    entry_size: float = 0.0  # entrySize / 100: the share of the portfolio the trader COMMITTED (fixed unless it adds
+                             # or trims; positionSize drifts with the price, e.g. PUMP 4.3% -> 3.2% as it fell)
+    added: bool = False      # changes.isAdded
+
+    @property
+    def committed(self) -> float:
+        return self.entry_size if self.entry_size > 0 else self.size
 
     @property
     def exposure(self) -> float:
-        """The trader's exposure as a share of its portfolio (size x leverage)."""
-        return self.size * max(self.leverage, 1.0)
+        """The trader's committed exposure as a share of its portfolio (committed size x leverage)."""
+        return self.committed * max(self.leverage, 1.0)
 
 
 def _ms(iso) -> int | None:
@@ -107,7 +116,7 @@ def parse_portfolios(body: dict) -> list[Portfolio]:
         ot = p.get("openTrades") or {}
         out.append(Portfolio(p["id"], p.get("title", ""), bool(p.get("active")), p.get("type") or "",
                              int(ot.get("count") or 0), tuple(ot.get("assets") or ()), float(p.get("winRate") or 0),
-                             int(p.get("closedPositions") or 0)))
+                             int(p.get("closedPositions") or 0), _ms(p.get("updatedAt")) or 0))
     return out
 
 
@@ -125,7 +134,8 @@ def parse_calls(body: dict) -> list[Call]:
                         str(t["ticker"]).upper(), bool(t.get("directionLong")), float(t.get("leverage") or 1),
                         float(t.get("positionSize") or 0), entry, _f(t.get("priceTarget")), _f(t.get("stopLoss")),
                         created, bool(t.get("isOpen")), _ms(t.get("closedAt")), _f(t.get("closingPrice")),
-                        t.get("reasonClosed")))
+                        t.get("reasonClosed"), (_f(t.get("entrySize")) or 0.0) / 100,
+                        bool((t.get("changes") or {}).get("isAdded"))))
     return out
 
 
@@ -222,7 +232,8 @@ class InvoClient:
 class Watcher:
     """Polls the followed Invo traders and turns their calls into events for the trading loop:
     ("invo_open", username, Call) for a call that appeared since the last poll and is fresh, and
-    ("invo_close", username, Call) for one that disappeared. The first poll of a trader is only a baseline: calls
+    ("invo_close", username, Call) for one that disappeared, and ("invo_resize", username, old Call, new Call) when the
+    trader added to or trimmed an open call (its committed size changed by more than RESIZE_MIN). The first poll of a trader is only a baseline: calls
     already open when we start watching are never copied (we would enter late). One portfolio-list request per
     trader per poll; open calls are only read for portfolios whose open-trade list changed."""
 
@@ -277,7 +288,7 @@ class Watcher:
         for p in ports:
             if not p.active:
                 continue
-            sig = (p.open_count, tuple(sorted(p.open_assets)))
+            sig = (p.open_count, tuple(sorted(p.open_assets)), p.updated_ms)     # an edit changes updated_ms
             if p.open_count and (self.sig.get(p.id) != sig or p.id not in self.calls):
                 self.calls[p.id] = {c.id: c for c in self.client.open_calls(p.id) if c.is_open}
             elif not p.open_count:
@@ -299,6 +310,8 @@ class Watcher:
         for cid, c in before.items():
             if cid not in now_open:
                 self.out.put(("invo_close", name, c))
+            elif c.exposure > 0 and abs(now_open[cid].exposure - c.exposure) / c.exposure > RESIZE_MIN:
+                self.out.put(("invo_resize", name, c, now_open[cid]))
 
     def forget(self, name: str) -> None:
         self.known.pop(name, None)

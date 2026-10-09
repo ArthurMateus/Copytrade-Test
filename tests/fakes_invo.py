@@ -30,6 +30,7 @@ class FakeInvo:
         self.users: dict[str, str] = {}
         self.portfolios: dict[str, list[str]] = {}
         self.calls: dict[str, list[dict]] = {}
+        self.updated: dict[str, int] = {}               # portfolio id -> last edit (ms): its updatedAt
         self.requests: list[tuple[str, dict]] = []
         self.valid_refresh = refresh_token
         self.valid_access = ""
@@ -107,6 +108,8 @@ class FakeInvo:
                     open_calls = list(self.calls.get(pid, []))
                 p.update(id=pid, ownerId=body["userId"],
                          openTrades={"count": len(open_calls), "assets": [c["ticker"] for c in open_calls]})
+                if pid in self.updated:
+                    p["updatedAt"] = iso(self.updated[pid])
                 out.append(p)
             return {"portfolios": out}
         if path == "/investments/get_investments":
@@ -132,12 +135,22 @@ class FakeInvo:
         c = copy.deepcopy(fixture("invo_investments_open.json")["investmentsTicker"][1])
         cid = f"call-{next(self._n)}"
         c.update(id=cid, ticker=ticker, name=ticker, directionLong=long, leverage=leverage, positionSize=size,
+                 entrySize=size * 100,
                  entryPrice=entry, priceTarget=target, stopLoss=stop, isOpen=True,
                  createdAt=iso(created_ms if created_ms is not None else int(time.time() * 1000)))
         c["portfolio"]["id"] = pid
         with self.lock:
             self.calls.setdefault(pid, []).append(c)
         return cid
+
+    def resize_call(self, pid: str, cid: str, size: float) -> None:
+        """The trader adds to (size up) or trims (size down) an open call: Invo changes its committed entrySize,
+        flags the change, and the portfolio's updatedAt moves."""
+        with self.lock:
+            for c in self.calls.get(pid, []):
+                if c["id"] == cid:
+                    c.update(entrySize=size * 100, positionSize=size, changes={"isAdded": True})
+            self.updated[pid] = int(time.time() * 1000)
 
     def close_call(self, pid: str, cid: str) -> None:
         with self.lock:

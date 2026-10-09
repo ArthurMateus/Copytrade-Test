@@ -25,7 +25,8 @@ def test_portfolios_are_paper_and_say_which_assets_are_open():
 def test_open_calls_parse_with_size_leverage_target_and_stop():
     pump, eth = invo.parse_calls(fixture("invo_investments_open.json"))
     assert (eth.ticker, eth.long, eth.leverage, eth.entry, eth.target, eth.stop) == ("ETH", True, 10, 2475.9, 3300, 2275)
-    assert eth.size == pytest.approx(0.052220937) and eth.exposure == pytest.approx(0.52220937)
+    assert eth.size == pytest.approx(0.052220937)                      # now, at today's price
+    assert eth.committed == pytest.approx(0.05000438213786726) and eth.exposure == pytest.approx(0.5000438213786726)
     assert eth.is_open and eth.owner == "nicush" and eth.portfolio_id == "f392d602-4882-40bc-8198-6d681943284d"
     assert pump.stop is None and pump.target == pytest.approx(0.006925)
     assert eth.created_ms == int(datetime(2026, 10, 8, 23, 0, 58, 636000, tzinfo=timezone.utc).timestamp() * 1000)
@@ -192,5 +193,61 @@ def test_our_stop_closes_an_invo_copy_and_its_card_becomes_the_summary(invo_env,
         text = lambda: " ".join(m["text"] for m in tg.sent + tg.edits)
         assert wait_for(lambda: "stop-loss hit" in text() and "Invo call by @akira" in text())
         assert "closed by the trader" not in text()
+    finally:
+        stop_bot(bot, th)
+
+
+def test_committed_size_comes_from_entrySize_not_the_price_dependent_positionSize():
+    pump, eth = invo.parse_calls(fixture("invo_investments_open.json"))
+    assert pump.entry_size == pytest.approx(0.04998597660369806) and pump.size == pytest.approx(0.0324751614)
+    assert pump.committed == pump.entry_size and pump.exposure == pytest.approx(0.4998597660369806)
+    p = invo.parse_portfolios(fixture("invo_users_portfolios.json"))[0]
+    assert p.updated_ms > 0
+
+
+def test_watcher_reports_an_add_or_a_trim_of_an_open_call(fake, tmp_path):
+    tok = tmp_path / "invo.token"
+    tok.write_text("REFRESH0", encoding="utf-8")
+    pid = fake.add_user("nicush")[0]
+    out = queue.Queue()
+    w = invo.Watcher(invo.InvoClient(fake.url, str(tok), min_interval_s=0), out, lambda: {"nicush"}, 1, 180,
+                     threading.Event())
+    w.poll("nicush")
+    cid = fake.open_call(pid, "ETH", size=0.05)
+    w.poll("nicush")
+    assert out.get_nowait()[0] == "invo_open"
+    time.sleep(0.01)
+    fake.resize_call(pid, cid, 0.10)                       # the trader doubles it
+    w.poll("nicush")
+    k, name, old, new = out.get_nowait()
+    assert k == "invo_resize" and old.committed == pytest.approx(0.05) and new.committed == pytest.approx(0.10)
+    time.sleep(0.01)
+    fake.resize_call(pid, cid, 0.101)                      # a 1% change is noise
+    w.poll("nicush")
+    assert out.empty()
+
+
+def test_bot_mirrors_the_traders_add_and_partial_close(invo_env, monkeypatch):
+    hl, tg, data, cdir, f, tok = invo_env
+    pid = f.add_user("glitty")[0]
+    bot, th = start_with_invo((hl, tg, data, cdir), tok, monkeypatch)
+    try:
+        tg.say("/invofollow glitty")
+        assert wait_for(lambda: bot.invo_watch.known.get("glitty") is not None, timeout=10)
+        cid = f.open_call(pid, "ETH", long=True, leverage=5, size=0.04, entry=3000.0)      # 4% x 5x = 20% of 300$
+        assert wait_for(lambda: "ETH" in bot.invo.st.positions, timeout=10)
+        size0 = bot.invo.st.positions["ETH"].size
+        assert size0 * 3000 == pytest.approx(0.20 * 300, rel=0.05)
+        f.resize_call(pid, cid, 0.06)                                                      # they add 50%
+        assert wait_for(lambda: bot.invo.st.positions["ETH"].size > size0 * 1.4, timeout=10)
+        assert bot.invo.st.positions["ETH"].size == pytest.approx(size0 * 1.5, rel=0.03)
+        time.sleep(0.01)
+        f.resize_call(pid, cid, 0.03)                                                      # they take half off
+        assert wait_for(lambda: bot.invo.st.positions["ETH"].size < size0, timeout=10)
+        assert bot.invo.st.positions["ETH"].size == pytest.approx(size0 * 0.75, rel=0.03)
+        text = lambda: " ".join(m["text"] for m in tg.sent + tg.edits)
+        assert wait_for(lambda: "resized by the trader 6.0% → 3.0%" in text())
+        f.close_call(pid, cid)
+        assert wait_for(lambda: "ETH" not in bot.invo.st.positions, timeout=10)
     finally:
         stop_bot(bot, th)

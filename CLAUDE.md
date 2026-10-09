@@ -171,6 +171,15 @@ instances on the same wallet.
   `invo.limits_pct` 5% wallet, our 3% stop, `max_entry_age_s` = max_call_age_s + poll_s); size via `Bot.invo_size` =
   their positionSize x leverage x `invo.size_mult` x our equity (>= 10$). Tickers mapped to HL names case-insensitively;
   not on HL -> told, not copied. `/hyperreset` keeps the Invo follows. Off without INVO_TOKEN_FILE (`/invo` says how).
+- Adds and trims (owner request 2026-10-09): a call's COMMITTED size is `entrySize` (percent, fixed unless the trader
+  adds or trims); `positionSize` drifts with the price and must not drive copies. Synthetic Moves use the committed
+  exposure (entrySize/100 x leverage) as the leader "position", so `k = our size / exposure` and PositionManager
+  mirrors an add (entry, RiskGate) or a trim (exit, never refused) in proportion. The watcher re-reads a portfolio's
+  calls when its `updatedAt` changes and reports `("invo_resize", user, old, new)` for changes > `invo.RESIZE_MIN` (2%).
+- Live UI (owner request 2026-10-09): `/invo`, `/invotrades`, `/invotraders` are live cards (keys `invo:*`,
+  `Bot.render_card`, edited only when the body changes); each copy has its own live card `invo:pos:<pos_id>` with the
+  trader's call (and resizes) that becomes the final summary on any close (the Invo wallet's PositionManager notifies
+  `Bot.on_invo_notify`). `tgfmt.short("invo:x")` -> "@x".
 - The bot must use its OWN Invo account (rotation: a browser and the bot on one login log each other out). The owner
   gets the refresh token with a DevTools console snippet (README) that decrypts `FlutterSecureStorage.REFRESH_TOKEN`
   (AES-GCM, key in `localStorage.FlutterSecureStorage`) and copies it; `tools/invo_check.py` verifies it.

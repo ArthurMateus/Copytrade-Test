@@ -326,7 +326,26 @@ class Bot:
             return ticker
         return next((a for a in self.assets if a.upper() == ticker.upper()), None)
 
-    def on_invo(self, kind: str, trader: str, call) -> None:
+    def invo_resize(self, w, leader: str, trader: str, old, new) -> None:
+        """The trader added to or trimmed a call we copy: our copy follows in the same proportion (an add is an entry
+        and goes through the RiskGate; a trim is an exit and is never refused)."""
+        coin = self.invo_calls.get(new.id) or self.invo_coin(new.ticker)
+        p = w.st.positions.get(coin) if coin else None
+        if p is None or p.leader != leader:
+            return
+        now = int(time.time() * 1000)
+        side = 1 if new.long else -1
+        before = p.size
+        w.pm.on_move(Move(leader, coin, side * old.exposure, side * new.exposure, now, new.created_ms,
+                          abs(hash(new.id)) % 10**12 + 1, (), new.entry, 1))
+        p = w.st.positions.get(coin)
+        if p is not None and p.pos_id in self.invo_info:
+            self.invo_info[p.pos_id] = self.invo_info[p.pos_id].split(" · resized")[0] + (
+                f" · resized by the trader {old.committed * 100:.1f}% → {new.committed * 100:.1f}%")
+        log.info("invo_resize", trader=trader, coin=coin, old=round(old.committed, 4), new=round(new.committed, 4),
+                 ours_before=before, ours_after=p.size if p else 0)
+
+    def on_invo(self, kind: str, trader: str, call, new=None) -> None:
         w, leader = self.invo, INVO + trader
         if w is None or leader not in w.st.followed:
             return
@@ -339,8 +358,9 @@ class Bot:
             if coin in w.st.positions:
                 log.info("invo_skip", trader=trader, coin=coin, why="coin already held")
                 return
-            m = Move(leader, coin, 0.0, float(side), call.created_ms, call.created_ms, abs(hash(call.id)) % 10**12,
-                     (), call.entry, 1)
+            # leader "position" = its committed exposure, so k = our size / exposure and adds/trims scale with it
+            m = Move(leader, coin, 0.0, side * call.exposure, call.created_ms, call.created_ms,
+                     abs(hash(call.id)) % 10**12, (), call.entry, 1)
             self._invo_call = call
             try:
                 w.pm.on_move(m)
@@ -350,19 +370,21 @@ class Bot:
             if p is not None and p.leader == leader:
                 self.invo_calls[call.id] = coin
                 self.invo_info[p.pos_id] = (
-                    f"Invo call by @{tgfmt.esc(trader)}: {call.size * 100:.1f}% x {call.leverage:g}x of their paper "
+                    f"Invo call by @{tgfmt.esc(trader)}: {call.committed * 100:.1f}% x {call.leverage:g}x of their paper "
                     f"portfolio · their entry {tgfmt.fpx(call.entry)} · target "
                     f"{tgfmt.fpx(call.target) if call.target else '-'} · stop {tgfmt.fpx(call.stop) if call.stop else '-'}")
                 self.invo_card(p, force=True)
             return
+        if kind == "invo_resize":
+            return self.invo_resize(w, leader, trader, call, new)
         held = self.invo_calls.pop(call.id, None) or coin
         p = w.st.positions.get(held) if held else None
         if p is None or p.leader != leader:
             return
         self._invo_close_why = call.reason_closed or "closed"
         try:
-            w.pm.on_move(Move(leader, held, float(p.side), 0.0, int(time.time() * 1000), call.created_ms,
-                              abs(hash(call.id)) % 10**12, (), call.closing_price or 0.0, 1))
+            w.pm.on_move(Move(leader, held, p.side * max(call.exposure, 1e-9), 0.0, int(time.time() * 1000),
+                              call.created_ms, abs(hash(call.id)) % 10**12, (), call.closing_price or 0.0, 1))
         finally:
             self._invo_close_why = None
 
@@ -547,9 +569,9 @@ class Bot:
             self.on_searched(item[1], item[3])
         elif kind == "added":
             self.on_added(*item[1:])
-        elif kind in ("invo_open", "invo_close"):
+        elif kind in ("invo_open", "invo_close", "invo_resize"):
             try:
-                self.on_invo(kind, item[1], item[2])
+                self.on_invo(kind, item[1], item[2], *item[3:])
             except Exception:
                 log.exception("invo_error", kind=kind)
                 self.alert("Invo calls wallet error (logged); the other wallets are not affected", key="invo_err")
