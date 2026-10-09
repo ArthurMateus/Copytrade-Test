@@ -183,16 +183,35 @@ def test_a_refused_helius_key_alerts_stops_new_copies_and_keeps_the_stop(tmp_pat
         e.close()
 
 
-def test_without_a_helius_key_it_runs_on_the_public_endpoint_and_says_so(tmp_path):
-    e = Env(tmp_path, key="", discord=False, poll_s=1.0)
+def test_without_helius_the_owner_picks_with_fomofollow_and_the_bot_copies_on_the_public_endpoint(tmp_path):
+    """The no-Helius setup: no automatic search, the owner (or Claude, asked in a session) picks wallets with
+    /fomofollow, the bot copies them on the free public endpoint, and the pick survives re-ranking and a restart."""
+    picked = "PickedWa" + "5" * 36
+    e = Env(tmp_path, key="", discord=False, poll_s=1.0, history=False)
     try:
         bot = e.start()
-        assert bot.sol is not None
-        assert wait_for(lambda: e.following(bot), timeout=40)
-        assert "public Solana endpoint" in e.tg_text()
-        e.sol.swap(GOOD, "buy", MINT, 5_000_000, 50_000.0)
+        assert wait_for(lambda: "public Solana endpoint" in e.tg_text(), timeout=20)
+        time.sleep(3)
+        assert not bot.sol.scorer.busy and not bot.sol.scorer.meta["last_review"]       # no automatic search
+        e.sol.swap(picked, "buy", "Old", 10, 10.0, int(time.time() * 1000) - DAY, fomo=False)   # an older trade
+        e.tg.say("/fomofollow 0x" + "ab" * 20)
+        assert wait_for(lambda: "Usage: /fomofollow" in e.tg_text(), timeout=10)
+        e.tg.say(f"/fomofollow {picked}")
+        assert wait_for(lambda: picked in bot.sol.st.followed and picked in bot.sol.st.picked, timeout=10)
+        assert wait_for(lambda: picked in bot.sol.ready and e.sol.subscribed(picked), timeout=20)
+        e.sol.swap(picked, "buy", MINT, 5_000_000, 50_000.0, fomo=False)
         assert wait_for(lambda: MINT in bot.sol.st.positions, timeout=20)
-        assert e.sol.calls and not any(k for _, k in e.sol.calls)
+        assert not any(k for _, k in e.sol.calls)                                     # never a key: public only
+        assert not any(p.leader == picked and p.coin == "Old" for p in bot.sol.st.positions.values())
+        bot.sol.on_ranking([], 10, {})                                                # re-ranking keeps the pick
+        assert picked in bot.sol.st.followed
+        e.stop()
+        bot = e.start()                                                               # and so does a restart
+        assert wait_for(lambda: picked in bot.sol.st.picked and MINT in bot.sol.st.positions, timeout=20)
+        e.tg.say(f"/fomounfollow {picked}")
+        assert wait_for(lambda: picked not in bot.sol.st.followed, timeout=10)
+        assert wait_for(lambda: "Unfollowed" in e.tg_text(), timeout=10)
+        assert MINT in bot.sol.st.positions                                           # its copy still exits normally
     finally:
         e.close()
 

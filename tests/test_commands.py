@@ -34,7 +34,7 @@ def test_the_two_families_are_complete_and_symmetrical():
     assert {c[len("/hyper"):] for c in HYPER_COMMANDS} == wanted
     assert {"/fomotrades", "/fomotraders", "/fomowallet", "/fomosearch", "/fomoreset", "/fomoflatten",
             "/fomopause", "/fomoresume", "/fomoprogress", "/fomopositions", "/fomoleaders", "/fomo",
-            "/fomoadd"} == set(FOMO_COMMANDS)
+            "/fomoadd", "/fomofollow", "/fomounfollow"} == set(FOMO_COMMANDS)
     assert len(SLASH_COMMANDS) < 100 and len(set(SLASH_COMMANDS)) == len(SLASH_COMMANDS)
     assert all(len(c) - 1 <= 32 and c[1:].islower() for c in SLASH_COMMANDS)          # Discord's name rules
 
@@ -286,3 +286,31 @@ def test_search_done_says_why_the_wallets_failed(sol):
     assert "Nobody passed" in msg and "Why they failed (out of 3)" in msg
     assert "lost money (30 d) 2" in msg and "win rate too low 1" in msg and "trades too often to read 1" in msg
     assert "2 missed by just one rule" in msg
+
+
+def test_fomofollow_is_capped_at_the_maximum_and_picks_survive_a_reset(sol):
+    bot, chat, _ = sol
+    w = "PickWa" + "7" * 38
+    bot.command(Command("/fomofollow", w))
+    assert w in bot.st.followed and w in bot.st.picked and bot.seed_q.get_nowait() == w
+    for i in range(bot.c.max_leaders - len(bot.st.followed)):
+        bot.rec({"ev": "follow", "leader": f"Fill{i}" + "8" * 30})
+    bot.command(Command("/fomofollow", "Xther" + "9" * 39))
+    assert "Already following" in chat.sent[-1] and ("Xther" + "9" * 39) not in bot.st.followed
+    bot.reset_book()
+    st = Ledger(bot.data / "ledger.jsonl").replay()
+    assert w in st.followed and w in st.picked
+
+
+def test_picks_are_never_ranked_away_but_a_paused_pick_is_dropped():
+    from copybot.config import Sol
+    from copybot.sol.hysteresis import rebalance, select
+    c = Sol()
+    followed = {"P": 0, "X": 0}
+    p = select({"streaks": {"P": {"join": 0, "drop": 5}, "X": {"join": 0, "drop": 5}}}, ["A"], followed, set(), {},
+               10**13, c, keep={"P"})
+    assert [a for a, _ in p.drops] == ["X"]
+    p = rebalance({}, ["A", "B"], followed, set(), {}, 10**13, c, keep={"P"})
+    assert "P" not in [a for a, _ in p.drops] and set(p.joins) == {"A", "B"}
+    p = select({}, ["A"], followed, {"P"}, {}, 10**13, c, keep={"P"})
+    assert p.drops and p.drops[0][0] == "P"

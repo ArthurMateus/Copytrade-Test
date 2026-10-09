@@ -76,6 +76,7 @@ class State:
     positions: dict[str, Position] = field(default_factory=dict)   # coin -> position (one net position per coin)
     followed: dict[str, int] = field(default_factory=dict)         # leader -> followed since (ms)
     paused_leaders: dict[str, str] = field(default_factory=dict)   # leader -> reason (no new entries)
+    picked: set = field(default_factory=set)      # FOMO: wallets the owner picked (/fomofollow): never re-ranked away
     dropped: dict[str, int] = field(default_factory=dict)          # leader -> dropped at (ms), for cooldown
     leader_stats: dict[str, LeaderStats] = field(default_factory=dict)
     entries_paused: bool = False
@@ -289,9 +290,12 @@ class State:
     def _ev_follow(self, ev):
         self.followed[ev["leader"]] = int(ev["ts"])
         self.paused_leaders.pop(ev["leader"], None)
+        if ev.get("picked"):
+            self.picked.add(ev["leader"])
 
     def _ev_unfollow(self, ev):
         self.followed.pop(ev["leader"], None)
+        self.picked.discard(ev["leader"])
         self.paused_leaders.pop(ev["leader"], None)
         self.dropped[ev["leader"]] = int(ev["ts"])
 

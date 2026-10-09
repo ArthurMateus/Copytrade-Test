@@ -60,6 +60,7 @@ time in one process, each with its own family of commands:
 | `/hyperleaders` | `/fomoleaders` | followed wallets, one line each (live) |
 | `/hyperprogress` | `/fomoprogress` | success metrics (Hyperliquid also shows longs and shorts separately) |
 | `/hypersearch` | `/fomosearch` | look for new traders now |
+| | `/fomofollow <wallet>`, `/fomounfollow <wallet>` | follow a wallet YOU picked (no scoring; kept through re-ranking and restarts, still paused by its own bad copy results), or stop following it. Without `HELIUS_API_KEY` there is no automatic daily search: picks are the way to choose FOMO traders, and copying runs on the free public endpoint |
 | `/hyperadd 0x…` | `/fomoadd <wallet>` | check ONE wallet you found with the same strict rules now; followed at once if it passes and fewer than 7 are followed, else the bot says which rules failed. A FOMO wallet added this way is re-checked at every later search |
 | `/hyperpause`, `/hyperresume` | `/fomopause`, `/fomoresume` | stop / allow new entries (exits always run) |
 | `/hyperflatten <PIN>` | `/fomoflatten <PIN>` | close everything of that book and pause it |

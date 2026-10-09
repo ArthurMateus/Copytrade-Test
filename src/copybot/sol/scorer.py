@@ -42,6 +42,8 @@ class SolScorer:
         self.auth_ok = True
         self.search_req = threading.Event()      # /fomosearch: review now
         self.add_q: queue.Queue = queue.Queue()  # /fomoadd: wallets the owner wants checked now
+        # the daily search needs Helius (the free endpoint reads ~1 transaction a second); /fomosearch always works
+        self.auto_search = bool(cfg.helius_key) or self.c.search_without_helius
         self._locks: dict[str, threading.Lock] = {}
         self._locks_lock = threading.Lock()
         self.progress: dict = {"phase": "idle", "found": 0, "todo": 0, "done": 0, "eligible": 0, "started": 0,
@@ -71,7 +73,7 @@ class SolScorer:
                     self.search_req.clear()
                     self.review()
                     self.maybe_cycle(force=True)
-                elif self.now() - self.meta["last_review"] >= DAY:
+                elif self.now() - self.meta["last_review"] >= DAY and self.auto_search:
                     self.review()
                 self.maybe_cycle()
             except AuthError as e:
@@ -130,6 +132,15 @@ class SolScorer:
         self.cache.put(rel, {"legs": [[g.id, g.ts, g.token, g.side, g.amount, g.usd] for g in merged],
                              "newest_sig": h.newest_sig, "ts": now})
         return merged
+
+    def recent(self, address: str) -> list[Leg]:
+        """Swaps to seed a newly followed wallet: the cached history if there is one (cheap update), else only its
+        newest `seed_txs` transactions (an owner pick should start copying in minutes, not after hours of reading)."""
+        cached = self.cache.get(f"swaps/{address}.json")
+        if cached and cached.get("newest_sig"):
+            return self.history(address) or []
+        since = self.now() - self.c.history_days * DAY
+        return fetch_history(self.client, address, since, max_sigs=self.c.seed_txs).legs
 
     def score(self, address: str) -> None:
         legs = self.history(address)

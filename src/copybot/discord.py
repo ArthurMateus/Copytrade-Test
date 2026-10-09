@@ -54,6 +54,8 @@ DESCRIPTIONS = {
     "/fomoflatten": "FOMO: close every position and pause (needs the PIN)",
     "/fomosearch": "FOMO: find and rank FOMO traders on-chain now, follow the best",
     "/fomoadd": "FOMO: check a Solana wallet with the strict rules, follow it if it passes",
+    "/fomofollow": "FOMO: follow a wallet you picked (no scoring), copy its trades",
+    "/fomounfollow": "FOMO: stop following a wallet (open copies still exit normally)",
     "/hyperadd": "Hyperliquid: check a wallet with the strict rules, follow it if it passes",
     "/fomoreset": "FOMO: the wallet back to the start, no open trades, traders kept (needs the PIN)",
 }

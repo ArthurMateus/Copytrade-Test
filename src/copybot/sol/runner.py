@@ -162,7 +162,7 @@ class SolBot:
             if a in self.ready:
                 continue
             try:
-                legs = self.scorer.history(a) or []      # None: too busy to read (sells then close our copy)
+                legs = self.scorer.recent(a)
                 cursor = self.st.cursors.get(a)
                 if cursor is None:
                     cursor = now_ms()
@@ -337,7 +337,7 @@ class SolBot:
         if now - int(self.st.sel.get("at", 0)) < c.rescore_minutes * 60_000 * 0.9:
             return
         self.apply_plan(select(self.st.sel, ranking, self.st.followed, set(self.st.paused_leaders), self.st.dropped,
-                               now, c), scores)
+                               now, c, keep=self.st.picked), scores)
         if not ranking and not self.scorer.busy:      # mid-search rankings are partial: the search end reports it
             self.alert("no Solana wallet passed the strict scoring: following nobody new", key="no_eligible",
                        every_s=6 * 3600)
@@ -351,7 +351,7 @@ class SolBot:
         plan = None
         if (searched or not self.st.followed) and ranking and self.auth_ok:
             plan = rebalance(self.st.sel, ranking, self.st.followed, set(self.st.paused_leaders), self.st.dropped,
-                             now_ms(), self.c)
+                             now_ms(), self.c, keep=self.st.picked)
             self.apply_plan(plan, scores)
         top = ", ".join(f"{tgfmt.short(a)} {scores.get(a, {}).get('score', 0) * 100:.0f} pts" for a in ranking[:3])
         self.ui.send(f"🔎 🪙 <b>FOMO search done</b> · {n_cands} FOMO traders checked · {n_el} pass the strict rules"
@@ -490,6 +490,38 @@ class SolBot:
             self.scorer.add_q.put(a)
             self.ui.send(f"🔎 🪙 Checking <code>{tgfmt.short(a)}</code> with the strict rules now (a minute or two); "
                          "I will follow it if it passes and a slot is free.")
+        elif c.name in ("/fomofollow", "/fomounfollow"):
+            a = c.arg.strip()
+            if not re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", a) or a == self.c.fomo_fee_payer:
+                self.ui.send(f"Usage: {c.name} &lt;Solana wallet address&gt; (32 to 44 letters and digits, no 0x)")
+                return
+            who = f"<code>{tgfmt.short(a)}</code>"
+            if c.name == "/fomounfollow":
+                if a not in self.st.followed:
+                    self.ui.send(f"🪙 {who} is not followed.")
+                    return
+                held = sum(1 for p in self.st.positions.values() if p.leader == a)
+                self.rec({"ev": "unfollow", "leader": a, "reason": "/fomounfollow"})
+                self.scorer.focus = set(self.st.followed)
+                self.ui.send(f"➖ 🪙 <b>Unfollowed</b> {who}" + (f" · {held} open copy still managed until it exits"
+                                                               if held else ""))
+                return
+            if a in self.st.followed:
+                if a not in self.st.picked:
+                    self.rec({"ev": "follow", "leader": a, "ts": self.st.followed[a], "picked": True})
+                self.ui.send(f"✅ 🪙 {who} is followed (kept as your pick).")
+                return
+            if len(self.st.followed) >= self.c.max_leaders:
+                self.ui.send(f"⛔ 🪙 Already following {len(self.st.followed)} (the maximum). "
+                             "/fomounfollow one first (/fomoleaders lists them).")
+                return
+            now = now_ms()
+            self.rec({"ev": "follow", "leader": a, "picked": True})
+            self.rec({"ev": "cursor", "leader": a, "t": now})       # from now on: never copy its older swaps
+            self.seed_q.put(a)
+            self.scorer.focus = set(self.st.followed)
+            self.ui.send(f"➕ 🪙 <b>Following</b> {who} · your pick (not scored by the bot; its copy results still "
+                         "pause it after a bad streak). Copies start once its recent trades are loaded (a few minutes).")
         elif c.name == "/fomopause":
             self.rec({"ev": "pause", "reason": "/fomopause"})
             self.ui.send("⏸️ 🪙 <b>FOMO entries paused.</b> Exits and stops keep running. /fomoresume to continue.")
@@ -529,7 +561,8 @@ class SolBot:
         st = self.st
         seed = [{"ev": "genesis", "equity0": self.c.start_equity, "btc_px0": 0.0}]
         seed += [{"ev": "unfollow", "leader": a, "reason": "kept across /fomoreset", "ts": t} for a, t in st.dropped.items()]
-        seed += [{"ev": "follow", "leader": a, "ts": t} for a, t in st.followed.items()]
+        seed += [{"ev": "follow", "leader": a, "ts": t, **({"picked": True} if a in st.picked else {})}
+                 for a, t in st.followed.items()]
         seed += [{"ev": "leader_pause", "leader": a, "reason": why} for a, why in st.paused_leaders.items()]
         seed += [{"ev": "cursor", "leader": a, "t": t} for a, t in st.cursors.items()]
         seed.append({"ev": "sel", "state": st.sel})

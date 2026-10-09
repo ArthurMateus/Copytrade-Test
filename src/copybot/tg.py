@@ -33,13 +33,13 @@ HYPER_COMMANDS = ("/hyperstatus", "/hypertrades", "/hypertraders", "/hyperwallet
                   "/hyperreset", "/hyperadd")
 FOMO_COMMANDS = ("/fomo", "/fomotrades", "/fomotraders", "/fomowallet", "/fomopositions", "/fomoleaders",
                  "/fomoprogress", "/fomosearch", "/fomopause", "/fomoresume", "/fomoflatten", "/fomoreset",
-                 "/fomoadd")
+                 "/fomoadd", "/fomofollow", "/fomounfollow")
 COMMANDS = ("/status", "/trades", "/traders", "/wallets", "/positions", "/leaders", "/progress", "/search", "/pause",
             "/resume", "/flatten", "/reset", "/restart", "/help", "/add") + tuple(ALIASES) + FOMO_COMMANDS
 # what Discord shows in its slash-command list (the short Hyperliquid originals stay Telegram-only)
 SLASH_COMMANDS = ("/help", "/restart") + HYPER_COMMANDS + FOMO_COMMANDS
 PIN_COMMANDS = ("/flatten", "/reset", "/fomoflatten", "/fomoreset")
-WALLET_COMMANDS = ("/add", "/fomoadd")       # take a wallet address as their argument
+WALLET_COMMANDS = ("/add", "/fomoadd", "/fomofollow", "/fomounfollow")       # take a wallet address as their argument
 ONCE = ("/reset", "/restart", "/flatten", "/fomoflatten", "/fomoreset")   # never acted on twice after a restart
 
 

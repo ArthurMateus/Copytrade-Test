@@ -114,6 +114,8 @@ class Sol:
     live_rpc_interval_s: float = 0.11     # Helius free plan: 10 requests per second (live + history share it)
     helius_daily_credits: int = 30_000    # most Helius credits the search may spend per UTC day (then: public endpoint)
     history_parallel: int = 6             # transactions read at once during a search (Helius only)
+    search_without_helius: bool = False   # daily automatic search also without HELIUS_API_KEY (very slow there)
+    seed_txs: int = 300                   # a newly followed wallet: recent transactions read before copying starts
     fomo_fee_payer: str = "AgmLJBMDCqWynYnQiPCuj9ewsNNsBJXyzoUhD9LJzN51"   # co-signs every FOMO user swap
     dex_url: str = "https://api.dexscreener.com"
     # -- the paper book and its risk limits (enforced in sol/risk.py)
@@ -293,6 +295,7 @@ CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
     ("sol", "poll_leader_s"): (1, 300),
     ("sol", "helius_daily_credits"): (0, 200_000),
     ("sol", "history_parallel"): (1, 16),
+    ("sol", "seed_txs"): (50, 5000),
     ("sol", "price_poll_s"): (0.2, 60),
     ("sol", "join_rank"): (1, 8),
     ("sol", "drop_rank"): (2, 15),

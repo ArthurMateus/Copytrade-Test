@@ -24,7 +24,8 @@ class Plan:
 
 
 def select(sel: dict, ranking: list[str], followed: dict[str, int], paused: set[str], dropped: dict[str, int],
-           now_ms: int, c: Sol) -> Plan:
+           now_ms: int, c: Sol, keep=frozenset()) -> Plan:
+    """`keep`: owner picks (/fomofollow), never dropped for their rank (only when paused after a bad streak)."""
     streaks = dict(sel.get("streaks", {}))
     rank = {a: i + 1 for i, a in enumerate(ranking)}
     new: dict[str, dict] = {}
@@ -39,7 +40,8 @@ def select(sel: dict, ranking: list[str], followed: dict[str, int], paused: set[
     for a, since in followed.items():
         if a in paused:
             cands.append((0, -rank.get(a, 10**6), a, "paused after a bad streak"))
-        elif new.get(a, {}).get("drop", 0) >= c.confirm_cycles and now_ms - since >= c.min_follow_hours * HOUR:
+        elif (a not in keep and new.get(a, {}).get("drop", 0) >= c.confirm_cycles
+              and now_ms - since >= c.min_follow_hours * HOUR):
             cands.append((1, -rank.get(a, 10**6), a, f"rank > {c.drop_rank} for {c.confirm_cycles} cycles"))
     cands.sort()
     cooldown = c.dropped_cooldown_days * DAY
@@ -57,7 +59,7 @@ def select(sel: dict, ranking: list[str], followed: dict[str, int], paused: set[
 
 
 def rebalance(sel: dict, ranking: list[str], followed: dict[str, int], paused: set[str], dropped: dict[str, int],
-              now_ms: int, c: Sol) -> Plan:
+              now_ms: int, c: Sol, keep=frozenset()) -> Plan:
     """/fomosearch (and the very first pick): follow the best `max_leaders` of the ranking AT ONCE, without the
     confirmation cycles, like /hypersearch. Followed wallets outside that top are dropped (their open copies are still
     managed until they exit). Paused wallets and those in their drop cooldown are skipped. An empty ranking changes
@@ -65,8 +67,10 @@ def rebalance(sel: dict, ranking: list[str], followed: dict[str, int], paused: s
     if not ranking:
         return Plan([], [], {**sel, "at": now_ms})
     cooldown = c.dropped_cooldown_days * DAY
-    top = [a for a in ranking if a not in paused and (a in followed or now_ms - dropped.get(a, -10**15) >= cooldown)]
-    top = top[: c.max_leaders]
+    keepers = [a for a in followed if a in keep and a not in paused]      # owner picks keep their slot
+    top = [a for a in ranking if a not in paused and a not in keepers
+           and (a in followed or now_ms - dropped.get(a, -10**15) >= cooldown)]
+    top = keepers + top[: max(0, c.max_leaders - len(keepers))]
     drops = [(a, f"not in the best {c.max_leaders} of the new search") for a in followed if a not in top]
     joins = [a for a in top if a not in followed]
     streaks = {a: {"join": c.confirm_cycles, "drop": 0} for a in top}

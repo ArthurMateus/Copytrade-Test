@@ -118,6 +118,19 @@ instances on the same wallet.
   re-checked at every search). Same strict rules, no bypass. Passes + free slot (< max_leaders) -> followed at once
   (`apply_plan`); else the reply says why (rules failed, already followed, paused, or full -> next search). Discord gets
   a required `wallet` option (`tg.WALLET_COMMANDS`).
+- Owner picks (owner request 2026-10-09: "use Claude, not Helius, to find FOMO traders"): `/fomofollow <wallet>`
+  follows at once WITHOUT the strict scoring (follow event `picked: true` -> `State.picked`, kept by `/fomoreset`);
+  `select`/`rebalance` never drop a pick for rank (`keep=`), only when paused after a bad copy streak; the RiskGate and
+  leader pause rules still apply. `/fomounfollow` drops it (open copies exit normally). Without `HELIUS_API_KEY` the
+  daily search is off (`SolScorer.auto_search`, `sol.search_without_helius`); `/fomosearch` still works (slow). A new
+  leader is seeded from its newest `seed_txs` (300) transactions unless a cached history exists (`SolScorer.recent`).
+  How Claude picks (in a session, on request only, owner signed in to fomo.family in the browser pane): FOMO ranking
+  + mofo.gg leaderboard (Wilson lower bound of 7-day win rate, win = coin +50% within 48 h) -> each handle's recent
+  swaps read in the signed-in tab (`/v2/users/{id}/swaps`, id from the profile page's balances request) -> real
+  wallet = owner whose balance of that mint changed by exactly that amount in a FOMO-co-signed tx near the time
+  (FOMO's timestamp can trail the chain by minutes). fomowalletfinder.com gives the same for indexed handles (new
+  lookups 2/day). The `address` in FOMO's own data is never the trading wallet.
+- `tools/fomo_why.py` / `tools/hyper_why.py`: why scored wallets fail, from the saved caches.
 - Swap parsing (`chain.parse_tx`): the wallet's USDC/USDT moves one way and one token the other. A routed swap leaves a
   speck of the intermediate token (fixture `chain_tx_fomo_routed.json`): the token with the largest relative balance
   change wins if every other moved < 10%. SOL-priced swaps (~1 in 40) are skipped (no USD price). Leg id = signature.
