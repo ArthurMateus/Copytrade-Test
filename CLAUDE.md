@@ -200,6 +200,12 @@ instances on the same wallet.
   go flat (verified on real wallets; it is not a bug). Because of this, `max_candidates` was raised from 60 to 400, then to 2000 (owner request).
 
 ## Status and open questions
+- **Current state (2026-10-09): see `context.md`** (what runs where, how Claude helps pick FOMO/Invo traders, gotchas).
+  Owner's bot PC: `C:\Users\gedeo\Copytrade-test` (uv on PATH there; restart loop
+  `while ($true) { uv run copybot; Start-Sleep 10 }`). Secrets set there: Telegram, Discord, PIN, HELIUS_API_KEY,
+  INVO_TOKEN_FILE. Invo login verified working 2026-10-09 (refresh = GET; POST answers 405).
+- Git hygiene: the owner keeps unrelated untracked files in the repo root (copilot-*.md, committed once by mistake and
+  removed); always stage explicit paths, never `git add -A`.
 - **Live since 2026-10-05** on the owner's notebook (started from PowerShell with `python -m uv run copybot` in a
   restart loop; `uv` is not on PATH there). Telegram works against the real API. First review: 400 screened,
   13 fully scored; under the strict floors 3 leaders followed (0xc0b2…, 0x8a80…, 0xb556…). First copy 2026-10-06

@@ -1,26 +1,36 @@
-# context.md: state of the work (2026-10-08), for the next session
+# context.md: state of the work (2026-10-09), for the next session
 
-Repo: https://github.com/ArthurMateus/Copytrade-Test (branch main). Read CLAUDE.md and README.md first. 272 tests pass (`uv run pytest`, ~3 min).
+Repo: https://github.com/ArthurMateus/Copytrade-Test (branch main). Read CLAUDE.md (the source of truth for design and
+decisions) and README.md first. ~298 tests pass (`uv run pytest`, ~3 min). Everything is PAPER ONLY.
 
-## What exists
-- Hyperliquid paper bot (original) + stricter "losing right now" gates (selection.max_loss_7d/24h, streak, recent win rate, 7d drawdown).
-- Solana/FOMO paper book in `src/copybot/sol/` (own $300, own ledger `data/sol/`), runs in the same process. Since 2026-10-08 it
-  follows FOMO traders ON-CHAIN (no FOMO login): see CLAUDE.md "On-chain since 2026-10-08". Optional `HELIUS_API_KEY` for live data.
-- Telegram + Discord (owner's own `discord.py`, slash commands). Commands: `/hyper<x>` (Hyperliquid) and `/fomo<x>` (FOMO): status, trades, traders, wallet, positions, leaders, progress, search, pause, resume, flatten <PIN>, reset <PIN>. Resets archive and restart the process; refused while a trade is open.
-- Tools: `tools/record_chain.py` (re-records the Solana fixtures from the public RPC).
+## What runs on the owner's bot PC (C:\Users\gedeo\Copytrade-test, PowerShell restart loop)
+- **Hyperliquid book** (main $300 wallet + side wallets 2/5/10/20% + **mirror x10** + **invo calls**). Leaders from the
+  HL leaderboard, strict scoring (win rate floor 45% since 2026-10-09, plus "no single trade > 30% of profit").
+  `/hyperadd 0x…` checks one wallet now. `tools/hyper_why.py` explains rejections.
+- **FOMO / Solana book** (`src/copybot/sol/`): FOMO traders followed ON-CHAIN (FOMO's fee payer co-signs every FOMO
+  swap; the address FOMO shows is not the trading wallet). Optional HELIUS_API_KEY (search + live). `/fomosearch`,
+  `/fomoadd <wallet>` (strict scoring), `/fomofollow <wallet>` (owner pick, no scoring), `/fomounfollow`.
+  `tools/fomo_why.py`. Owner's current pick: OinkersRUs `DPAN2Vig8BokpQCCu4mtV1mTWYLS7ktKe1hHKVBcsayL`.
+- **Invo calls wallet** (`src/copybot/invo.py`, side wallet `invo_calls`): copies Invo traders' posted PAPER calls at
+  live HL prices. Needs INVO_TOKEN_FILE (the bot's OWN Invo account's refresh token; README "Invo calls wallet").
+  Working on the owner's PC since 2026-10-09 (`tools/invo_check.py` OK) after one fix: the token refresh is
+  GET /v1_0/auth/refresh_token (POST answers 405). `/invofollow <user>`, `/invounfollow <user>`, `/invo`.
 
-## RESOLVED: the bot could not log in to FOMO
-- FOMO's API answers 403 `{"authorization":false}` to ANY script, even for robots.txt with no cookie: Cloudflare bot
-  blocking, not the login. Not bypassed on purpose. The cookie code and `tools/fomo_cookie_trim.py` were removed.
-- Replaced by on-chain discovery through FOMO's fee payer and Helius for live data. Owner set `HELIUS_API_KEY` on the
-  other PC (not on this one). Next: owner `git pull` + restart; first review takes hours; check `/fomoleaders`.
-
-## OPEN PROBLEM 2: owner's Hyperliquid run opened only longs and loses
-- Code checked: detector and open path treat shorts like longs (real recorded fills give short opens). Not reproduced; likely the followed traders were all long. Need the owner's `data/ledger.jsonl` (other PC, C:\Users\gedeo\Copytrade-Test) to investigate. `/hyperprogress` now shows longs vs shorts and warns when all are long.
-- To reset that run on the other PC: `git pull`, restart the bot, `/hyperflatten <PIN>`, `/hyperreset <PIN>`.
+## How Claude helps pick traders (only when the owner asks in a session; never on a schedule)
+- FOMO: owner signs in to fomo.family in the browser pane; read the 7d/30d ranking and each candidate's last 100
+  swaps in the signed-in tab (FOMO caps at 100), vet (win rate, PF, best-trade share, pace, USDC share), then find
+  the real wallet = the SIGNER (besides FOMO's fee payer) of a FOMO-co-signed tx where its balance of that mint
+  changed by exactly the swap amount (never just any owner: pools also change by that amount). Of 223 top FOMO
+  traders on 2026-10-09 only 1 passed; most top profits are one lucky trade.
+- mofo.gg leaderboard ranks by "coin +50% within 48 h of the buy", not by the trader's profit: most of its top names
+  lost money on their own last 100 trades.
+- Invo: portfolios are paper and Invo hides HL addresses, so the calls themselves are copied. Pick from the Discover
+  rankings (Trending / This Month / All Time) and let the invo calls wallet's results decide (/invo, /hyperwallet).
+  Do not bulk-harvest Invo data through the owner's session; the bot reads only the followed traders.
 
 ## Gotchas
-- Owner: Windows 11, pt-BR, PowerShell, not a Python developer. Other PC path: C:\Users\gedeo\Copytrade-Test.
-- GitHub push needs the ArthurMateus login (gh auth is set up on this PC as ArthurMateus).
-- Writing Python strings with backslash escapes through bash heredocs gets mangled: use the Edit/Write tools, or chr(92).
-- Some upstream tests (test_discord rate limit, test_search_repicks) are timing flaky under load; they pass alone.
+- Owner: Windows 11, pt-BR, PowerShell, not a Python developer: exact commands, one per block, plain words.
+- Never commit the owner's untracked files in the repo root (copilot-*.md): stage paths explicitly, never `git add -A`.
+- Writing Python strings with backslash escapes through bash heredocs gets mangled: use the Write/Edit tools or a
+  script file.
+- Some timing-based tests (telegram card edits, discord rate limit) can fail rarely under load: rerun first.
