@@ -1,0 +1,11 @@
+# Invo (Involio) calls, copied on paper by the "invo calls" side wallet (shown in /hyperwallet).
+# Needs INVO_TOKEN_FILE in the environment: a file holding the refresh token of the bot's OWN Invo account
+# (never your main one: every refresh replaces the token, so two programs on one login log each other out).
+# Without it this whole section stays off. Allowed ranges in brackets.
+enabled = true
+api_base = "https://api.invoapp.com/v1_0"
+poll_s = 30.0             # one request per followed trader per poll                                [1, 600]
+max_call_age_s = 180.0    # calls older than this when first seen are not copied (late entry)      [10, 1800]
+size_mult = 1.0           # our exposure = their size x leverage x this, of our 300$ (at least 10$) [0.1, 10]
+limits_pct = 5.0          # the wallet's risk limits = a side wallet at this risk level              [0.5, 20]
+max_traders = 7           #                                                                         [0, 20]

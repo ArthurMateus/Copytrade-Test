@@ -57,6 +57,9 @@ DESCRIPTIONS = {
     "/fomofollow": "FOMO: follow a wallet you picked (no scoring), copy its trades",
     "/fomounfollow": "FOMO: stop following a wallet (open copies still exit normally)",
     "/hyperadd": "Hyperliquid: check a wallet with the strict rules, follow it if it passes",
+    "/invo": "Invo calls wallet: followed Invo traders, open copies and results",
+    "/invofollow": "Invo: copy the calls a trader posts from now on (paper)",
+    "/invounfollow": "Invo: stop copying a trader (open copies still exit normally)",
     "/fomoreset": "FOMO: the wallet back to the start, no open trades, traders kept (needs the PIN)",
 }
 
@@ -226,7 +229,8 @@ class DiscordUI(TelegramUI):
             if canon(c) in PIN_COMMANDS:
                 cmd["options"] = [{"type": 3, "name": "pin", "description": "Your COPYBOT_PIN", "required": True}]
             elif canon(c) in WALLET_COMMANDS:
-                cmd["options"] = [{"type": 3, "name": "wallet", "description": "The wallet address", "required": True}]
+                cmd["options"] = [{"type": 3, "name": "wallet", "description": "Wallet address or Invo username",
+                                   "required": True}]
             cmds.append(cmd)
         self.api.call("PUT", f"/applications/{app_id}/guilds/{guild}/commands", cmds)
         self.registered = True

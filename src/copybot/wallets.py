@@ -24,8 +24,11 @@ def wallet_name(risk_pct: float) -> str:
 class SideWallet:
     def __init__(self, base: config.Config, risk_pct: float, data_dir: Path, broker: PaperBroker, health,
                  mids: dict, assets: dict, alts_ok: Callable[[str], bool], score_of: Callable[[str], float],
-                 name: str = "", label: str = "", sizer=None):
-        """`sizer` (the mirror wallet): its own copy sizes; `risk_pct` then only sets the limits that clamp them."""
+                 name: str = "", label: str = "", sizer=None, own_leaders: bool = False):
+        """`sizer` (the mirror wallet): its own copy sizes; `risk_pct` then only sets the limits that clamp them.
+        `own_leaders` (the Invo calls wallet): it follows its own traders and gets its own moves, never the main
+        wallet's (the runner skips it for leader sync, Hyperliquid moves and reconcile)."""
+        self.own_leaders = own_leaders
         self.risk_pct = risk_pct
         self.name = name or wallet_name(risk_pct)
         self.label = label or f"{risk_pct:g}% risk"
@@ -45,6 +48,8 @@ class SideWallet:
 
     def sync_leaders(self, main: State) -> None:
         """Follow exactly the main wallet's leaders, with its pauses."""
+        if self.own_leaders:
+            return
         for a in main.followed:
             if a not in self.st.followed:
                 self.rec({"ev": "follow", "leader": a})

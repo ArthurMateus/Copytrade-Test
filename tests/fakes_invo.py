@@ -1,0 +1,136 @@
+"""Loopback fake of the Invo API (NETWORK only). Answers are built from the REAL recorded ones
+(tests/fixtures/invo_*.json); our own code is never mocked."""
+from __future__ import annotations
+
+import copy
+import itertools
+import json
+import threading
+import time
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from tests.fakes import fixture
+
+
+def iso(ms: int) -> str:
+    return datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+class _Server(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+class FakeInvo:
+    """users: username -> user id; portfolios: user id -> [portfolio ids]; calls: portfolio id -> [raw open calls].
+    Tokens: the refresh token REFRESH0 is valid at start; every refresh rotates it (the old one is then refused)."""
+
+    def __init__(self, refresh_token: str = "REFRESH0"):
+        self.users: dict[str, str] = {}
+        self.portfolios: dict[str, list[str]] = {}
+        self.calls: dict[str, list[dict]] = {}
+        self.requests: list[tuple[str, dict]] = []
+        self.valid_refresh = refresh_token
+        self.valid_access = ""
+        self.refuse_refresh = False
+        self._n = itertools.count(1)
+        self.lock = threading.Lock()
+        fake = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _send(self, code, obj):
+                b = json.dumps(obj).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(b)))
+                self.end_headers()
+                self.wfile.write(b)
+
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(n) or b"{}")
+                path = self.path.split("/v1_0", 1)[-1]
+                fake.requests.append((path, body))
+                auth = self.headers.get("Authorization", "")
+                if path == "/auth/refresh_token":
+                    if fake.refuse_refresh or auth != "Bearer " + fake.valid_refresh:
+                        return self._send(401, {"status": "error", "message": "invalid refresh token"})
+                    k = next(fake._n)
+                    fake.valid_access, fake.valid_refresh = f"ACCESS{k}", f"REFRESH{k}"
+                    return self._send(200, {"accessToken": fake.valid_access, "refreshToken": fake.valid_refresh,
+                                            "success": True, "error": None})
+                if not fake.valid_access or auth != "Bearer " + fake.valid_access:
+                    return self._send(401, {"status": "error", "message": "Missing authorization header"})
+                return self._send(200, fake.answer(path, body))
+
+        self.http = _Server(("127.0.0.1", 0), H)
+        threading.Thread(target=self.http.serve_forever, daemon=True).start()
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.http.server_address[1]}/v1_0"
+
+    def close(self):
+        self.http.shutdown()
+        self.http.server_close()
+
+    def expire_access(self):
+        self.valid_access = "EXPIRED"
+
+    # ---- answers in the recorded shapes -------------------------------------------------------------
+    def answer(self, path: str, body: dict) -> dict:
+        if path == "/users/get_user":
+            uid = self.users.get(body.get("usersUsername") or "")
+            if uid is None:
+                return {"error": {"message": "User not found"}, "success": False, "user": None}
+            r = copy.deepcopy(fixture("invo_get_user.json"))
+            r["user"].update(id=uid, username=body["usersUsername"])
+            return r
+        if path == "/portfolios/v2/get_users_portfolios":
+            tmpl = fixture("invo_users_portfolios.json")["portfolios"][2]
+            out = []
+            for pid in self.portfolios.get(body["userId"], []):
+                p = copy.deepcopy(tmpl)
+                with self.lock:
+                    open_calls = list(self.calls.get(pid, []))
+                p.update(id=pid, ownerId=body["userId"],
+                         openTrades={"count": len(open_calls), "assets": [c["ticker"] for c in open_calls]})
+                out.append(p)
+            return {"portfolios": out}
+        if path == "/investments/get_investments":
+            with self.lock:
+                calls = copy.deepcopy(self.calls.get(body["portfolioId"], [])) if body.get("isOpen") else []
+            r = copy.deepcopy(fixture("invo_investments_open.json"))
+            r["investmentsTicker"] = calls
+            return r
+        return {"success": False}
+
+    def add_user(self, name: str, n_portfolios: int = 1) -> list[str]:
+        uid = f"uid-{name}"
+        self.users[name] = uid
+        pids = [f"pf-{name}-{i}" for i in range(n_portfolios)]
+        self.portfolios[uid] = pids
+        for p in pids:
+            self.calls.setdefault(p, [])
+        return pids
+
+    def open_call(self, pid: str, ticker: str, long: bool = True, leverage: float = 10, size: float = 0.05,
+                  entry: float = 3000.0, target: float | None = None, stop: float | None = None,
+                  created_ms: int | None = None) -> str:
+        c = copy.deepcopy(fixture("invo_investments_open.json")["investmentsTicker"][1])
+        cid = f"call-{next(self._n)}"
+        c.update(id=cid, ticker=ticker, name=ticker, directionLong=long, leverage=leverage, positionSize=size,
+                 entryPrice=entry, priceTarget=target, stopLoss=stop, isOpen=True,
+                 createdAt=iso(created_ms if created_ms is not None else int(time.time() * 1000)))
+        c["portfolio"]["id"] = pid
+        with self.lock:
+            self.calls.setdefault(pid, []).append(c)
+        return cid
+
+    def close_call(self, pid: str, cid: str) -> None:
+        with self.lock:
+            self.calls[pid] = [c for c in self.calls.get(pid, []) if c["id"] != cid]

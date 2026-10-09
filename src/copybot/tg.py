@@ -34,12 +34,14 @@ HYPER_COMMANDS = ("/hyperstatus", "/hypertrades", "/hypertraders", "/hyperwallet
 FOMO_COMMANDS = ("/fomo", "/fomotrades", "/fomotraders", "/fomowallet", "/fomopositions", "/fomoleaders",
                  "/fomoprogress", "/fomosearch", "/fomopause", "/fomoresume", "/fomoflatten", "/fomoreset",
                  "/fomoadd", "/fomofollow", "/fomounfollow")
+INVO_COMMANDS = ("/invo", "/invofollow", "/invounfollow")
 COMMANDS = ("/status", "/trades", "/traders", "/wallets", "/positions", "/leaders", "/progress", "/search", "/pause",
-            "/resume", "/flatten", "/reset", "/restart", "/help", "/add") + tuple(ALIASES) + FOMO_COMMANDS
+            "/resume", "/flatten", "/reset", "/restart", "/help", "/add") + tuple(ALIASES) + FOMO_COMMANDS \
+    + INVO_COMMANDS
 # what Discord shows in its slash-command list (the short Hyperliquid originals stay Telegram-only)
-SLASH_COMMANDS = ("/help", "/restart") + HYPER_COMMANDS + FOMO_COMMANDS
+SLASH_COMMANDS = ("/help", "/restart") + HYPER_COMMANDS + FOMO_COMMANDS + INVO_COMMANDS
 PIN_COMMANDS = ("/flatten", "/reset", "/fomoflatten", "/fomoreset")
-WALLET_COMMANDS = ("/add", "/fomoadd", "/fomofollow", "/fomounfollow")       # take a wallet address as their argument
+WALLET_COMMANDS = ("/add", "/fomoadd", "/fomofollow", "/fomounfollow", "/invofollow", "/invounfollow")       # take a wallet address as their argument
 ONCE = ("/reset", "/restart", "/flatten", "/fomoflatten", "/fomoreset")   # never acted on twice after a restart
 
 
@@ -303,5 +305,6 @@ HELP = ("🤖 <b>Copybot (paper)</b>\n\n"
         "/hyperflatten &lt;PIN&gt; – close everything and pause\n"
         "/hypersearch – look for new traders now and re-pick the best 7\n"
         "/hyperadd 0x… – check one wallet with the strict rules, follow it if it passes\n"
+        "/invo · /invofollow &lt;user&gt; · /invounfollow &lt;user&gt; – copy Invo traders' posted calls (paper)\n"
         "/hyperreset &lt;PIN&gt; – every Hyperliquid wallet back to the start (no open trades), traders kept\n\n"
         "/restart – restart the bot")

@@ -182,6 +182,19 @@ class Sol:
 
 
 @dataclass
+class Invo:
+    """Copy Invo (Involio) traders' posted calls on paper (owner request 2026-10-09; copybot/invo.py). Needs
+    INVO_TOKEN_FILE (a file holding the bot's own Invo account's refresh token), else it stays off."""
+    enabled: bool = True
+    api_base: str = "https://api.invoapp.com/v1_0"
+    poll_s: float = 30.0                  # one portfolio-list request per followed trader per poll
+    max_call_age_s: float = 180.0         # a call older than this when we first see it is not copied (late entry)
+    size_mult: float = 1.0                # our exposure = their size x leverage x this, of our equity (>= 10$)
+    limits_pct: float = 5.0               # the wallet's limits are those of a side wallet at this risk level
+    max_traders: int = 7
+
+
+@dataclass
 class Runtime:
     info_url: str = "https://api.hyperliquid.xyz/info"
     ws_url: str = "wss://api.hyperliquid.xyz/ws"
@@ -206,6 +219,7 @@ class Config:
     discord: Discord = field(default_factory=Discord)
     runtime: Runtime = field(default_factory=Runtime)
     sol: Sol = field(default_factory=Sol)
+    invo: Invo = field(default_factory=Invo)
     # secrets (env only, never logged)
     tg_token: str = field(default="", repr=False)
     tg_chat_id: str = field(default="", repr=False)
@@ -214,9 +228,10 @@ class Config:
     dc_channel_id: str = field(default="", repr=False)
     dc_owner_id: str = field(default="", repr=False)
     helius_key: str = field(default="", repr=False)          # HELIUS_API_KEY: live Solana data (optional)
+    invo_token_file: str = field(default="", repr=False)     # INVO_TOKEN_FILE: the bot's Invo login (optional)
 
 
-SECTIONS = ("risk", "broker", "selection", "telegram", "discord", "runtime", "sol")
+SECTIONS = ("risk", "broker", "selection", "telegram", "discord", "runtime", "sol", "invo")
 
 # (section, key) -> (min, max). The documented hard ceilings; a config outside them refuses to start.
 CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
@@ -295,6 +310,11 @@ CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
     ("sol", "swap_fee_pct"): (0.1, 5.0),
     ("sol", "extra_slippage_pct"): (0, 10),
     ("sol", "max_leaders"): (0, 7),
+    ("invo", "poll_s"): (1, 600),
+    ("invo", "max_call_age_s"): (10, 1800),
+    ("invo", "size_mult"): (0.1, 10.0),
+    ("invo", "limits_pct"): (0.5, 20.0),
+    ("invo", "max_traders"): (0, 20),
     ("sol", "max_candidates"): (1, 1000),
     ("sol", "discover_pages"): (1, 500),
     ("sol", "discover_per_page"): (1, 200),
@@ -361,6 +381,7 @@ def load(config_dir: str | os.PathLike, env: dict | None = None) -> Config:
     cfg.dc_channel_id = env.get("DISCORD_CHANNEL_ID", "")
     cfg.dc_owner_id = env.get("DISCORD_OWNER_ID", "")
     cfg.helius_key = env.get("HELIUS_API_KEY", "").strip()
+    cfg.invo_token_file = env.get("INVO_TOKEN_FILE", "").strip()
     return cfg
 
 
@@ -406,6 +427,6 @@ def scaled(cfg: Config, risk_pct: float) -> Config:
 def public_dict(cfg: Config) -> dict:
     """Config without secrets, safe to log."""
     d = asdict(cfg)
-    for k in ("tg_token", "tg_chat_id", "pin", "dc_token", "dc_channel_id", "dc_owner_id", "helius_key"):
+    for k in ("tg_token", "tg_chat_id", "pin", "dc_token", "dc_channel_id", "dc_owner_id", "helius_key", "invo_token_file"):
         d.pop(k)
     return d

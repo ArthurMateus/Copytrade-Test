@@ -21,7 +21,8 @@ from pathlib import Path
 
 from copybot import config, hl, log, tgfmt
 from copybot.broker import PaperBroker
-from copybot.detector import Detector
+from copybot.detector import Detector, Move
+from copybot.invo import PREFIX as INVO, InvoClient, Watcher as InvoWatcher
 from copybot.feed import Clock, Feed
 from copybot.ledger import Ledger, now_ms
 from copybot.positions import PositionManager
@@ -97,6 +98,23 @@ class Bot:
                                          self.mids, self.assets, alts_ok=self.gate.alts_ok, score_of=self.score_of,
                                          name=f"mirror_x{m:g}", label=f"mirror x{m:g} (their % of account)",
                                          sizer=self.mirror_size))
+        self.invo: SideWallet | None = None          # the Invo calls wallet (needs INVO_TOKEN_FILE)
+        self.invo_watch: InvoWatcher | None = None
+        self.invo_calls: dict[str, str] = {}         # Invo call id -> the coin we hold for it
+        self._invo_call = None                       # the call being opened (read by invo_size)
+        if cfg.invo.enabled and cfg.invo_token_file:
+            w = SideWallet(cfg, cfg.invo.limits_pct, self.data, side_broker, self.health, self.mids, self.assets,
+                           alts_ok=lambda leader: True, score_of=self.score_of, name="invo_calls",
+                           label="invo calls (posted trades)", sizer=self.invo_size, own_leaders=True)
+            # a call is first seen up to poll_s after it was posted: entries may be that old (still fail closed)
+            w.cfg.risk.max_entry_age_s = cfg.invo.max_call_age_s + cfg.invo.poll_s
+            self.invo = w
+            self.sides.append(w)
+            self.invo_watch = InvoWatcher(InvoClient(cfg.invo.api_base, cfg.invo_token_file), self.q,
+                                          lambda: {a[len(INVO):] for a in w.st.followed}, cfg.invo.poll_s,
+                                          cfg.invo.max_call_age_s, self.stop)
+        elif cfg.invo.enabled:
+            log.info("invo_off", why="INVO_TOKEN_FILE not set")
         self.det = Detector()
         on_cmd = lambda c: self.q.put(("cmd", c))
         self.ui = MultiUI(TelegramUI(cfg, on_cmd, lambda k, m: self.q.put(("card", k, m))),
@@ -149,6 +167,8 @@ class Bot:
     def on_sides(self, what: str, fn) -> None:
         """Run fn(side) for every side wallet; a failure in one is logged and never reaches the main wallet."""
         for w in self.sides:
+            if w.own_leaders and what in ("sync", "move", "reconcile"):
+                continue
             try:
                 fn(w)
             except Exception as e:
@@ -221,6 +241,8 @@ class Bot:
             threading.Thread(target=self.sol.run, name="sol", daemon=True).start()
         threading.Thread(target=self.health_worker, name="health", daemon=True).start()
         threading.Thread(target=self.sync_worker, name="sync", daemon=True).start()
+        if self.invo_watch:
+            self.invo_watch.start()
         self.scorer.focus = set(self.st.followed)
         self.scorer.start()
 
@@ -230,7 +252,7 @@ class Bot:
     def position_leaders(self) -> set[str]:
         """Owners and backers of open positions in any wallet: their fills and positions must keep being watched."""
         return {a for st in (self.st, *(w.st for w in self.sides)) for p in st.positions.values()
-                for a in (p.leader, *p.backers)}
+                for a in (p.leader, *p.backers) if not a.startswith(INVO)}       # Invo traders: no HL address
 
     def mirror_size(self, m, px: float, equity: float) -> float:
         """Mirror wallet: the leader's new position as a share of its account value (leverage included), times
@@ -246,6 +268,92 @@ class Bot:
         log.info("mirror_size", leader=m.leader, coin=m.coin, leader_pct=round(share * 100, 3),
                  want_usd=round(notional, 2))
         return notional / px
+
+    def invo_command(self, c) -> None:
+        w = self.invo
+        if w is None:
+            return self.ui.send("🧾 Invo is off: save the bot's Invo login in a file, set INVO_TOKEN_FILE to it and "
+                                "restart (see the README, Invo section).")
+        if c.name == "/invo":
+            return self.ui.send(tgfmt.invo_text(w.st, self.mids, self.invo_watch, now_ms()))
+        name = c.arg.strip().lstrip("@")
+        if not re.fullmatch(r"[A-Za-z0-9_.]{2,40}", name):
+            return self.ui.send(f"Usage: {c.name} &lt;Invo username&gt; (as in app.invoapp.com/&lt;username&gt;)")
+        leader = INVO + name.lower()
+        if c.name == "/invounfollow":
+            if leader not in w.st.followed:
+                return self.ui.send(f"🧾 @{tgfmt.esc(name)} is not followed.")
+            held = sum(1 for p in w.st.positions.values() if p.leader == leader)
+            w.rec({"ev": "unfollow", "leader": leader, "reason": "/invounfollow"})
+            self.invo_watch.forget(name.lower())
+            return self.ui.send(f"➖ 🧾 <b>Unfollowed</b> @{tgfmt.esc(name)}"
+                                + (f" · {held} open copy still managed until its stop or its close" if held else ""))
+        if leader in w.st.followed:
+            return self.ui.send(f"✅ 🧾 @{tgfmt.esc(name)} is already followed.")
+        if len(w.st.followed) >= self.cfg.invo.max_traders:
+            return self.ui.send(f"⛔ 🧾 Already following {len(w.st.followed)} Invo traders (the maximum): "
+                                "/invounfollow one first.")
+        w.rec({"ev": "follow", "leader": leader})
+        self.ui.send(f"➕ 🧾 <b>Following</b> @{tgfmt.esc(name)} on Invo · calls they open from now on are copied in "
+                     "the 'invo calls' wallet (/hyperwallet compares it). Calls already open are not copied.")
+
+    def invo_size(self, m, px: float, equity: float) -> float:
+        """Invo calls wallet: the trader's exposure (portfolio share x leverage) x invo.size_mult of our equity,
+        at least the minimum notional; the wallet's RiskGate clamps it."""
+        c = self._invo_call
+        share = c.exposure if c is not None else 0.0
+        notional = max(share * self.cfg.invo.size_mult * equity, self.cfg.risk.min_notional_usd * 1.05)
+        return notional / px if px > 0 else 0.0
+
+    def invo_coin(self, ticker: str) -> str | None:
+        """Invo ticker -> the Hyperliquid perp name (case can differ, e.g. kPEPE)."""
+        if ticker in self.assets:
+            return ticker
+        return next((a for a in self.assets if a.upper() == ticker.upper()), None)
+
+    def on_invo(self, kind: str, trader: str, call) -> None:
+        w, leader = self.invo, INVO + trader
+        if w is None or leader not in w.st.followed:
+            return
+        coin = self.invo_coin(call.ticker)
+        side = 1 if call.long else -1
+        if kind == "invo_open":
+            if coin is None:
+                return self.ui.send(f"🧾 Invo · @{tgfmt.esc(trader)} called {tgfmt.esc(call.ticker)}: not on "
+                                    "Hyperliquid, not copied.")
+            if coin in w.st.positions:
+                log.info("invo_skip", trader=trader, coin=coin, why="coin already held")
+                return
+            m = Move(leader, coin, 0.0, float(side), call.created_ms, call.created_ms, abs(hash(call.id)) % 10**12,
+                     (), call.entry, 1)
+            self._invo_call = call
+            try:
+                w.pm.on_move(m)
+            finally:
+                self._invo_call = None
+            p = w.st.positions.get(coin)
+            if p is not None and p.leader == leader:
+                self.invo_calls[call.id] = coin
+                self.ui.send(f"🧾 <b>Invo copy</b> · @{tgfmt.esc(trader)} {tgfmt.side_tag(side)} {tgfmt.esc(coin)} "
+                             f"({call.size * 100:.1f}% x {call.leverage:g}x of their paper portfolio)\n"
+                             + tgfmt.pre([("Their entry", tgfmt.fpx(call.entry)), ("Ours", tgfmt.fpx(p.entry_px)),
+                                          ("Size", tgfmt.fusd(p.size * p.entry_px, sign=False)),
+                                          ("Their target / stop", f"{tgfmt.fpx(call.target) if call.target else '-'} / "
+                                                                  f"{tgfmt.fpx(call.stop) if call.stop else '-'}"),
+                                          ("Our stop", tgfmt.fpx(p.stop_px))]))
+            return
+        held = self.invo_calls.pop(call.id, None) or coin
+        p = w.st.positions.get(held) if held else None
+        if p is None or p.leader != leader:
+            return
+        n = len(w.st.closed)
+        w.pm.on_move(Move(leader, held, float(p.side), 0.0, int(time.time() * 1000), call.created_ms,
+                          abs(hash(call.id)) % 10**12, (), call.closing_price or 0.0, 1))
+        if len(w.st.closed) > n:
+            t = w.st.closed[-1]
+            self.ui.send(f"🧾 <b>Invo close</b> · @{tgfmt.esc(trader)} closed {tgfmt.esc(held)}"
+                         + (f" ({tgfmt.esc(call.reason_closed)})" if call.reason_closed else "")
+                         + f" · ours {tgfmt.fusd(t['pnl'])}")
 
     def score_dict(self, leader: str) -> dict:
         return self.scores.get(leader) or self.scorer.scores.get(leader) or {}
@@ -415,6 +523,21 @@ class Bot:
             self.on_searched(item[1], item[3])
         elif kind == "added":
             self.on_added(*item[1:])
+        elif kind in ("invo_open", "invo_close"):
+            try:
+                self.on_invo(kind, item[1], item[2])
+            except Exception:
+                log.exception("invo_error", kind=kind)
+                self.alert("Invo calls wallet error (logged); the other wallets are not affected", key="invo_err")
+        elif kind == "invo_unknown":
+            self.ui.send(f"⚠️ 🧾 No Invo user called @{tgfmt.esc(item[1])}: /invounfollow {tgfmt.esc(item[1])} and "
+                         "check the name (as in app.invoapp.com/&lt;username&gt;).")
+        elif kind == "invo_auth":
+            if item[1]:
+                self.ui.send("✅ 🧾 Invo login OK again.")
+            else:
+                self.alert(f"Invo login refused ({item[2]}): no new Invo copies until a fresh token is saved in "
+                           "INVO_TOKEN_FILE (open copies keep their stops)", key="invo_auth", every_s=3600)
         elif kind == "review":
             weekly, n_pre, n_scored, n_el = item[1:]
             self.ui.send(f"🔎 <b>{'Weekly' if weekly else 'Daily'} review</b> · {n_pre} passed the pre-screen · "
@@ -617,6 +740,8 @@ class Bot:
             self.search_pending = True
             self.scorer.search_req.set()
             self.ui.send("🔎 Checking for new wallets in the background; I will re-pick again when it finishes.")
+        elif c.name in ("/invo", "/invofollow", "/invounfollow"):
+            self.invo_command(c)
         elif c.name == "/add":
             a = c.arg.strip()
             if not re.fullmatch(r"0x[0-9a-fA-F]{40}", a):
@@ -684,6 +809,13 @@ class Bot:
         for ev in seed:
             fresh.append(ev)
         fresh.close()
+        if self.invo is not None and self.invo.st.followed:
+            d = self.data / "wallets" / self.invo.name
+            d.mkdir(parents=True, exist_ok=True)
+            lg = Ledger(d / "ledger.jsonl")
+            for a, t in self.invo.st.followed.items():
+                lg.append({"ev": "follow", "leader": a, "ts": t})
+            lg.close()
         log.info("reset", archive=arch.as_posix(), followed=len(st.followed))
         return arch.as_posix()
 

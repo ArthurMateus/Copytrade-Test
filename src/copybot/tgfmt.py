@@ -371,3 +371,28 @@ def progress_text(st: State, mids: dict, btc_px: float | None, now_ms: float) ->
     ]) + ("\n⚠️ <i>Every copy so far was a long: check /hypertraders. The followed traders may all be long right now "
           "(shorts are copied the same way).</i>" if one_sided else "") \
         + "\n<i>A few dozen paper trades show the bot works, not that an edge exists.</i>"
+
+
+def invo_text(st: State, mids: dict, watch, now_ms: float) -> str:
+    """/invo: the Invo calls wallet, its followed traders (what copying each one made) and the open copies."""
+    eq = st.equity(mids)
+    lines = [f"🧾 <b>Invo calls</b> (paper) · {money(eq - st.equity0, st.equity0)} · wallet {fusd(eq, sign=False)}"]
+    if watch is not None:
+        state = "✅ reading Invo" if watch.auth_ok and watch.last_ok else ("⚠️ Invo login refused" if not watch.auth_ok
+                                                                         else "⏳ first read pending")
+        lines.append(state + (f" · last read {dur(now_ms - watch.last_ok * 1000)} ago" if watch.last_ok else ""))
+    if not st.followed:
+        lines.append("No Invo trader followed yet: /invofollow &lt;username&gt;")
+    for a in sorted(st.followed):
+        mine = [t for t in st.closed if t["leader"] == a]
+        wins = sum(1 for t in mine if t["pnl"] > 0)
+        held = [p for p in st.positions.values() if p.leader == a]
+        made = sum(t["pnl"] for t in mine) + sum(net_pnl(p, mids.get(p.coin)) for p in held)
+        flag = " ⏸️" if a in st.paused_leaders else ""
+        lines.append(f"{dot(made)} @{esc(a.split(':', 1)[1])}{flag} · {_n(len(mine), 'trade')} copied ({wins} won) · "
+                     f"{len(held)} open · {fusd(made)}")
+    for p in st.positions.values():
+        net = net_pnl(p, mids.get(p.coin))
+        lines.append(f"  {dot(net)} {esc(p.coin)} {side_tag(p.side)} from @{esc(p.leader.split(':', 1)[1])} · "
+                     f"{fusd(net)} · stop {fpx(p.stop_px)}")
+    return "\n".join(lines)

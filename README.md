@@ -156,6 +156,37 @@ Commands: the `/fomo...` column of the table above (only the owner can use them)
 it probably did (the log shows `sol_discovered traders=0`). Copy lag is the websocket alert plus one read (seconds); it is
 measured and shown in `/fomoprogress`. Re-record the Solana test data with `tools/record_chain.py`.
 
+## Invo calls wallet (Invo traders' posted trades, on paper)
+
+Invo (Involio, app.invoapp.com) traders post trade calls in PAPER portfolios: coin, long/short, leverage, entry,
+take-profit, stop-loss and size as a share of their portfolio. Invo never shows a trader's Hyperliquid address, so the
+bot copies the calls themselves, in its own paper side wallet **"invo calls"** ($300, compared with the others in
+`/hyperwallet`), at live Hyperliquid prices:
+- a call that appears while we watch (and is at most `invo.max_call_age_s` old) is opened with exposure = their size x
+  their leverage x `invo.size_mult` of our equity (at least $10), through the wallet's own RiskGate (limits of a 5%
+  wallet, our 3% stop); calls already open when we start watching a trader are never copied;
+- when the trader closes the call (or Invo closes it at its target/stop), we close.
+Commands: `/invofollow <username>`, `/invounfollow <username>`, `/invo` (followed traders, open copies, results).
+
+**Use a SEPARATE Invo account for the bot.** The bot logs in with a refresh token; every renewal replaces it, so the
+bot and a browser sharing one login keep logging each other out, and if Invo objects to automated reading only that
+account is affected.
+
+### Setup (once)
+1. In Chrome, open an **Incognito window** (Ctrl+Shift+N), go to https://app.invoapp.com and sign in with the bot's
+   Invo account.
+2. Press F12, open **Console**, type `allow pasting` and Enter if Chrome asks, then paste this and press Enter:
+   ```
+   (async()=>{const b=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));const k=await crypto.subtle.importKey('raw',b(localStorage.FlutterSecureStorage),{name:'AES-GCM'},false,['decrypt']);const [iv,ct]=localStorage['FlutterSecureStorage.REFRESH_TOKEN'].split('.').map(b);const t=new TextDecoder().decode(await crypto.subtle.decrypt({name:'AES-GCM',iv},k,ct));copy(t);console.log('Invo token copied ('+t.length+' characters)')})()
+   ```
+   It says "Invo token copied (about 750 characters)" and the token is on the clipboard.
+3. Open Notepad, paste, save as `secrets\invo.token` inside the bot folder ("Save as type: All files").
+4. **Close the Incognito window without logging out** (logging out would cancel the token).
+5. In PowerShell: `setx INVO_TOKEN_FILE "C:\Users\gedeo\Copytrade-test\secrets\invo.token"`, open a NEW window,
+   check it with `uv run python tools/invo_check.py nicush` (prints "login OK" and nicush's portfolios), then start
+   the bot as usual. The token lasts about a year and is renewed by the bot itself.
+If Invo refuses the login later, the bot alerts on Telegram/Discord; repeat steps 1-4.
+
 ## Findings from the real API (recorded in `tests/fixtures`, re-record with `tools/record_samples.py`)
 - One websocket can track at most **15 users** (`"Cannot track more than 15 total users."`).
 - Live `userFills` messages have no `isSnapshot` key, and `hash` can be all zeros.

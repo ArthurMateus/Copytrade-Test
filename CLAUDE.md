@@ -15,7 +15,8 @@ that are not listed there unless the owner asks. The README covers run instructi
 - Never import a signing library, read a wallet key, or call an exchange/order endpoint.
   `tests/test_safety.py` enforces this.
 - Secrets come from environment variables only: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `COPYBOT_PIN`,
-  `DISCORD_BOT_TOKEN`, `DISCORD_CHANNEL_ID`, `DISCORD_OWNER_ID`, and for the Solana book `HELIUS_API_KEY` (optional).
+  `DISCORD_BOT_TOKEN`, `DISCORD_CHANNEL_ID`, `DISCORD_OWNER_ID`, for the Solana book `HELIUS_API_KEY` (optional), and
+  for the Invo calls wallet `INVO_TOKEN_FILE` (path of the file holding the bot's Invo refresh token; optional).
   Never log or commit them. `log.py` redacts them.
 - Every order goes through `RiskGate.check` (`risk.py`). Exits (reduce/close/stop) are never refused; entries
   fail closed.
@@ -153,6 +154,26 @@ instances on the same wallet.
 - Bug found and fixed while building it: `_skip(..., kind=...)` collided with `notify(kind, ...)` (also in `positions.py`).
 - Open risks: FOMO could change its fee payer (discovery would find 0 traders: log `sol_discovered traders=0`); followed
   wallets keep working. The first review on the public RPC takes hours. Copy lag = websocket alert + one read.
+
+## Invo calls (owner request 2026-10-09; not in the original spec)
+- Invo (Involio, app.invoapp.com, a Flutter web app) traders post CALLS in PAPER portfolios (`"type": "paper"`; BTC
+  entries with cents cannot be Hyperliquid fills). Invo never exposes other traders' Hyperliquid addresses
+  (`master_address`/`wallet_address` in the app code belong to the logged-in user's own trading account), so the calls
+  are the signal. `copybot/invo.py`: parsers (fixtures `tests/fixtures/invo_*.json`, recorded from the web app with an
+  in-page XHR hook), `InvoClient` (POST JSON, `Authorization: Bearer <access>`; `/v1_0/auth/refresh_token` with
+  `Bearer <refresh>` returns `accessToken`+`refreshToken`, the refresh token ROTATES and is written back to
+  `INVO_TOKEN_FILE`; refresh tokens live ~1 year), `Watcher` (thread: one get_users_portfolios per followed trader per
+  `invo.poll_s`, get_investments only for portfolios whose `openTrades` changed; first poll = baseline, never copied;
+  new call <= `max_call_age_s` -> `("invo_open", user, Call)`, vanished call -> `("invo_close", ...)`).
+- The "invo calls" wallet is a `SideWallet(own_leaders=True)` in `data/wallets/invo_calls/` (leaders `invo:<user>`):
+  `on_sides` skips it for sync/move/reconcile; `position_leaders` excludes `invo:` (no HL address). Calls become
+  synthetic `Move`s (start 0 -> +-1 open, +-1 -> 0 close) through the normal PositionManager + RiskGate (limits of an
+  `invo.limits_pct` 5% wallet, our 3% stop, `max_entry_age_s` = max_call_age_s + poll_s); size via `Bot.invo_size` =
+  their positionSize x leverage x `invo.size_mult` x our equity (>= 10$). Tickers mapped to HL names case-insensitively;
+  not on HL -> told, not copied. `/hyperreset` keeps the Invo follows. Off without INVO_TOKEN_FILE (`/invo` says how).
+- The bot must use its OWN Invo account (rotation: a browser and the bot on one login log each other out). The owner
+  gets the refresh token with a DevTools console snippet (README) that decrypts `FlutterSecureStorage.REFRESH_TOKEN`
+  (AES-GCM, key in `localStorage.FlutterSecureStorage`) and copies it; `tools/invo_check.py` verifies it.
 
 ## Command families and resets (2026-10-08)
 - Hyperliquid: `/hyper<x>`; FOMO book: `/fomo<x>` (`tg.ALIASES`/`canon` turn every name into one canonical name
