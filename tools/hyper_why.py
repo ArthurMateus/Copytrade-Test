@@ -41,11 +41,12 @@ def main() -> int:
             print("\nMissed by just ONE rule:")
             for k, v in one.most_common():
                 print(f"  {k:<34}{v:>6}")
-        close = sorted(bad, key=lambda s: (len(s.get("reasons") or []), -s.get("score", 0)))[:10]
+        close = sorted(bad, key=lambda s: (len(s.get("reasons") or []), -sum((s.get("points") or {}).values())))[:10]
         print("\nClosest misses:")
         for s in close:
             a = s["address"]
-            print(f"  {a[:6]}...{a[-4:]}  score {s.get('score', 0):5.1f}  trades {s.get('trades', 0):>4}  "
+            pts = sum((s.get("points") or {}).values()) or s.get("score", 0)    # rejected wallets keep score 0
+            print(f"  {a[:6]}...{a[-4:]}  points {pts:5.1f}  trades {s.get('trades', 0):>4}  "
                   f"win {s.get('win_rate', 0) * 100:3.0f}%  PF {s.get('profit_factor', 0):5.2f}  "
                   f"drop {s.get('max_dd', 0) * 100:3.0f}%  fails: {', '.join(s.get('reasons') or [])}")
     return 0
