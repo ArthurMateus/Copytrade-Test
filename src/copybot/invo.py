@@ -237,6 +237,7 @@ class Watcher:
         self.auth_ok = True
         self.last_ok = 0.0
         self.unknown: set[str] = set()
+        self.stats: dict[str, list[Portfolio]] = {}       # username -> its active portfolios (for /invotraders)
 
     def start(self) -> None:
         threading.Thread(target=self.run, name="invo", daemon=True).start()
@@ -271,7 +272,9 @@ class Watcher:
                 return
             uid = self.uids[name] = found[0]
         now_open: dict[str, Call] = {}
-        for p in self.client.portfolios(uid):
+        ports = self.client.portfolios(uid)
+        self.stats[name] = [p for p in ports if p.active]
+        for p in ports:
             if not p.active:
                 continue
             sig = (p.open_count, tuple(sorted(p.open_assets)))

@@ -102,10 +102,13 @@ class Bot:
         self.invo_watch: InvoWatcher | None = None
         self.invo_calls: dict[str, str] = {}         # Invo call id -> the coin we hold for it
         self._invo_call = None                       # the call being opened (read by invo_size)
+        self.invo_info: dict[str, str] = {}          # our position id -> what the trader called (for its card)
+        self._invo_close_why: str | None = None      # the trader's close reason while it is being mirrored
         if cfg.invo.enabled and cfg.invo_token_file:
             w = SideWallet(cfg, cfg.invo.limits_pct, self.data, side_broker, self.health, self.mids, self.assets,
                            alts_ok=lambda leader: True, score_of=self.score_of, name="invo_calls",
-                           label="invo calls (posted trades)", sizer=self.invo_size, own_leaders=True)
+                           label="invo calls (posted trades)", sizer=self.invo_size, own_leaders=True,
+                           notify=self.on_invo_notify)
             # a call is first seen up to poll_s after it was posted: entries may be that old (still fail closed)
             w.cfg.risk.max_entry_age_s = cfg.invo.max_call_age_s + cfg.invo.poll_s
             self.invo = w
@@ -269,13 +272,25 @@ class Bot:
                  want_usd=round(notional, 2))
         return notional / px
 
+    def invo_record_rows(self) -> dict:
+        """Invo's own numbers for each followed trader (from the watcher's last read)."""
+        out = {}
+        for name, ports in (self.invo_watch.stats if self.invo_watch else {}).items():
+            rows = [(f"Invo: {p.title.strip()[:24] or 'portfolio'}",
+                     f"{p.win_rate:.0f}% win · {p.closed} calls · {p.open_count} open") for p in ports[:3]]
+            out[INVO + name] = rows
+        return out
+
     def invo_command(self, c) -> None:
         w = self.invo
         if w is None:
             return self.ui.send("🧾 Invo is off: save the bot's Invo login in a file, set INVO_TOKEN_FILE to it and "
                                 "restart (see the README, Invo section).")
-        if c.name == "/invo":
-            return self.ui.send(tgfmt.invo_text(w.st, self.mids, self.invo_watch, now_ms()))
+        if c.name in ("/invo", "/invotrades", "/invotraders"):
+            key = {"/invo": "invo:status", "/invotrades": "invo:trades", "/invotraders": "invo:traders"}[c.name]
+            self.live_cards.add(key)
+            self.last_body.pop(key, None)
+            return self.ui.set_card(key, self.render_card(key, self.health(), now_ms()), new=True)
         name = c.arg.strip().lstrip("@")
         if not re.fullmatch(r"[A-Za-z0-9_.]{2,40}", name):
             return self.ui.send(f"Usage: {c.name} &lt;Invo username&gt; (as in app.invoapp.com/&lt;username&gt;)")
@@ -334,26 +349,35 @@ class Bot:
             p = w.st.positions.get(coin)
             if p is not None and p.leader == leader:
                 self.invo_calls[call.id] = coin
-                self.ui.send(f"🧾 <b>Invo copy</b> · @{tgfmt.esc(trader)} {tgfmt.side_tag(side)} {tgfmt.esc(coin)} "
-                             f"({call.size * 100:.1f}% x {call.leverage:g}x of their paper portfolio)\n"
-                             + tgfmt.pre([("Their entry", tgfmt.fpx(call.entry)), ("Ours", tgfmt.fpx(p.entry_px)),
-                                          ("Size", tgfmt.fusd(p.size * p.entry_px, sign=False)),
-                                          ("Their target / stop", f"{tgfmt.fpx(call.target) if call.target else '-'} / "
-                                                                  f"{tgfmt.fpx(call.stop) if call.stop else '-'}"),
-                                          ("Our stop", tgfmt.fpx(p.stop_px))]))
+                self.invo_info[p.pos_id] = (
+                    f"Invo call by @{tgfmt.esc(trader)}: {call.size * 100:.1f}% x {call.leverage:g}x of their paper "
+                    f"portfolio · their entry {tgfmt.fpx(call.entry)} · target "
+                    f"{tgfmt.fpx(call.target) if call.target else '-'} · stop {tgfmt.fpx(call.stop) if call.stop else '-'}")
+                self.invo_card(p, force=True)
             return
         held = self.invo_calls.pop(call.id, None) or coin
         p = w.st.positions.get(held) if held else None
         if p is None or p.leader != leader:
             return
-        n = len(w.st.closed)
-        w.pm.on_move(Move(leader, held, float(p.side), 0.0, int(time.time() * 1000), call.created_ms,
-                          abs(hash(call.id)) % 10**12, (), call.closing_price or 0.0, 1))
-        if len(w.st.closed) > n:
-            t = w.st.closed[-1]
-            self.ui.send(f"🧾 <b>Invo close</b> · @{tgfmt.esc(trader)} closed {tgfmt.esc(held)}"
-                         + (f" ({tgfmt.esc(call.reason_closed)})" if call.reason_closed else "")
-                         + f" · ours {tgfmt.fusd(t['pnl'])}")
+        self._invo_close_why = call.reason_closed or "closed"
+        try:
+            w.pm.on_move(Move(leader, held, float(p.side), 0.0, int(time.time() * 1000), call.created_ms,
+                              abs(hash(call.id)) % 10**12, (), call.closing_price or 0.0, 1))
+        finally:
+            self._invo_close_why = None
+
+    def on_invo_notify(self, kind: str, **kw) -> None:
+        """The Invo wallet's position manager: every close (the trader's, or our stop) finalizes the copy's card."""
+        if kind == "closed":
+            self.invo_final(kw["trade"], self._invo_close_why)
+
+    def invo_final(self, t: dict, why: str | None = None) -> None:
+        """An Invo copy closed (the trader's close, or our stop): its live card becomes the final summary."""
+        key = f"invo:pos:{t['pos_id']}"
+        self.last_body.pop(key, None)
+        info = self.invo_info.pop(t["pos_id"], "")
+        self.ui.final_card(key, tgfmt.closed_card(t) + "\n🧾 Invo" + (f" · closed by the trader ({tgfmt.esc(why)})"
+                                                                     if why else "") + (f"\n{info}" if info else ""))
 
     def score_dict(self, leader: str) -> dict:
         return self.scores.get(leader) or self.scorer.scores.get(leader) or {}
@@ -664,18 +688,25 @@ class Bot:
             self.ui.send(f"⏸️ <b>Leader paused</b> <code>{tgfmt.short(kw['leader'])}</code> · "
                          f"{tgfmt.esc(kw['reason'])}\nNo new copies from it; open copies keep mirroring exits.")
 
-    def card_for(self, p, force: bool = False) -> None:
-        key = f"pos:{p.pos_id}"
+    def card_for(self, p, force: bool = False, prefix: str = "pos:", extra: str = "") -> None:
+        key = f"{prefix}{p.pos_id}"
         mark = self.mids.get(p.coin)
-        body = tgfmt.trade_card(p, mark, 0)
+        body = tgfmt.trade_card(p, mark, 0) + extra
         if not force and self.last_body.get(key) == body:
             return   # nothing changed: no edit (the time stamp alone is not a change)
         self.last_body[key] = body
-        self.ui.set_card(key, tgfmt.trade_card(p, mark, now_ms()))
+        self.ui.set_card(key, tgfmt.trade_card(p, mark, now_ms()) + extra)
+
+    def invo_card(self, p, force: bool = False) -> None:
+        info = self.invo_info.get(p.pos_id)
+        self.card_for(p, force, prefix="invo:pos:", extra=f"\n🧾 {info}" if info else "\n🧾 Invo call")
 
     def refresh_ui(self) -> None:
         for p in list(self.st.positions.values()):
             self.card_for(p)
+        if self.invo is not None:
+            for p in list(self.invo.st.positions.values()):
+                self.invo_card(p)
         h = self.health()
         for key in list(self.live_cards):
             # rendered at time 0 to see whether anything but the clock changed (no edit for a time stamp alone)
@@ -685,6 +716,14 @@ class Bot:
                 self.ui.set_card(key, self.render_card(key, h, now_ms()))
 
     def render_card(self, key: str, h, now: float) -> str:
+        if key.startswith("invo:") and self.invo is not None:
+            w = self.invo
+            if key == "invo:trades":
+                return tgfmt.trades_card(w.st, self.mids, now, title="🧾 <b>Invo trades</b>")
+            if key == "invo:traders":
+                return tgfmt.traders_card(w.st, self.mids, {}, {}, now, title="🧾 <b>Invo traders</b>",
+                                          extra=self.invo_record_rows())
+            return tgfmt.invo_text(w.st, self.mids, self.invo_watch, now)
         if key == "status":
             return tgfmt.status_card(self.st, self.mids, h, now, self.mids.get("BTC"))
         if key == "trades":
@@ -740,7 +779,7 @@ class Bot:
             self.search_pending = True
             self.scorer.search_req.set()
             self.ui.send("🔎 Checking for new wallets in the background; I will re-pick again when it finishes.")
-        elif c.name in ("/invo", "/invofollow", "/invounfollow"):
+        elif c.name in ("/invo", "/invotrades", "/invotraders", "/invofollow", "/invounfollow"):
             self.invo_command(c)
         elif c.name == "/add":
             a = c.arg.strip()

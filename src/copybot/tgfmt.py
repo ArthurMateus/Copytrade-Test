@@ -25,6 +25,8 @@ def esc(s) -> str:
 
 
 def short(addr: str) -> str:
+    if addr.startswith("invo:"):                 # an Invo trader: its username, not an address
+        return "@" + addr[5:]
     return f"{addr[:6]}…{addr[-4:]}" if len(addr) > 12 else addr
 
 
@@ -198,15 +200,15 @@ def status_card(st: State, mids: dict, health, now_ms: float, btc_px: float | No
     ]) + "\n" + updated(now_ms)
 
 
-def trades_card(st: State, mids: dict, now_ms: float) -> str:
-    """/trades: every open copy at the live price, plus the result against the starting wallet."""
+def trades_card(st: State, mids: dict, now_ms: float, title: str = "💼 <b>Trades</b>") -> str:
+    """/trades (and /invotrades): every open copy at the live price, plus the result against the starting wallet."""
     eq = st.equity(mids)
     total = eq - st.equity0
     open_net = sum(net_pnl(p, mids.get(p.coin)) for p in st.positions.values())
     wins = sum(1 for t in st.closed if t["pnl"] > 0)
     closed_pnl = sum(t["pnl"] for t in st.closed)
     at_risk = sum(loss_if_stopped(p) for p in st.positions.values())
-    out = [f"💼 <b>Trades</b> · {len(st.positions)} open\n"
+    out = [f"{title} · {len(st.positions)} open\n"
            f"{dot(total)} <b>Total: {fusd(total)} ({fpct(total / st.equity0 * 100)})</b> on {fusd(st.equity0, sign=False)}",
            pre([
                ("Wallet now", fusd(eq, sign=False)),
@@ -252,8 +254,10 @@ def leaders_card(st: State, ranks: dict[str, int], now_ms: float, scores: dict |
     return "👥 <b>Leaders</b> · rank · score · copied trades · made for you\n" + "\n".join(lines) + "\n" + updated(now_ms)
 
 
-def traders_card(st: State, mids: dict, ranks: dict[str, int], scores: dict | None, now_ms: float) -> str:
-    """/traders: every followed (or still held) leader with what copying it has earned us."""
+def traders_card(st: State, mids: dict, ranks: dict[str, int], scores: dict | None, now_ms: float,
+                 title: str = "👥 <b>Traders</b>", extra: dict | None = None) -> str:
+    """/traders (and /invotraders): every followed (or still held) leader with what copying it has earned us.
+    `extra`: leader -> more (label, value) rows; with it, the score tag is left out (Invo traders have no score)."""
     scores = scores or {}
     leaders = list(st.followed) + [a for p in st.positions.values() for a in (p.leader, *p.backers)
                                    if a not in st.followed]
@@ -269,7 +273,8 @@ def traders_card(st: State, mids: dict, ranks: dict[str, int], scores: dict | No
         grand += made
         sc = scores.get(a, {})
         r = ranks.get(a)
-        tag = (f"#{r} · " if r else "") + (f"{sc['score']:.0f}/100" if sc.get("score") else "no score")
+        tag = "" if extra is not None else (f"#{r} · " if r else "") + (f"{sc['score']:.0f}/100" if sc.get("score")
+                                                                       else "no score")
         tag += " 🎲" if sc.get("diversified") else ""
         flag = " ⏸️ paused" if a in st.paused_leaders else ("" if a in st.followed else " ⏳ no longer followed")
         rows = [
@@ -285,14 +290,16 @@ def traders_card(st: State, mids: dict, ranks: dict[str, int], scores: dict | No
             rows.append(("Profit factor", pf_text(sc.get("profit_factor", 0))))
             if sc.get("open_losers"):
                 rows.append(("Holding losers", f"{sc['open_losers']} open · {sc.get('open_loss_pct', 0) * 100:.0f}% of account"))
+        rows += (extra or {}).get(a, [])
         if a in st.followed and now_ms:
             rows.append(("Following for", dur(now_ms - st.followed[a])))
         if a in st.paused_leaders:
             rows.append(("Paused because", st.paused_leaders[a]))
-        blocks.append(f"\n{dot(made)} <code>{short(a)}</code> · {esc(tag)}{flag}\n" + pre(rows))
+        blocks.append(f"\n{dot(made)} <code>{short(a)}</code>" + (f" · {esc(tag)}" if tag else "") + f"{flag}\n"
+                      + pre(rows))
     if not blocks:
-        return "👥 <b>Traders</b>\nNone followed yet.\n" + updated(now_ms)
-    head = (f"👥 <b>Traders</b> · {len(st.followed)} followed\n"
+        return f"{title}\nNone followed yet.\n" + updated(now_ms)
+    head = (f"{title} · {len(st.followed)} followed\n"
             f"{dot(grand)} <b>Copying them made: {fusd(grand)} ({fpct(grand / st.equity0 * 100)})</b>")
     return "\n".join([head, *blocks, updated(now_ms)])
 
@@ -374,13 +381,14 @@ def progress_text(st: State, mids: dict, btc_px: float | None, now_ms: float) ->
 
 
 def invo_text(st: State, mids: dict, watch, now_ms: float) -> str:
-    """/invo: the Invo calls wallet, its followed traders (what copying each one made) and the open copies."""
+    """/invo (live card): the Invo calls wallet, its followed traders (what copying each one made) and the open
+    copies. `now_ms` 0 = no times (the card is only edited when something else changed)."""
     eq = st.equity(mids)
     lines = [f"🧾 <b>Invo calls</b> (paper) · {money(eq - st.equity0, st.equity0)} · wallet {fusd(eq, sign=False)}"]
     if watch is not None:
         state = "✅ reading Invo" if watch.auth_ok and watch.last_ok else ("⚠️ Invo login refused" if not watch.auth_ok
                                                                          else "⏳ first read pending")
-        lines.append(state + (f" · last read {dur(now_ms - watch.last_ok * 1000)} ago" if watch.last_ok else ""))
+        lines.append(state)
     if not st.followed:
         lines.append("No Invo trader followed yet: /invofollow &lt;username&gt;")
     for a in sorted(st.followed):
@@ -395,4 +403,7 @@ def invo_text(st: State, mids: dict, watch, now_ms: float) -> str:
         net = net_pnl(p, mids.get(p.coin))
         lines.append(f"  {dot(net)} {esc(p.coin)} {side_tag(p.side)} from @{esc(p.leader.split(':', 1)[1])} · "
                      f"{fusd(net)} · stop {fpx(p.stop_px)}")
+    lines.append("/invotrades · /invotraders · /hyperwallet compares it with the other wallets")
+    if now_ms:
+        lines.append(updated(now_ms))
     return "\n".join(lines)

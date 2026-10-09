@@ -143,14 +143,20 @@ def test_bot_copies_an_invo_call_and_closes_it_when_the_trader_does(invo_env, mo
         assert p.size * p.entry_px == pytest.approx(0.05 * 10 * 300, rel=0.05)    # their 5% x 10x of our 300$
         assert "ETH" not in bot.st.positions                                      # the main wallet never copies it
         assert all("ETH" not in w.st.positions for w in bot.sides if w is not bot.invo)
-        assert wait_for(lambda: any("Invo copy" in m["text"] for m in tg.sent))
-        tg.say("/invo")
-        assert wait_for(lambda: any("Invo calls" in m["text"] and "@nicush" in m["text"] for m in tg.sent))
+        text = lambda: " ".join(m["text"] for m in tg.sent + tg.edits)
+        assert wait_for(lambda: "Invo call by @nicush" in text() and "<b>ETH</b>" in text())   # its live trade card
+        for cmd, needle in (("/invo", "Invo calls"), ("/invotrades", "Invo trades"), ("/invotraders", "Invo traders")):
+            tg.say(cmd)
+            assert wait_for(lambda: needle in text()), cmd
+        assert "@nicush" in text() and "Invo: " in text()                        # Invo's own record on the card
+        n_edits = len(tg.edits)
+        hl.mids["ETH"] = 3015.0                                                     # the price moves: cards are edited
+        assert wait_for(lambda: len(tg.edits) > n_edits, timeout=10)
         cid = f.calls[pid][0]["id"]
         f.close_call(pid, cid)
         assert wait_for(lambda: "ETH" not in bot.invo.st.positions, timeout=10)
         assert bot.invo.st.closed[-1]["leader"] == "invo:nicush"
-        assert wait_for(lambda: any("Invo close" in m["text"] for m in tg.sent))
+        assert wait_for(lambda: "closed by the trader" in text())               # the card became the summary
         assert "REFRESH" not in " ".join(m["text"] for m in tg.sent)               # no token ever shown
         tg.say("/invounfollow nicush")
         assert wait_for(lambda: "invo:nicush" not in bot.invo.st.followed)
@@ -167,5 +173,24 @@ def test_without_a_token_file_invo_is_off_and_says_how_to_turn_it_on(env, monkey
         assert bot.invo is None and all(not w.own_leaders for w in bot.sides)
         tg.say("/invofollow nicush")
         assert wait_for(lambda: any("Invo is off" in m["text"] for m in tg.sent))
+    finally:
+        stop_bot(bot, th)
+
+
+def test_our_stop_closes_an_invo_copy_and_its_card_becomes_the_summary(invo_env, monkeypatch):
+    hl, tg, data, cdir, f, tok = invo_env
+    pid = f.add_user("akira")[0]
+    bot, th = start_with_invo((hl, tg, data, cdir), tok, monkeypatch)
+    try:
+        tg.say("/invofollow akira")
+        assert wait_for(lambda: bot.invo_watch.known.get("akira") is not None, timeout=10)
+        f.open_call(pid, "SOL", long=True, leverage=5, size=0.05, entry=150.0)
+        assert wait_for(lambda: "SOL" in bot.invo.st.positions, timeout=10)
+        hl.mids["SOL"] = 140.0                                    # -6.7%: through our 3% stop
+        assert wait_for(lambda: "SOL" not in bot.invo.st.positions, timeout=10)
+        assert bot.invo.st.closed[-1]["reason"] == "stop"
+        text = lambda: " ".join(m["text"] for m in tg.sent + tg.edits)
+        assert wait_for(lambda: "stop-loss hit" in text() and "Invo call by @akira" in text())
+        assert "closed by the trader" not in text()
     finally:
         stop_bot(bot, th)
