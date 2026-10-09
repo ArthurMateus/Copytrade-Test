@@ -150,6 +150,7 @@ class Scorer:
                              if d.get("v") == scoring.VERSION and d.get("rules") == self.params.rules()}
         self.stop = threading.Event()
         self.search_req = threading.Event()   # /search: run a review now, then publish ("searched", ...)
+        self.add_q: queue.Queue = queue.Queue()   # /hyperadd: wallets the owner wants checked now
         self.focus: set[str] = set()   # followed leaders: always rescored (set by the trading loop)
         self.our_notional = cfg.risk.start_equity * cfg.risk.risk_per_trade_pct / cfg.risk.stop_pct
 
@@ -163,6 +164,7 @@ class Scorer:
             self.maybe_cycle(force=True)
         while not self.stop.is_set():
             try:
+                self.handle_adds()
                 now = self.now()
                 weekly = now - self.meta["last_weekly"] >= 7 * DAY
                 if weekly or now - self.meta["last_daily"] >= DAY:
@@ -178,6 +180,24 @@ class Scorer:
                 self.out.put(("alert", f"scorer error: {type(e).__name__}"))
                 self.stop.wait(60)
             self.stop.wait(5)
+
+    def handle_adds(self) -> None:
+        """/hyperadd: screen and score each requested wallet now (a fresh check, even if screened this week) and
+        publish ("added", address, screen result or None, score or None, ranking, scores)."""
+        while not self.stop.is_set():
+            try:
+                a = self.add_q.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                av = self.info.account(a).value
+            except Exception as e:
+                log.warn("add_account_failed", addr=a, err=str(e))
+                av = 0.0
+            self.screened.pop(a, None)
+            self.screen_and_score(a, av)
+            log.info("added_checked", addr=a, screened=a in self.screened, scored=a in self.scores)
+            self.out.put(("added", a, self.screened.get(a), self.scores.get(a), self.ranking(), dict(self.scores)))
 
     def rescore_missing(self) -> None:
         """Wallets that passed the screen but have no score of the current version (the scoring rules changed):
@@ -209,6 +229,7 @@ class Scorer:
         for r, pre in cands:
             if self.stop.is_set():
                 return
+            self.handle_adds()                # an owner request does not wait hours for the review to end
             if pool >= self.cfg.selection.pool_size:
                 break
             a = r.address

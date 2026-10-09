@@ -112,6 +112,12 @@ instances on the same wallet.
   a `/fomosearch` during a running search only reports progress. `history_days` = 30 to keep a search affordable.
   Seeder and scorer can read one wallet's history together: `SolScorer.history` locks per wallet (Windows refused two
   writers of one cache file).
+- `/hyperadd 0x…` and `/fomoadd <wallet>` (owner request 2026-10-09): the owner (or Claude, only when asked in a
+  session; never on a schedule) supplies a wallet; the scorer thread checks it at once (`add_q`, also between wallets
+  of a running review: HL re-screens even if screened this week; FOMO marks it `manual` in the pool, never pruned and
+  re-checked at every search). Same strict rules, no bypass. Passes + free slot (< max_leaders) -> followed at once
+  (`apply_plan`); else the reply says why (rules failed, already followed, paused, or full -> next search). Discord gets
+  a required `wallet` option (`tg.WALLET_COMMANDS`).
 - Swap parsing (`chain.parse_tx`): the wallet's USDC/USDT moves one way and one token the other. A routed swap leaves a
   speck of the intermediate token (fixture `chain_tx_fomo_routed.json`): the token with the largest relative balance
   change wins if every other moved < 10%. SOL-priced swaps (~1 in 40) are skipped (no USD price). Leg id = signature.

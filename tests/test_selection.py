@@ -311,3 +311,25 @@ def test_rebalance_skips_paused_and_cooling_down_leaders():
     p = rebalance(R[:10], {R[0]: NOW}, {R[0]}, {R[1]: NOW - HOUR}, NOW, CFG)
     assert p.drops == [(R[0], "paused after a bad streak")]
     assert R[1] not in p.joins and p.joins == R[2:9]
+
+
+def test_hyperadd_checks_one_wallet_now_and_reports_the_result(scorer_env):
+    fake, cfg, info, tmp, good, bad = scorer_env
+    out = queue.Queue()
+    sc = Scorer(cfg, info, out, tmp / "cache")
+    sc.screened[good[0]] = {"ok": False, "reason": "old", "ts": sc.now(), "v": 99}   # a stale result is redone
+    for a in (good[0], bad[0], "0x" + "77" * 20):
+        sc.add_q.put(a)
+    sc.handle_adds()
+    added = {}
+    while not out.empty():
+        m = out.get()
+        if m[0] == "added":
+            added[m[1]] = m
+    assert set(added) == {good[0], bad[0], "0x" + "77" * 20}
+    _, _, screened, score, ranking, scores = added[good[0]]
+    assert screened["ok"] and score["eligible"] and good[0] in ranking
+    _, _, screened, score, _, _ = added[bad[0]]
+    assert not (score or {}).get("eligible")
+    _, _, screened, score, _, _ = added["0x" + "77" * 20]                # no trades at all
+    assert screened is not None and not screened["ok"] and score is None

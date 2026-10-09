@@ -392,3 +392,25 @@ def test_restart_command_stops_the_loop_for_the_restart_loop(env):
         assert wait_for(lambda: bot.stop.is_set(), timeout=8)
     finally:
         stop_bot(bot, th)
+
+
+def test_hyperadd_queues_the_wallet_and_follows_it_when_it_passes(env):
+    hl, tg, data, cdir = env
+    bot, th = start_bot(env)
+    try:
+        tg.say("/hyperadd nonsense")
+        assert wait_for(lambda: any("Usage: /hyperadd" in m["text"] for m in tg.sent))
+        new = "0x" + "C1" * 20
+        tg.say(f"/hyperadd {new}")
+        assert wait_for(lambda: bot.scorer.add_q.qsize() == 1)
+        assert bot.scorer.add_q.get() == new.lower()
+        good = {"eligible": True, "score": 88, "trades": 120, "win_rate": 0.7, "profit_factor": 3}
+        bot.q.put(("added", new.lower(), {"ok": True}, good, [new.lower()], {new.lower(): good}))
+        assert wait_for(lambda: new.lower() in bot.st.followed)
+        assert all(new.lower() in w.st.followed for w in bot.sides)
+        bad = "0x" + "d2" * 20
+        bot.q.put(("added", bad, {"ok": True}, {"eligible": False, "reasons": ["win_rate<60%"]}, [], {}))
+        assert wait_for(lambda: any("fails the strict rules: win_rate&lt;60%" in m["text"] for m in tg.sent))
+        assert bad not in bot.st.followed
+    finally:
+        stop_bot(bot, th)

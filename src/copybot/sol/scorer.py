@@ -41,6 +41,7 @@ class SolScorer:
         self.focus: set[str] = set()
         self.auth_ok = True
         self.search_req = threading.Event()      # /fomosearch: review now
+        self.add_q: queue.Queue = queue.Queue()  # /fomoadd: wallets the owner wants checked now
         self._locks: dict[str, threading.Lock] = {}
         self._locks_lock = threading.Lock()
         self.progress: dict = {"phase": "idle", "found": 0, "todo": 0, "done": 0, "eligible": 0, "started": 0,
@@ -65,6 +66,7 @@ class SolScorer:
             self.maybe_cycle(force=True)
         while not self.stop.is_set():
             try:
+                self.handle_adds()
                 if self.search_req.is_set():
                     self.search_req.clear()
                     self.review()
@@ -140,6 +142,25 @@ class SolScorer:
                  win=round(s.win_rate, 3), pf=round(s.profit_factor, 2), edge_pct=round(s.copy_edge_pct, 2),
                  why=",".join(s.reasons))
 
+    def handle_adds(self) -> None:
+        """/fomoadd: score each requested wallet now, keep it in the pool for every later search, and publish
+        ("sol_added", address, score or None, error text, ranking, scores)."""
+        while not self.stop.is_set():
+            try:
+                a = self.add_q.get_nowait()
+            except queue.Empty:
+                return
+            p = self.pool.get(a) or {"n": 0, "usd": 0.0}
+            self.pool[a] = {**p, "last": self.now(), "manual": True}
+            err = ""
+            try:
+                self.score(a)
+            except (ChainError, AuthError) as e:
+                err = str(e)
+                log.warn("sol_add_failed", addr=a, err=err)
+            self._save()
+            self.out.put(("sol_added", a, None if err else self.scores.get(a), err, self.ranking(), dict(self.scores)))
+
     # ---- daily review ---------------------------------------------------------------------------------
     def discover(self) -> tuple[int, int]:
         """Sample FOMO's flow and add the traders seen to the pool -> (FOMO trades opened, distinct traders in them)."""
@@ -151,7 +172,7 @@ class SolScorer:
             p["n"] += 1
             p["usd"] += sum(g.usd for g in legs)
             p["last"] = now
-        for w in [w for w, p in self.pool.items() if now - p["last"] > POOL_DAYS * DAY]:
+        for w in [w for w, p in self.pool.items() if now - p["last"] > POOL_DAYS * DAY and not p.get("manual")]:
             del self.pool[w]
         self.auth_ok = True
         self.out.put(("sol_auth", True))
@@ -162,7 +183,8 @@ class SolScorer:
     def candidates(self) -> list[str]:
         """Biggest traders by USD moved in the sampled FOMO flow (more sightings break ties)."""
         ranked = sorted(self.pool.items(), key=lambda kv: (-kv[1]["usd"], -kv[1]["n"], kv[0]))
-        return [w for w, p in ranked if p["usd"] > 0][: self.c.max_candidates]
+        manual = [w for w, p in ranked if p.get("manual")]          # /fomoadd wallets are always re-checked
+        return manual + [w for w, p in ranked if p["usd"] > 0 and not p.get("manual")][: self.c.max_candidates]
 
     def eligible(self, wallets) -> int:
         return sum(1 for a in wallets if (self.scores.get(a) or {}).get("eligible"))
@@ -188,6 +210,7 @@ class SolScorer:
         for i, a in enumerate(todo, 1):
             if self.stop.is_set():
                 return
+            self.handle_adds()                # an owner request does not wait for the search to end
             try:
                 self.score(a)
             except ChainError as e:

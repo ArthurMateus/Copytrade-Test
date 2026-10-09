@@ -60,6 +60,7 @@ time in one process, each with its own family of commands:
 | `/hyperleaders` | `/fomoleaders` | followed wallets, one line each (live) |
 | `/hyperprogress` | `/fomoprogress` | success metrics (Hyperliquid also shows longs and shorts separately) |
 | `/hypersearch` | `/fomosearch` | look for new traders now |
+| `/hyperadd 0x…` | `/fomoadd <wallet>` | check ONE wallet you found with the same strict rules now; followed at once if it passes and fewer than 7 are followed, else the bot says which rules failed. A FOMO wallet added this way is re-checked at every later search |
 | `/hyperpause`, `/hyperresume` | `/fomopause`, `/fomoresume` | stop / allow new entries (exits always run) |
 | `/hyperflatten <PIN>` | `/fomoflatten <PIN>` | close everything of that book and pause it |
 | `/hyperreset <PIN>` | `/fomoreset <PIN>` | that book back to the start ($300, no history, traders kept, old history archived; refused while a trade is open) |

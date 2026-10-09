@@ -7,6 +7,7 @@ telegram poll + outbox. Workers only talk to the trading loop through one queue.
 from __future__ import annotations
 
 import argparse
+import re
 import datetime as dt
 import os
 import queue
@@ -383,6 +384,8 @@ class Bot:
             self.on_ranking(item[1], item[2], item[3])
         elif kind == "searched":
             self.on_searched(item[1], item[3])
+        elif kind == "added":
+            self.on_added(*item[1:])
         elif kind == "review":
             weekly, n_pre, n_scored, n_el = item[1:]
             self.ui.send(f"🔎 <b>{'Weekly' if weekly else 'Daily'} review</b> · {n_pre} passed the pre-screen · "
@@ -417,6 +420,29 @@ class Bot:
             self.ui.send("🔎 <b>Search finished</b> · no eligible wallet found: keeping your current traders.")
             return
         self.repick("🔎 <b>Search finished</b>")
+
+    def on_added(self, a: str, screened: dict | None, score: dict | None, ranking: list[str], scores: dict) -> None:
+        """/hyperadd result: follow at once if it passes every rule and a slot is free, else say why not."""
+        self.ranking, self.scores = list(ranking), scores
+        self.ranks = {x: i + 1 for i, x in enumerate(ranking)}
+        who = f"<code>{tgfmt.short(a)}</code>"
+        if screened is None:
+            self.ui.send(f"⚠️ /hyperadd {who}: could not read its trades from Hyperliquid. Try again in a minute.")
+        elif not screened.get("ok"):
+            self.ui.send(f"❌ /hyperadd {who} did not pass the first check: {tgfmt.esc(screened.get('reason', '?'))}. "
+                         "Not followed.")
+        elif not score or not score.get("eligible"):
+            why = ", ".join((score or {}).get("reasons") or ["not scored"])
+            self.ui.send(f"❌ /hyperadd {who} fails the strict rules: {tgfmt.esc(why)}. Not followed.")
+        elif a in self.st.followed:
+            self.ui.send(f"✅ /hyperadd {who} passes ({score.get('score', 0):.0f}/100) and is already followed.")
+        elif a in self.st.paused_leaders:
+            self.ui.send(f"⏸️ /hyperadd {who} passes but is paused after a bad streak of ours. Not followed.")
+        elif len(self.st.followed) >= self.cfg.risk.max_leaders:
+            self.ui.send(f"✅ /hyperadd {who} passes ({score.get('score', 0):.0f}/100), but you already follow "
+                         f"{len(self.st.followed)}. It is in the ranking now: /hypersearch re-picks the best.")
+        else:
+            self.apply_plan(Plan([a], [], {}))
 
     def repick(self, title: str) -> None:
         plan = rebalance(self.ranking, self.st.followed, set(self.st.paused_leaders), self.st.dropped, now_ms(),
@@ -562,6 +588,14 @@ class Bot:
             self.search_pending = True
             self.scorer.search_req.set()
             self.ui.send("🔎 Checking for new wallets in the background; I will re-pick again when it finishes.")
+        elif c.name == "/add":
+            a = c.arg.strip()
+            if not re.fullmatch(r"0x[0-9a-fA-F]{40}", a):
+                self.ui.send("Usage: /hyperadd 0x… (a Hyperliquid wallet address, 0x and 40 hex characters)")
+                return
+            self.scorer.add_q.put(a.lower())
+            self.ui.send(f"🔎 Checking <code>{tgfmt.short(a.lower())}</code> with the strict rules now (about a "
+                         "minute); I will follow it if it passes and a slot is free.")
         elif c.name == "/restart":
             self.ui.send("🔄 <b>Restarting</b>… back in about 15 seconds.")
             self.restart_at = time.time() + 3

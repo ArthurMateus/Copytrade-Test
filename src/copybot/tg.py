@@ -26,17 +26,20 @@ ALIASES = {"/hyperstatus": "/status", "/hypertrades": "/trades", "/hypertraders"
            "/hyperwallet": "/wallets", "/hyperwallets": "/wallets", "/hyperpositions": "/positions",
            "/hyperleaders": "/leaders", "/hyperprogress": "/progress", "/hypersearch": "/search",
            "/hyperpause": "/pause", "/hyperresume": "/resume", "/hyperflatten": "/flatten", "/hyperreset": "/reset",
+           "/hyperadd": "/add",
            "/fomostatus": "/fomo", "/fomowallets": "/fomowallet"}
 HYPER_COMMANDS = ("/hyperstatus", "/hypertrades", "/hypertraders", "/hyperwallet", "/hyperpositions",
                   "/hyperleaders", "/hyperprogress", "/hypersearch", "/hyperpause", "/hyperresume", "/hyperflatten",
-                  "/hyperreset")
+                  "/hyperreset", "/hyperadd")
 FOMO_COMMANDS = ("/fomo", "/fomotrades", "/fomotraders", "/fomowallet", "/fomopositions", "/fomoleaders",
-                 "/fomoprogress", "/fomosearch", "/fomopause", "/fomoresume", "/fomoflatten", "/fomoreset")
+                 "/fomoprogress", "/fomosearch", "/fomopause", "/fomoresume", "/fomoflatten", "/fomoreset",
+                 "/fomoadd")
 COMMANDS = ("/status", "/trades", "/traders", "/wallets", "/positions", "/leaders", "/progress", "/search", "/pause",
-            "/resume", "/flatten", "/reset", "/restart", "/help") + tuple(ALIASES) + FOMO_COMMANDS
+            "/resume", "/flatten", "/reset", "/restart", "/help", "/add") + tuple(ALIASES) + FOMO_COMMANDS
 # what Discord shows in its slash-command list (the short Hyperliquid originals stay Telegram-only)
 SLASH_COMMANDS = ("/help", "/restart") + HYPER_COMMANDS + FOMO_COMMANDS
 PIN_COMMANDS = ("/flatten", "/reset", "/fomoflatten", "/fomoreset")
+WALLET_COMMANDS = ("/add", "/fomoadd")       # take a wallet address as their argument
 ONCE = ("/reset", "/restart", "/flatten", "/fomoflatten", "/fomoreset")   # never acted on twice after a restart
 
 
@@ -299,5 +302,6 @@ HELP = ("🤖 <b>Copybot (paper)</b>\n\n"
         "/hyperpause · /hyperresume – new entries (exits always run)\n"
         "/hyperflatten &lt;PIN&gt; – close everything and pause\n"
         "/hypersearch – look for new traders now and re-pick the best 7\n"
+        "/hyperadd 0x… – check one wallet with the strict rules, follow it if it passes\n"
         "/hyperreset &lt;PIN&gt; – every Hyperliquid wallet back to the start (no open trades), traders kept\n\n"
         "/restart – restart the bot")

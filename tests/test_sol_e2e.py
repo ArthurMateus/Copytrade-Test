@@ -21,14 +21,14 @@ MINT = "MemeMint1111111111111111111111111111111111"
 GOOD = "GoodWallet11111111111111111111111111111111"
 
 
-def history_swaps(sol: FakeSolana, now_ms: int, wallet=GOOD, n=90, days=60) -> None:
+def history_swaps(sol: FakeSolana, now_ms: int, wallet=GOOD, n=90, days=60, fomo=True) -> None:
     """A FOMO trader that passes every strict rule: 90 closed trades, ~60% wins, 20 min holds, many tokens."""
     pattern = [0.40, 0.40, -0.15, 0.40, -0.15]
     for i in range(n):
         t = now_ms - days * DAY + int(i * (days * DAY - 3 * 3600_000) / n)
         tok = f"Hist{i % 37:02d}"
-        sol.swap(wallet, "buy", tok, 1000, 200.0, t)
-        sol.swap(wallet, "sell", tok, 1000, 200.0 * (1 + pattern[i % 5]), t + 1_200_000)
+        sol.swap(wallet, "buy", tok, 1000, 200.0, t, fomo=fomo)
+        sol.swap(wallet, "sell", tok, 1000, 200.0 * (1 + pattern[i % 5]), t + 1_200_000, fomo=fomo)
 
 
 class Env:
@@ -285,5 +285,31 @@ def test_fomosearch_from_telegram_finds_scores_and_follows_the_best_at_once(tmp_
         assert any(m == "getTransactionsForAddress" and k for m, k in e.sol.calls)       # history in bulk (Helius)
         e.tg.say("/fomoleaders")
         assert wait_for(lambda: "last search done" in e.tg_text() and tgfmt.short(GOOD) in e.tg_text(), timeout=10)
+    finally:
+        e.close()
+
+
+def test_fomoadd_checks_any_solana_wallet_and_follows_it_when_it_passes(tmp_path):
+    """/fomoadd works for wallets the search can never see (this one never trades through FOMO)."""
+    added, loser = "GoodTrader" + "2" * 34, "LoserTrader" + "3" * 33
+    e = Env(tmp_path, discord=False, history=False, extra="rescore_minutes = 600\n")
+    try:
+        bot = e.start()
+        assert wait_for(lambda: "Nobody passed" in e.tg_text(), timeout=30), e.tg_text()
+        now = int(time.time() * 1000)
+        history_swaps(e.sol, now, wallet=added, fomo=False)
+        e.sol.swap(loser, "buy", "Bag", 1000, 500.0, now - 5 * DAY, fomo=False)
+        e.sol.swap(loser, "sell", "Bag", 1000, 100.0, now - 4 * DAY, fomo=False)
+        e.tg.say("/fomoadd 0x" + "ab" * 20)
+        assert wait_for(lambda: "Usage: /fomoadd" in e.tg_text(), timeout=10)
+        e.tg.say(f"/fomoadd {added}")
+        assert wait_for(lambda: added in bot.sol.st.followed, timeout=30), e.tg_text()
+        assert "Following" in e.tg_text() and bot.sol.scorer.pool[added]["manual"]
+        assert wait_for(lambda: added in bot.sol.ready and e.sol.subscribed(added), timeout=20)
+        e.sol.swap(added, "buy", MINT, 5_000_000, 50_000.0, fomo=False)        # and it is copied like any leader
+        assert wait_for(lambda: MINT in bot.sol.st.positions, timeout=20)
+        e.tg.say(f"/fomoadd {loser}")
+        assert wait_for(lambda: "fails the strict rules" in e.tg_text(), timeout=30), e.tg_text()
+        assert loser not in bot.sol.st.followed and "lost money (30 d)" in e.tg_text()
     finally:
         e.close()

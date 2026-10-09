@@ -278,6 +278,7 @@ FOMO_HELP = ("🪙 <b>FOMO / Solana (paper)</b>\n"
              "/fomowallet – the paper wallet: cash, invested, fees, loss limits (live)\n"
              "/fomopositions · /fomoleaders · /fomoprogress\n"
              "/fomosearch – find active FOMO traders on-chain, rank them, follow the best 7\n"
+             "/fomoadd &lt;wallet&gt; – check one Solana wallet with the strict rules, follow it if it passes\n"
              "/fomopause · /fomoresume – new entries (exits always run)\n"
              "/fomoflatten &lt;PIN&gt; – close every FOMO trade and pause\n"
              "/fomoreset &lt;PIN&gt; – the FOMO wallet back to the start (no open trades), traders kept")

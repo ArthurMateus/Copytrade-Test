@@ -22,7 +22,7 @@ from websockets.sync.client import connect
 
 from copybot import log
 from copybot.config import Config
-from copybot.tg import COMMANDS, PIN_COMMANDS, SLASH_COMMANDS, Command, TelegramUI, TgError, canon
+from copybot.tg import COMMANDS, PIN_COMMANDS, SLASH_COMMANDS, WALLET_COMMANDS, Command, TelegramUI, TgError, canon
 
 GREEN, RED, ORANGE, BLURPLE = 0x2ECC71, 0xE74C3C, 0xF39C12, 0x5865F2
 MAX_EMBED = 4096
@@ -53,6 +53,8 @@ DESCRIPTIONS = {
     "/fomoresume": "FOMO: resume new copies",
     "/fomoflatten": "FOMO: close every position and pause (needs the PIN)",
     "/fomosearch": "FOMO: find and rank FOMO traders on-chain now, follow the best",
+    "/fomoadd": "FOMO: check a Solana wallet with the strict rules, follow it if it passes",
+    "/hyperadd": "Hyperliquid: check a wallet with the strict rules, follow it if it passes",
     "/fomoreset": "FOMO: the wallet back to the start, no open trades, traders kept (needs the PIN)",
 }
 
@@ -221,6 +223,8 @@ class DiscordUI(TelegramUI):
             cmd = {"name": c[1:], "description": DESCRIPTIONS.get(c, c[1:]), "type": 1}
             if canon(c) in PIN_COMMANDS:
                 cmd["options"] = [{"type": 3, "name": "pin", "description": "Your COPYBOT_PIN", "required": True}]
+            elif canon(c) in WALLET_COMMANDS:
+                cmd["options"] = [{"type": 3, "name": "wallet", "description": "The wallet address", "required": True}]
             cmds.append(cmd)
         self.api.call("PUT", f"/applications/{app_id}/guilds/{guild}/commands", cmds)
         self.registered = True
@@ -247,7 +251,7 @@ class DiscordUI(TelegramUI):
         log.info("discord_command", cmd=name)     # never the argument (may be the PIN)
         self._reply(d, f"👍 {name}" + (" (results in the channel)" if name not in ("/pause", "/resume", "/restart", "/fomopause", "/fomoresume")
                                         else ""))
-        self.on_command(Command(name, str(opts.get("pin", "")).strip()))
+        self.on_command(Command(name, str(opts.get("pin") or opts.get("wallet") or "").strip()))
 
 
 class MultiUI:

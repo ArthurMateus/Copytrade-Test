@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 import queue
+import re
 import threading
 import time
 import shutil
@@ -21,7 +22,7 @@ from copybot.config import Config
 from copybot.ledger import Ledger, now_ms
 from copybot.sol import fmt
 from copybot.sol.chain import AuthError, ChainClient, ChainError, FallbackRpc, LogWatch, Rpc
-from copybot.sol.hysteresis import rebalance, select
+from copybot.sol.hysteresis import Plan, rebalance, select
 from copybot.sol.market import PaperBroker, Prices
 from copybot.sol.risk import Health, SolGate
 from copybot.sol.scorer import SolScorer
@@ -301,6 +302,8 @@ class SolBot:
                          f"scoring the {n_cands} biggest ({n_todo} need fresh data). Progress: /fomoleaders")
         elif kind == "sol_review":
             self.on_review(*item[1:])
+        elif kind == "sol_added":
+            self.on_added(*item[1:])
         elif kind == "sol_alert":
             self.alert(item[1])
         elif kind == "cmd":
@@ -358,6 +361,29 @@ class SolBot:
                      + (f"\nBest: {esc(top)}" if top else
                         "\nNobody passed the strict rules this time; the next search runs in 24 h (or /fomosearch).")
                      + (f"\n{why}" if (why := fmt.reject_summary(scores)) else ""))
+
+    def on_added(self, a: str, score: dict | None, err: str, ranking: list[str], scores: dict) -> None:
+        """/fomoadd result: follow at once if it passes every rule and a slot is free, else say why not."""
+        self.ranks = {x: i + 1 for i, x in enumerate(ranking)}
+        self.scores = scores
+        who = f"<code>{tgfmt.short(a)}</code>"
+        if score is None:
+            self.ui.send(f"⚠️ 🪙 /fomoadd {who}: could not read its trades ({esc(err[:120])}). Try again later.")
+        elif not score.get("eligible"):
+            why = ", ".join(fmt.reject_text(r) for r in score.get("reasons") or []) or "not scored"
+            self.ui.send(f"❌ 🪙 /fomoadd {who} fails the strict rules: {esc(why)}.\n"
+                         f"{score.get('trades', 0)} trades in {self.c.history_days} days · "
+                         f"{score.get('win_rate', 0) * 100:.0f}% win · PF {score.get('profit_factor', 0):.2f} · "
+                         f"{fusd(score.get('pnl', 0))}. Not followed; it is re-checked at every search.")
+        elif a in self.st.followed:
+            self.ui.send(f"✅ 🪙 /fomoadd {who} passes ({score.get('score', 0) * 100:.0f} pts) and is already followed.")
+        elif a in self.st.paused_leaders:
+            self.ui.send(f"⏸️ 🪙 /fomoadd {who} passes but is paused after a bad streak of ours. Not followed.")
+        elif len(self.st.followed) >= self.c.max_leaders:
+            self.ui.send(f"✅ 🪙 /fomoadd {who} passes ({score.get('score', 0) * 100:.0f} pts), but you already follow "
+                         f"{len(self.st.followed)}. It competes at the next search (/fomosearch).")
+        else:
+            self.apply_plan(Plan([a], [], dict(self.st.sel)), scores)
 
     def apply_plan(self, plan, scores: dict) -> None:
         now = now_ms()
@@ -456,6 +482,14 @@ class SolBot:
             self.scorer.search_req.set()
             self.ui.send("🔎 🪙 Looking for active FOMO traders on-chain and scoring them now; I will follow the best "
                          f"{self.c.max_leaders} when it ends. Progress: /fomoleaders")
+        elif c.name == "/fomoadd":
+            a = c.arg.strip()
+            if not re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", a) or a == self.c.fomo_fee_payer:
+                self.ui.send("Usage: /fomoadd &lt;Solana wallet address&gt; (32 to 44 letters and digits, no 0x)")
+                return
+            self.scorer.add_q.put(a)
+            self.ui.send(f"🔎 🪙 Checking <code>{tgfmt.short(a)}</code> with the strict rules now (a minute or two); "
+                         "I will follow it if it passes and a slot is free.")
         elif c.name == "/fomopause":
             self.rec({"ev": "pause", "reason": "/fomopause"})
             self.ui.send("⏸️ 🪙 <b>FOMO entries paused.</b> Exits and stops keep running. /fomoresume to continue.")
