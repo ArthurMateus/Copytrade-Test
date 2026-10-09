@@ -261,3 +261,15 @@ def test_fomo_card_helpers_are_safe_with_empty_data():
     assert "None followed yet" in fmt.leaders_card(st, {}, {}, now_ms())
     assert "FOMO wallet" in fmt.wallet_card(st, {}, cfg, now_ms())
     assert "No open FOMO trades" in fmt.positions_text(st, {})
+
+
+def test_a_partial_ranking_during_a_search_does_not_say_nobody_passed(sol):
+    bot, chat, _ = sol
+    bot.c.min_scored_to_start = 1
+    bot.scorer.progress = {**bot.scorer.progress, "phase": "scoring", "done": 10, "todo": 200}
+    bot.on_ranking([], 10, {"W": {"eligible": False}})
+    assert not any("passed the strict scoring" in m for m in chat.sent)
+    bot.scorer.progress = {**bot.scorer.progress, "phase": "idle"}
+    bot.rec({"ev": "sel", "state": {"at": 0, "streaks": {}}})
+    bot.on_ranking([], 10, {"W": {"eligible": False}})                    # an hourly cycle after the search: says it
+    assert any("passed the strict scoring" in m for m in chat.sent)

@@ -335,7 +335,7 @@ class SolBot:
             return
         self.apply_plan(select(self.st.sel, ranking, self.st.followed, set(self.st.paused_leaders), self.st.dropped,
                                now, c), scores)
-        if not ranking:
+        if not ranking and not self.scorer.busy:      # mid-search rankings are partial: the search end reports it
             self.alert("no Solana wallet passed the strict scoring: following nobody new", key="no_eligible",
                        every_s=6 * 3600)
 
