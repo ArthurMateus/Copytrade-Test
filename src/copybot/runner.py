@@ -100,7 +100,8 @@ class Bot:
                                          sizer=self.mirror_size))
         self.invo: SideWallet | None = None          # the Invo calls wallet (needs INVO_TOKEN_FILE)
         self.invo_watch: InvoWatcher | None = None
-        self.invo_calls: dict[str, str] = {}         # Invo call id -> the coin we hold for it
+        self.invo_calls: dict[tuple, str] = {}       # (wallet name, Invo call id) -> the coin we hold for it
+        self.invo_extra: list[SideWallet] = []       # the fixed-risk Invo wallets (invo.risk_wallets_pct)
         self._invo_call = None                       # the call being opened (read by invo_size)
         self.invo_info: dict[str, str] = {}          # our position id -> what the trader called (for its card)
         self._invo_close_why: str | None = None      # the trader's close reason while it is being mirrored
@@ -113,6 +114,13 @@ class Bot:
             w.cfg.risk.max_entry_age_s = cfg.invo.max_call_age_s + cfg.invo.poll_s
             self.invo = w
             self.sides.append(w)
+            for r in cfg.invo.risk_wallets_pct:
+                x = SideWallet(cfg, r, self.data, side_broker, self.health, self.mids, self.assets,
+                               alts_ok=lambda leader: True, score_of=self.score_of, name=f"invo_risk_{r:g}pct",
+                               label=f"invo {r:g}% risk", own_leaders=True)
+                x.cfg.risk.max_entry_age_s = cfg.invo.max_call_age_s + cfg.invo.poll_s
+                self.invo_extra.append(x)
+                self.sides.append(x)
             self.invo_watch = InvoWatcher(InvoClient(cfg.invo.api_base, cfg.invo_token_file), self.q,
                                           lambda: {a[len(INVO):] for a in w.st.followed}, cfg.invo.poll_s,
                                           cfg.invo.max_call_age_s, self.stop)
@@ -245,6 +253,7 @@ class Bot:
         threading.Thread(target=self.health_worker, name="health", daemon=True).start()
         threading.Thread(target=self.sync_worker, name="sync", daemon=True).start()
         if self.invo_watch:
+            self.sync_invo_extras()
             self.invo_watch.start()
         self.scorer.focus = set(self.st.followed)
         self.scorer.start()
@@ -286,8 +295,9 @@ class Bot:
         if w is None:
             return self.ui.send("🧾 Invo is off: save the bot's Invo login in a file, set INVO_TOKEN_FILE to it and "
                                 "restart (see the README, Invo section).")
-        if c.name in ("/invo", "/invotrades", "/invotraders"):
-            key = {"/invo": "invo:status", "/invotrades": "invo:trades", "/invotraders": "invo:traders"}[c.name]
+        if c.name in ("/invo", "/invotrades", "/invotraders", "/invowallets"):
+            key = {"/invo": "invo:status", "/invotrades": "invo:trades", "/invotraders": "invo:traders",
+                   "/invowallets": "invo:wallets"}[c.name]
             self.live_cards.add(key)
             self.last_body.pop(key, None)
             return self.ui.set_card(key, self.render_card(key, self.health(), now_ms()), new=True)
@@ -300,6 +310,7 @@ class Bot:
                 return self.ui.send(f"🧾 @{tgfmt.esc(name)} is not followed.")
             held = sum(1 for p in w.st.positions.values() if p.leader == leader)
             w.rec({"ev": "unfollow", "leader": leader, "reason": "/invounfollow"})
+            self.sync_invo_extras()
             self.invo_watch.forget(name.lower())
             return self.ui.send(f"➖ 🧾 <b>Unfollowed</b> @{tgfmt.esc(name)}"
                                 + (f" · {held} open copy still managed until its stop or its close" if held else ""))
@@ -309,6 +320,7 @@ class Bot:
             return self.ui.send(f"⛔ 🧾 Already following {len(w.st.followed)} Invo traders (the maximum): "
                                 "/invounfollow one first.")
         w.rec({"ev": "follow", "leader": leader})
+        self.sync_invo_extras()
         self.ui.send(f"➕ 🧾 <b>Following</b> @{tgfmt.esc(name)} on Invo · calls they open from now on are copied in "
                      "the 'invo calls' wallet (/hyperwallet compares it). Calls already open are not copied.")
 
@@ -326,37 +338,47 @@ class Bot:
             return ticker
         return next((a for a in self.assets if a.upper() == ticker.upper()), None)
 
-    def invo_resize(self, w, leader: str, trader: str, old, new) -> None:
-        """The trader added to or trimmed a call we copy: our copy follows in the same proportion (an add is an entry
-        and goes through the RiskGate; a trim is an exit and is never refused)."""
-        coin = self.invo_calls.get(new.id) or self.invo_coin(new.ticker)
-        p = w.st.positions.get(coin) if coin else None
-        if p is None or p.leader != leader:
+    def invo_wallets(self) -> list:
+        """The trader-size Invo wallet first (it owns the followed list, the cards and the notes), then the fixed-risk
+        Invo wallets (`invo.risk_wallets_pct`), which follow the same traders and get the same calls."""
+        return [self.invo, *self.invo_extra] if self.invo is not None else []
+
+    def sync_invo_extras(self) -> None:
+        """The fixed-risk Invo wallets follow exactly the trader-size wallet's Invo traders."""
+        if self.invo is None:
             return
-        now = int(time.time() * 1000)
-        side = 1 if new.long else -1
-        before = p.size
-        w.pm.on_move(Move(leader, coin, side * old.exposure, side * new.exposure, now, new.created_ms,
-                          abs(hash(new.id)) % 10**12 + 1, (), new.entry, 1))
-        p = w.st.positions.get(coin)
-        if p is not None and p.pos_id in self.invo_info:
-            self.invo_info[p.pos_id] = self.invo_info[p.pos_id].split(" · resized")[0] + (
-                f" · resized by the trader {old.committed * 100:.1f}% → {new.committed * 100:.1f}%")
-        log.info("invo_resize", trader=trader, coin=coin, old=round(old.committed, 4), new=round(new.committed, 4),
-                 ours_before=before, ours_after=p.size if p else 0)
+        for w in self.invo_extra:
+            for a, t in self.invo.st.followed.items():
+                if a not in w.st.followed:
+                    w.rec({"ev": "follow", "leader": a, "ts": t})
+            for a in list(w.st.followed):
+                if a not in self.invo.st.followed:
+                    w.rec({"ev": "unfollow", "leader": a, "reason": "unfollowed in the Invo calls wallet"})
 
     def on_invo(self, kind: str, trader: str, call, new=None) -> None:
-        w, leader = self.invo, INVO + trader
-        if w is None or leader not in w.st.followed:
+        leader = INVO + trader
+        if self.invo is None or leader not in self.invo.st.followed:
             return
         coin = self.invo_coin(call.ticker)
+        if kind == "invo_open" and coin is None:
+            return self.ui.send(f"🧾 Invo · @{tgfmt.esc(trader)} called {tgfmt.esc(call.ticker)}: not on "
+                                "Hyperliquid, not copied.")
+        self.sync_invo_extras()
+        for w in self.invo_wallets():
+            try:
+                self.invo_one(w, kind, leader, trader, call, new, coin)
+            except Exception as e:          # one Invo wallet's failure never reaches the others
+                log.exception("invo_wallet_error", wallet=w.name, kind=kind)
+                self.alert(f"Invo wallet {w.name}: {kind} failed ({type(e).__name__})", key=f"invo:{w.name}:{kind}")
+
+    def invo_one(self, w, kind: str, leader: str, trader: str, call, new, coin) -> None:
+        primary = w is self.invo
+        if leader not in w.st.followed:
+            return
         side = 1 if call.long else -1
         if kind == "invo_open":
-            if coin is None:
-                return self.ui.send(f"🧾 Invo · @{tgfmt.esc(trader)} called {tgfmt.esc(call.ticker)}: not on "
-                                    "Hyperliquid, not copied.")
             if coin in w.st.positions:
-                log.info("invo_skip", trader=trader, coin=coin, why="coin already held")
+                log.info("invo_skip", wallet=w.name, trader=trader, coin=coin, why="coin already held")
                 return
             # leader "position" = its committed exposure, so k = our size / exposure and adds/trims scale with it
             m = Move(leader, coin, 0.0, side * call.exposure, call.created_ms, call.created_ms,
@@ -368,16 +390,31 @@ class Bot:
                 self._invo_call = None
             p = w.st.positions.get(coin)
             if p is not None and p.leader == leader:
-                self.invo_calls[call.id] = coin
-                self.invo_info[p.pos_id] = (
-                    f"Invo call by @{tgfmt.esc(trader)}: {call.committed * 100:.1f}% x {call.leverage:g}x of their paper "
-                    f"portfolio · their entry {tgfmt.fpx(call.entry)} · target "
-                    f"{tgfmt.fpx(call.target) if call.target else '-'} · stop {tgfmt.fpx(call.stop) if call.stop else '-'}")
-                self.invo_card(p, force=True)
+                self.invo_calls[(w.name, call.id)] = coin
+                if primary:
+                    self.invo_info[p.pos_id] = (
+                        f"Invo call by @{tgfmt.esc(trader)}: {call.committed * 100:.1f}% x {call.leverage:g}x of their "
+                        f"paper portfolio · their entry {tgfmt.fpx(call.entry)} · target "
+                        f"{tgfmt.fpx(call.target) if call.target else '-'} · stop "
+                        f"{tgfmt.fpx(call.stop) if call.stop else '-'}")
+                    self.invo_card(p, force=True)
             return
         if kind == "invo_resize":
-            return self.invo_resize(w, leader, trader, call, new)
-        held = self.invo_calls.pop(call.id, None) or coin
+            held = self.invo_calls.get((w.name, new.id)) or coin
+            p = w.st.positions.get(held) if held else None
+            if p is None or p.leader != leader:
+                return
+            before = p.size
+            w.pm.on_move(Move(leader, held, side * call.exposure, side * new.exposure, int(time.time() * 1000),
+                              new.created_ms, abs(hash(new.id)) % 10**12 + 1, (), new.entry, 1))
+            p = w.st.positions.get(held)
+            if primary and p is not None and p.pos_id in self.invo_info:
+                self.invo_info[p.pos_id] = self.invo_info[p.pos_id].split(" · resized")[0] + (
+                    f" · resized by the trader {call.committed * 100:.1f}% → {new.committed * 100:.1f}%")
+            log.info("invo_resize", wallet=w.name, trader=trader, coin=held, old=round(call.committed, 4),
+                     new=round(new.committed, 4), ours_before=before, ours_after=p.size if p else 0)
+            return
+        held = self.invo_calls.pop((w.name, call.id), None) or coin
         p = w.st.positions.get(held) if held else None
         if p is None or p.leader != leader:
             return
@@ -740,6 +777,9 @@ class Bot:
     def render_card(self, key: str, h, now: float) -> str:
         if key.startswith("invo:") and self.invo is not None:
             w = self.invo
+            if key == "invo:wallets":
+                return tgfmt.wallets_card([(x.risk_pct, x.st, False, x.label) for x in self.invo_wallets()], self.mids,
+                                          now, title="🧾 <b>Invo wallets</b> · same Invo calls, different sizing")
             if key == "invo:trades":
                 return tgfmt.trades_card(w.st, self.mids, now, title="🧾 <b>Invo trades</b>")
             if key == "invo:traders":
@@ -754,7 +794,8 @@ class Bot:
             return tgfmt.traders_card(self.st, self.mids, self.ranks, self.scores, now)
         if key == "wallets":
             return tgfmt.wallets_card([(self.cfg.risk.risk_per_trade_pct, self.st, True)]
-                                      + [(w.risk_pct, w.st, False, w.label) for w in self.sides], self.mids, now)
+                                      + [(w.risk_pct, w.st, False, w.label) for w in self.sides if not w.own_leaders],
+                                      self.mids, now)
         return tgfmt.leaders_card(self.st, self.ranks, now, self.scores)
 
     # ---- commands ------------------------------------------------------------------------------------
@@ -801,7 +842,7 @@ class Bot:
             self.search_pending = True
             self.scorer.search_req.set()
             self.ui.send("🔎 Checking for new wallets in the background; I will re-pick again when it finishes.")
-        elif c.name in ("/invo", "/invotrades", "/invotraders", "/invofollow", "/invounfollow"):
+        elif c.name in ("/invo", "/invotrades", "/invotraders", "/invowallets", "/invofollow", "/invounfollow"):
             self.invo_command(c)
         elif c.name == "/add":
             a = c.arg.strip()

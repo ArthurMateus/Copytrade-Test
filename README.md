@@ -56,6 +56,7 @@ time in one process, each with its own family of commands:
 | `/hypertrades` | `/fomotrades` | open trades at live prices and P&L against the $300 start (live) |
 | `/hypertraders` | `/fomotraders` | followed traders: score, copied trades, wins/losses, money made (live) |
 | `/hyperwallet` | `/fomowallet` | Hyperliquid: the same copies at 1/2/5/10/20% risk, plus the **mirror x10** wallet (each copy sized as the trader's position / its account value x 10 of our 300$, at least 10$, capped like the 5% wallet), compared. FOMO: cash, invested, fees, loss limits |
+| | `/fomowallets` | FOMO: the same trades at 1% (main) and 2/5/10/20% risk per trade (side wallets), compared (live) |
 | `/hyperpositions` | `/fomopositions` | short list of open trades |
 | `/hyperleaders` | `/fomoleaders` | followed wallets, one line each (live) |
 | `/hyperprogress` | `/fomoprogress` | success metrics (Hyperliquid also shows longs and shorts separately) |
@@ -166,7 +167,17 @@ bot copies the calls themselves, in its own paper side wallet **"invo calls"** (
   their leverage x `invo.size_mult` of our equity (at least $10), through the wallet's own RiskGate (limits of a 5%
   wallet, our 3% stop); calls already open when we start watching a trader are never copied;
 - when the trader closes the call (or Invo closes it at its target/stop), we close.
-Commands: `/invofollow <username>`, `/invounfollow <username>`, `/invo` (followed traders, open copies, results).
+Commands: `/invofollow <username>`, `/invounfollow <username>`, and the live cards `/invo` (followed traders, open
+copies, results), `/invotrades` (open copies at live prices), `/invotraders` (what copying each trader made) and
+`/invowallets`. Each copy also gets its own live card, which turns into the final summary when it closes.
+Adds and partial closes are mirrored: when the trader raises or trims a call's committed size, our copies grow or
+shrink in the same proportion.
+
+**Risk-level wallets.** Next to "invo calls" (sized like the trader), five more Invo wallets copy the same calls at a
+FIXED risk of 1%, 2%, 5%, 10% and 20% of their own $300 per trade (our 3% stop: $100 to $2,000 per copy),
+`invo.risk_wallets_pct`; `/invowallets` compares the six. The FOMO book likewise has side wallets at 2/5/10/20%
+(`sol.side_wallets_risk_pct`, the main FOMO wallet is 1%), compared by `/fomowallets`; Hyperliquid already had them
+(`/hyperwallet`). Side wallets follow the same traders, post no trade cards, and their limits scale with their level.
 
 **Use a SEPARATE Invo account for the bot.** The bot logs in with a refresh token; every renewal replaces it, so the
 bot and a browser sharing one login keep logging each other out, and if Invo objects to automated reading only that

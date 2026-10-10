@@ -180,6 +180,17 @@ instances on the same wallet.
   `Bot.render_card`, edited only when the body changes); each copy has its own live card `invo:pos:<pos_id>` with the
   trader's call (and resizes) that becomes the final summary on any close (the Invo wallet's PositionManager notifies
   `Bot.on_invo_notify`). `tgfmt.short("invo:x")` -> "@x".
+- Risk-level wallets (owner request 2026-10-09: "1/2/5/10/20% of OUR wallet, same levels everywhere, set in config"):
+  Invo: `invo.risk_wallets_pct` -> `Bot.invo_extra` = `SideWallet(own_leaders=True)` named `invo_risk_<r>pct`
+  (fixed-risk sizing, no sizer), following the trader-size wallet's Invo traders (`sync_invo_extras`); `on_invo` runs
+  every Invo wallet (`invo_one`, errors isolated per wallet; `invo_calls` keyed (wallet, call id)); only the trader-size
+  wallet posts trade cards/notes. `/invowallets` compares them; `/hyperwallet` now lists only HL wallets
+  (`not w.own_leaders`). FOMO: `sol.side_wallets_risk_pct` (2/5/10/20) -> `SolBot.sides` = `sol/wallets.SolSide`
+  (own ledger `data/sol/wallets/<name>/`, own SolGate with `scaled()` limits, shared Prices/Detector, synced
+  followed+pauses every tick, moves after the main wallet, `on_sides` isolates errors, prices fetched for every
+  wallet's tokens, `wanted()` includes every wallet's open leaders, /fomopause/resume/flatten act on all,
+  /fomoreset refused while any wallet holds a trade and archives `data/sol/wallets/`). `/fomowallets` compares them
+  (it used to be an alias of `/fomowallet`).
 - The bot must use its OWN Invo account (rotation: a browser and the bot on one login log each other out). The owner
   gets the refresh token with a DevTools console snippet (README) that decrypts `FlutterSecureStorage.REFRESH_TOKEN`
   (AES-GCM, key in `localStorage.FlutterSecureStorage`) and copies it; `tools/invo_check.py` verifies it.

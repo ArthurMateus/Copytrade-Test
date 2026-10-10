@@ -117,6 +117,13 @@ def test_discover_follow_copy_close_and_survive_a_restart(env):
     assert time.time() - t0 < 15
     p = bot.sol.st.positions[MINT]
     assert p.sym == "MEME" and p.stop_px < p.entry_px and p.leader == GOOD
+    # the side wallets copy the same buy at 2/5/10/20% risk (the main one is 1%): r x the main size
+    assert [w.risk_pct for w in bot.sol.sides] == [2.0, 5.0, 10.0, 20.0]
+    assert wait_for(lambda: all(MINT in w.st.positions for w in bot.sol.sides), timeout=10)
+    for w in bot.sol.sides:
+        assert w.st.positions[MINT].size == pytest.approx(p.size * w.risk_pct, rel=0.05), w.name
+    env.tg.say("/fomowallets")
+    assert wait_for(lambda: "FOMO wallets" in env.tg_text() and "20% risk" in env.tg_text())
     assert wait_for(lambda: "MEME" in env.tg_text() and "MEME" in env.dc_text())     # card on both Telegram + Discord
 
     # restart with the position open: same position, same stop, no double open
@@ -137,6 +144,8 @@ def test_discover_follow_copy_close_and_survive_a_restart(env):
     assert wait_for(lambda: MINT not in bot.sol.st.positions, timeout=20)
     t = bot.sol.st.closed[-1]
     assert t["reason"] == "leader_close" and t["pnl"] > 0
+    assert wait_for(lambda: all(MINT not in w.st.positions for w in bot.sol.sides), timeout=10)
+    assert all(w.st.closed and w.st.closed[-1]["pnl"] > 0 for w in bot.sol.sides)
     assert wait_for(lambda: "WIN" in env.tg_text() and "WIN" in env.dc_text(), timeout=10)
 
 

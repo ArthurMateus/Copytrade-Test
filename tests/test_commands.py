@@ -14,7 +14,7 @@ from copybot.tg import ALIASES, COMMANDS, FOMO_COMMANDS, HYPER_COMMANDS, ONCE, P
 PIN = "2468"
 A, B = "LeaderAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1", "LeaderBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB2"
 HL_HANDLED = {"/status", "/trades", "/traders", "/wallets", "/positions", "/leaders", "/progress", "/search", "/pause",
-              "/resume", "/flatten", "/reset", "/restart", "/help", "/add", "/invo", "/invotrades", "/invotraders", "/invofollow", "/invounfollow"}
+              "/resume", "/flatten", "/reset", "/restart", "/help", "/add", "/invo", "/invotrades", "/invotraders", "/invowallets", "/invofollow", "/invounfollow"}
 FOMO_HANDLED = set(FOMO_COMMANDS)
 
 
@@ -34,7 +34,7 @@ def test_the_two_families_are_complete_and_symmetrical():
     assert {c[len("/hyper"):] for c in HYPER_COMMANDS} == wanted
     assert {"/fomotrades", "/fomotraders", "/fomowallet", "/fomosearch", "/fomoreset", "/fomoflatten",
             "/fomopause", "/fomoresume", "/fomoprogress", "/fomopositions", "/fomoleaders", "/fomo",
-            "/fomoadd", "/fomofollow", "/fomounfollow"} == set(FOMO_COMMANDS)
+            "/fomoadd", "/fomofollow", "/fomounfollow", "/fomowallets"} == set(FOMO_COMMANDS)
     assert len(SLASH_COMMANDS) < 100 and len(set(SLASH_COMMANDS)) == len(SLASH_COMMANDS)
     assert all(len(c) - 1 <= 32 and c[1:].islower() for c in SLASH_COMMANDS)          # Discord's name rules
 

@@ -304,7 +304,8 @@ def traders_card(st: State, mids: dict, ranks: dict[str, int], scores: dict | No
     return "\n".join([head, *blocks, updated(now_ms)])
 
 
-def wallets_card(wallets: list, mids: dict, now_ms: float) -> str:
+def wallets_card(wallets: list, mids: dict, now_ms: float,
+                 title: str = "💰 <b>Wallets</b> · same traders, different risk per trade") -> str:
     """/wallets: the same copies at different risk levels, best result first.
     `wallets` = [(risk_pct, State, is_main)] or [(risk_pct, State, is_main, label)]."""
     from copybot.wallets import max_drop_pct
@@ -314,7 +315,7 @@ def wallets_card(wallets: list, mids: dict, now_ms: float) -> str:
         rows.append((eq - st.equity0, risk, st, main, eq, label[0] if label else ""))
     rows.sort(key=lambda x: (-x[0], x[1]))
     medals = ["🥇", "🥈", "🥉"]
-    out = ["💰 <b>Wallets</b> · same traders, different risk per trade"]
+    out = [title]
     for i, (pnl, risk, st, main, eq, label) in enumerate(rows):
         n = len(st.closed)
         wins = sum(1 for t in st.closed if t["pnl"] > 0)
@@ -403,7 +404,7 @@ def invo_text(st: State, mids: dict, watch, now_ms: float) -> str:
         net = net_pnl(p, mids.get(p.coin))
         lines.append(f"  {dot(net)} {esc(p.coin)} {side_tag(p.side)} from @{esc(p.leader.split(':', 1)[1])} · "
                      f"{fusd(net)} · stop {fpx(p.stop_px)}")
-    lines.append("/invotrades · /invotraders · /hyperwallet compares it with the other wallets")
+    lines.append("/invotrades · /invotraders · /invowallets compares the Invo wallets (trader size, 1-20% risk)")
     if now_ms:
         lines.append(updated(now_ms))
     return "\n".join(lines)

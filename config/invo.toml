@@ -9,3 +9,4 @@ max_call_age_s = 180.0    # calls older than this when first seen are not copied
 size_mult = 1.0           # our exposure = their size x leverage x this, of our 300$ (at least 10$) [0.1, 10]
 limits_pct = 5.0          # the wallet's risk limits = a side wallet at this risk level              [0.5, 20]
 max_traders = 7           #                                                                         [0, 20]
+risk_wallets_pct = [1.0, 2.0, 5.0, 10.0, 20.0]   # fixed-risk Invo wallets next to the trader-size one (/invowallets)

@@ -27,6 +27,7 @@ from copybot.sol.market import PaperBroker, Prices
 from copybot.sol.risk import Health, SolGate
 from copybot.sol.scorer import SolScorer
 from copybot.sol.trader import Detector, Trader
+from copybot.sol.wallets import SolSide
 
 
 def day_key(ms: float) -> str:
@@ -73,6 +74,9 @@ class SolBot:
         self.broker = PaperBroker(self.c)
         self.trader = Trader(self.c, self.st, self.ledger, self.gate, self.broker, self.prices, self.health, self.det,
                              notify=self.on_notify)
+        # side wallets: the same leader moves at 2/5/10/20% risk (sol.side_wallets_risk_pct), compared by /fomowallets
+        self.sides = [SolSide(self.c, r, self.data, self.prices, self.health, self.det)
+                      for r in self.c.side_wallets_risk_pct]
         self.started = time.time()
         self.auth_ok = True
         self.last_poll_ok = 0.0
@@ -105,7 +109,19 @@ class SolBot:
         self.ui.send(f"⚠️ 🪙 {tgfmt.esc(text)}")
 
     def wanted(self) -> set[str]:
-        return set(self.st.followed) | {p.leader for p in self.st.positions.values()}
+        """Traders to watch: the followed ones and every leader of an open copy in ANY wallet (its exits must come)."""
+        return set(self.st.followed) | {p.leader for st in (self.st, *(w.st for w in self.sides))
+                                        for p in st.positions.values()}
+
+    def on_sides(self, what: str, fn) -> None:
+        """fn(side) for every side wallet; a failure in one is logged and never reaches the main wallet."""
+        for w in self.sides:
+            try:
+                fn(w)
+            except Exception as e:
+                log.exception("sol_side_error", wallet=w.name, what=what)
+                self.alert(f"FOMO side wallet {w.label}: {what} failed ({type(e).__name__})",
+                           key=f"side:{w.name}:{what}")
 
     def handle_of(self, a: str) -> str:
         return self.scorer.handle(a)
@@ -130,6 +146,21 @@ class SolBot:
             self.rec({"ev": "pause", "reason": "uncertain restart"})
             self.ui.send("⚠️ 🪙 <b>FOMO restart with uncertainty</b> · ⏸️ entries paused, exits keep running\n"
                          + "\n".join(f"• {tgfmt.esc(x)}" for x in problems[:10]) + "\nCheck, then /fomoresume.")
+        def boot_side(w):
+            if not w.st.genesis_ms:
+                w.rec({"ev": "genesis", "equity0": w.c.start_equity, "btc_px0": 0.0})
+            w.rec({"ev": "boot", "positions": len(w.st.positions), "followed": len(w.st.followed)})
+            for iid in list(w.st.open_intents):
+                w.rec({"ev": "intent_abort", "intent": iid})
+            for p in list(w.st.positions.values()):
+                if p.stop_px <= 0 or p.stop_px >= p.entry_px:
+                    w.rec({"ev": "stop_set", "coin": p.coin, "pos_id": p.pos_id, "stop_px": w.gate.stop_for(p.entry_px)})
+            if w.st.uncertain:
+                w.rec({"ev": "pause", "reason": "uncertain restart"})
+            if self.st.entries_paused and not w.st.entries_paused:
+                w.rec({"ev": "pause", "reason": self.st.pause_reason or "main FOMO wallet paused"})
+            w.sync(self.st)
+        self.on_sides("boot", boot_side)
         log.info("sol_source", live=self.live_source)
         log.info("sol_state", equity=round(self.st.equity(), 2), positions=len(self.st.positions),
                  followed=len(self.st.followed), paused=self.st.entries_paused, trades=len(self.st.closed))
@@ -226,7 +257,7 @@ class SolBot:
 
     def price_worker(self) -> None:
         while not self.stop.is_set():
-            toks = list(self.st.positions)
+            toks = sorted({t for st in (self.st, *(w.st for w in self.sides)) for t in st.positions})
             if toks:
                 self.prices.fetch(toks, timeout=5.0)
             else:
@@ -255,6 +286,8 @@ class SolBot:
 
     def tick(self) -> None:
         self.trader.check_stops()                      # exits first
+        self.on_sides("stops", lambda w: w.trader.check_stops())
+        self.on_sides("sync", lambda w: w.sync(self.st))
         deadline = time.time() + 0.2
         while time.time() < deadline:
             try:
@@ -267,6 +300,12 @@ class SolBot:
         for kind, key in (("day", day_key(now)), ("week", week_key(now))):
             if self.st.marks.get(kind, {}).get("key") != key:
                 self.rec({"ev": "mark", "kind": kind, "key": key, "equity": eq})
+
+        def marks(w):
+            for kind, key in (("day", day_key(now)), ("week", week_key(now))):
+                if w.st.marks.get(kind, {}).get("key") != key:
+                    w.rec({"ev": "mark", "kind": kind, "key": key, "equity": w.st.equity(self.prices.marks())})
+        self.on_sides("marks", marks)
         stale = self.trader.stale_marks(120) if time.time() - self.started > 120 else []   # not before the first fetches
         if stale:
             self.alert(f"no price for {', '.join(stale[:5])} for 2+ min: stops cannot run on them", key="stale",
@@ -318,12 +357,14 @@ class SolBot:
 
     def process(self, leader: str, moves, legs) -> None:
         for m in moves:
-            self.trader.on_move(m)
+            self.trader.on_move(m)                          # the main wallet always first
+            self.on_sides("move", lambda w: w.trader.on_move(m))
         if legs:
             newest = max(g.ts for g in legs)
             if newest > self.st.cursors.get(leader, 0):
                 self.rec({"ev": "cursor", "leader": leader, "t": newest})
         self.trader.reconcile(leader)
+        self.on_sides("reconcile", lambda w: w.trader.reconcile(leader))
 
     # ---- selection --------------------------------------------------------------------------------------
     def on_ranking(self, ranking: list[str], n_scored: int, scores: dict) -> None:
@@ -446,6 +487,10 @@ class SolBot:
             return fmt.traders_card(self.st, marks, self.ranks, self.scores, handles, now)
         if key == "sol:wallet":
             return fmt.wallet_card(self.st, marks, self.c, now)
+        if key == "sol:wallets":
+            return tgfmt.wallets_card([(self.c.risk_per_trade_pct, self.st, True)]
+                                      + [(w.risk_pct, w.st, False, w.label) for w in self.sides], marks, now,
+                                      title="🪙 <b>FOMO wallets</b> · same traders, different risk per trade")
         return fmt.leaders_card(self.st, self.ranks, handles, now, self.scores, self.scorer.progress)
 
     def refresh_ui(self) -> None:
@@ -460,7 +505,7 @@ class SolBot:
 
     # ---- commands -----------------------------------------------------------------------------------------------
     LIVE = {"/fomo": "sol:status", "/fomotrades": "sol:trades", "/fomotraders": "sol:traders",
-            "/fomowallet": "sol:wallet", "/fomoleaders": "sol:leaders"}
+            "/fomowallet": "sol:wallet", "/fomoleaders": "sol:leaders", "/fomowallets": "sol:wallets"}
 
     def command(self, c) -> None:
         now, marks = now_ms(), self.prices.marks()
@@ -524,11 +569,18 @@ class SolBot:
                          "pause it after a bad streak). Copies start once its recent trades are loaded (a few minutes).")
         elif c.name == "/fomopause":
             self.rec({"ev": "pause", "reason": "/fomopause"})
+            self.on_sides("pause", lambda w: w.rec({"ev": "pause", "reason": "/fomopause"}))
             self.ui.send("⏸️ 🪙 <b>FOMO entries paused.</b> Exits and stops keep running. /fomoresume to continue.")
         elif c.name == "/fomoresume":
             if self.st.uncertain:
                 self.rec({"ev": "ack", "items": list(self.st.uncertain)})
             self.rec({"ev": "resume"})
+
+            def resume(w):
+                if w.st.uncertain:
+                    w.rec({"ev": "ack", "items": list(w.st.uncertain)})
+                w.rec({"ev": "resume"})
+            self.on_sides("resume", resume)
             self.ui.send("▶️ 🪙 <b>FOMO entries resumed.</b>")
         elif c.name == "/fomoflatten":
             if not self.ui.check_pin(c.arg):
@@ -538,14 +590,20 @@ class SolBot:
             n = len(self.st.positions)
             self.rec({"ev": "pause", "reason": "/fomoflatten"})
             self.trader.flatten("flatten")
+
+            def flatten(w):
+                w.rec({"ev": "pause", "reason": "/fomoflatten"})
+                w.trader.flatten("flatten")
+            self.on_sides("flatten", flatten)
             self.ui.send(f"🛑 🪙 <b>Flattened</b> {n} FOMO trade(s). ⏸️ Entries paused · /fomoresume to continue.")
         elif c.name == "/fomoreset":
             if not self.ui.check_pin(c.arg):
                 log.warn("sol_reset_bad_pin")
                 self.ui.send("⛔ Wrong or missing PIN. Usage: /fomoreset &lt;PIN&gt;")
                 return
-            if self.st.positions:
-                self.ui.send(f"⛔ <b>FOMO reset refused</b>: {len(self.st.positions)} open trade(s). Wait for them to "
+            n_open = len(self.st.positions) + sum(len(w.st.positions) for w in self.sides)
+            if n_open:
+                self.ui.send(f"⛔ <b>FOMO reset refused</b>: {n_open} open trade(s). Wait for them to "
                              f"close, or /fomoflatten &lt;PIN&gt; first.")
                 return
             where = self.reset_book()
@@ -573,6 +631,11 @@ class SolBot:
         self.ledger.frozen = True       # nothing more is written to the old file before the restart
         self.ledger.close()
         shutil.move(str(self.data / "ledger.jsonl"), str(arch / "ledger.jsonl"))
+        for w in self.sides:
+            w.ledger.frozen = True
+            w.ledger.close()
+        if (self.data / "wallets").exists():        # side wallets start fresh too (they re-follow from the main one)
+            shutil.move(str(self.data / "wallets"), str(arch / "wallets"))
         fresh = Ledger(self.data / "ledger.jsonl")
         for ev in seed:
             fresh.append(ev)
@@ -591,3 +654,5 @@ class SolBot:
         self.stop.set()
         self.scorer.stop.set()
         self.ledger.close()
+        for w in self.sides:
+            w.ledger.close()

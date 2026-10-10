@@ -143,7 +143,17 @@ def test_bot_copies_an_invo_call_and_closes_it_when_the_trader_does(invo_env, mo
         assert p.leader == "invo:nicush" and p.side == 1
         assert p.size * p.entry_px == pytest.approx(0.05 * 10 * 300, rel=0.05)    # their 5% x 10x of our 300$
         assert "ETH" not in bot.st.positions                                      # the main wallet never copies it
-        assert all("ETH" not in w.st.positions for w in bot.sides if w is not bot.invo)
+        assert all("ETH" not in w.st.positions for w in bot.sides if not w.own_leaders)    # HL side wallets: no
+        # the fixed-risk Invo wallets copy the same call: r% of their own 300$ at our 3% stop (100$ at 1%, 500$ at 5%)
+        assert {w.name for w in bot.invo_extra} == {f"invo_risk_{r:g}pct" for r in (1, 2, 5, 10, 20)}
+        assert wait_for(lambda: all("ETH" in w.st.positions for w in bot.invo_extra), timeout=10)
+        for w in bot.invo_extra:
+            q = w.st.positions["ETH"]
+            assert q.size * q.entry_px == pytest.approx(300 * w.risk_pct / 100 / 0.03, rel=0.05), w.name
+            assert "invo:nicush" in w.st.followed
+        tg.say("/invowallets")
+        assert wait_for(lambda: any("Invo wallets" in m["text"] and "invo 20% risk" in m["text"]
+                                    for m in tg.sent + tg.edits))
         text = lambda: " ".join(m["text"] for m in tg.sent + tg.edits)
         assert wait_for(lambda: "Invo call by @nicush" in text() and "<b>ETH</b>" in text())   # its live trade card
         for cmd, needle in (("/invo", "Invo calls"), ("/invotrades", "Invo trades"), ("/invotraders", "Invo traders")):
@@ -157,6 +167,7 @@ def test_bot_copies_an_invo_call_and_closes_it_when_the_trader_does(invo_env, mo
         f.close_call(pid, cid)
         assert wait_for(lambda: "ETH" not in bot.invo.st.positions, timeout=10)
         assert bot.invo.st.closed[-1]["leader"] == "invo:nicush"
+        assert wait_for(lambda: all("ETH" not in w.st.positions for w in bot.invo_extra), timeout=10)
         assert wait_for(lambda: "closed by the trader" in text())               # the card became the summary
         assert "REFRESH" not in " ".join(m["text"] for m in tg.sent)               # no token ever shown
         tg.say("/invounfollow nicush")

@@ -15,6 +15,7 @@ history_parallel = 6          # transactions read at once during a search (with 
 # -- the paper book
 start_equity = 300.0          # simulated Solana book, USD, separate from the Hyperliquid wallet   [10, 1e6]
 risk_per_trade_pct = 1.0      # stop distance x size, % of the book                                [0.1, 2]
+side_wallets_risk_pct = [2.0, 5.0, 10.0, 20.0]   # side wallets: the same trades at these risks (/fomowallets)
 stop_pct = 30.0               # stop distance under the fill price (memecoins are noisy)           [5, 60]
 max_position_pct = 6.0        # one token, % of the book                                           [0.5, 10]
 max_positions = 8             #                                                                    [0, 10]

@@ -127,6 +127,7 @@ class Sol:
     # -- the paper book and its risk limits (enforced in sol/risk.py)
     start_equity: float = 300.0
     risk_per_trade_pct: float = 1.0       # stop distance x size, % of the book
+    side_wallets_risk_pct: list = field(default_factory=lambda: [2.0, 5.0, 10.0, 20.0])   # same trades, other risk
     stop_pct: float = 30.0                # stop distance from entry, % of price (memecoins are noisy)
     max_position_pct: float = 6.0         # one token, % of the book (memecoins can gap through a stop)
     max_positions: int = 8
@@ -192,6 +193,9 @@ class Invo:
     size_mult: float = 1.0                # our exposure = their size x leverage x this, of our equity (>= 10$)
     limits_pct: float = 5.0               # the wallet's limits are those of a side wallet at this risk level
     max_traders: int = 7
+    # fixed-risk Invo wallets next to the trader-size one (owner request 2026-10-09): each copy risks this % of the
+    # wallet's own 300$ at our 3% stop, whatever the trader's size
+    risk_wallets_pct: list = field(default_factory=lambda: [1.0, 2.0, 5.0, 10.0, 20.0])
 
 
 @dataclass
@@ -402,6 +406,11 @@ def validate(cfg: Config) -> None:
         raise ConfigError("selection.main_coins must be a non-empty list of perp names like \"BTC\"")
     if cfg.risk.stop_pct / 100 * cfg.risk.liq_buffer_mult >= 0.9:
         raise ConfigError("risk.stop_pct x liq_buffer_mult leaves no room before liquidation")
+    for sec, key in (("invo", "risk_wallets_pct"), ("sol", "side_wallets_risk_pct")):
+        lv = getattr(getattr(cfg, sec), key)
+        if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and 0 < v <= 50 for v in lv) \
+                or len(set(lv)) != len(lv) or len(lv) > 8:
+            raise ConfigError(f"{sec}.{key}: at most 8 distinct numbers in (0, 50]")
     if cfg.sol.drop_rank <= cfg.sol.join_rank:
         raise ConfigError("sol.drop_rank must be > join_rank")
 
