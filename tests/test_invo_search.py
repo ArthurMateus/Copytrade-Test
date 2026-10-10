@@ -178,7 +178,8 @@ def test_the_search_finds_a_good_trader_reports_it_and_drops_a_followed_one_that
         assert "invo:coinflip" in bot.invo.st.followed                         # 1 failed search: kept
         bot.invo_search.req.set()                                              # a second search
         assert wait_for(lambda: "invo:coinflip" not in bot.invo.st.followed, timeout=60)
-        assert "fails the rules 2 searches in a row" in text() and "/invofollow coinflip brings it back" in text()
+        assert wait_for(lambda: "fails the rules 2 searches in a row" in text()
+                        and "/invofollow coinflip brings it back" in text())
         n = len(tg.sent)
         tg.say("/picks")
         assert wait_for(lambda: any("Daily picks · 🔷 Hyperliquid" in m["text"] for m in tg.sent[n:]))
@@ -187,5 +188,26 @@ def test_the_search_finds_a_good_trader_reports_it_and_drops_a_followed_one_that
         tg.say("/invofollow coinflip")                                          # no blacklist: it can come back
         assert wait_for(lambda: "invo:coinflip" in bot.invo.st.followed)
         assert "REFRESH" not in text()
+    finally:
+        stop_bot(bot, th)
+
+
+def test_invosearch_searches_now_and_follows_the_best(search_env, monkeypatch):
+    hl, tg, data, cdir, f, tok = search_env
+    add_trader(f, "steady", good=True)
+    add_trader(f, "coinflip", good=False)
+    f.ranked = ["steady", "coinflip"]
+    monkeypatch.setenv("INVO_TOKEN_FILE", str(tok))
+    monkeypatch.setattr(invo_scorer, "REQ_GAP_S", 0.0)
+    bot, th = start_bot((hl, tg, data, cdir))
+    text = lambda: " ".join(m["text"] for m in tg.sent + tg.edits)
+    try:
+        tg.say("/invofollow coinflip")
+        assert wait_for(lambda: "invo:coinflip" in bot.invo.st.followed)
+        tg.say("/invosearch")
+        assert wait_for(lambda: "Invo search finished" in text(), timeout=90)
+        assert "invo:steady" in bot.invo.st.followed and "invo:coinflip" not in bot.invo.st.followed
+        assert wait_for(lambda: "@steady" in text() and "➖ dropped: @coinflip" in text())
+        assert wait_for(lambda: all("invo:steady" in w.st.followed for w in bot.invo_extra))
     finally:
         stop_bot(bot, th)

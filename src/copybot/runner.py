@@ -146,6 +146,7 @@ class Bot:
                                           self.data / "cache", self.stop)
             self.invo_scores = dict(self.invo_search.scores)
         self.picks = picks.Store(self.data / "picks.json")
+        self.invo_search_pending = False   # /invosearch: re-pick the Invo traders when the search ends
         self.started_s = time.time()     # the daily report waits a few minutes after a start (rankings load first)
         self.ranks: dict[str, int] = {}
         self.ranking: list[str] = []
@@ -309,6 +310,19 @@ class Bot:
         if w is None:
             return self.ui.send("🧾 Invo is off: save the bot's Invo login in a file, set INVO_TOKEN_FILE to it and "
                                 "restart (see the README, Invo section).")
+        if c.name == "/invosearch":
+            s = self.invo_search
+            if s is None:
+                return self.ui.send("🧾 The Invo search is off (search = true in config/invo.toml, then /restart).")
+            self.invo_search_pending = True
+            if s.busy():
+                pr = s.progress
+                return self.ui.send(f"🔎 🧾 An Invo search is already running ({pr.get('done', 0)}/{pr.get('todo', 0)} "
+                                    "traders checked); I will re-pick the best when it finishes.")
+            s.req.set()
+            return self.ui.send("🔎 🧾 <b>Searching Invo now</b> (Discover rankings + the traders you follow, same rules "
+                                "as the wallets). It can take a while; when it ends I follow the best "
+                                f"{self.cfg.invo.max_traders} that pass and drop followed ones outside them.")
         if c.name in ("/invo", "/invotrades", "/invotraders", "/invowallets"):
             key = {"/invo": "invo:status", "/invotrades": "invo:trades", "/invotraders": "invo:traders",
                    "/invowallets": "invo:wallets"}[c.name]
@@ -747,6 +761,32 @@ class Bot:
                 self.ui.send(f"➖ 🧾 <b>Dropped</b> @{tgfmt.esc(name)} · fails the rules {fails[name]} searches in a "
                              f"row ({tgfmt.esc(why)})" + (f" · {held} open copy still managed" if held else "")
                              + f" · /invofollow {tgfmt.esc(name)} brings it back")
+        if self.invo_search_pending:
+            self.invo_search_pending = False
+            self.invo_repick(n_cands)
+
+    def invo_repick(self, n_cands: int) -> None:
+        """/invosearch finished: follow the best `invo.max_traders` that pass every rule, drop followed ones outside
+        them (their open copies keep running until they close). Nobody passing changes nothing."""
+        w, sc = self.invo, self.invo_scores
+        best = [k for _, k in sorted((-v.get("score", 0), k) for k, v in sc.items() if v.get("eligible"))]
+        best = best[: self.cfg.invo.max_traders]
+        if not best:
+            return self.ui.send(f"🔎 🧾 <b>Invo search finished</b> · {n_cands} traders checked, nobody passes every "
+                                "rule: keeping your current Invo traders.")
+        now = {a[len(INVO):] for a in w.st.followed}
+        drops, joins = sorted(now - set(best)), [k for k in best if k not in now]
+        for name in drops:
+            w.rec({"ev": "unfollow", "leader": INVO + name, "reason": "not in the best of /invosearch"})
+            self.invo_watch.forget(name)
+        for name in joins:
+            w.rec({"ev": "follow", "leader": INVO + name})
+        self.sync_invo_extras()
+        self.ui.send(f"🔎 🧾 <b>Invo search finished</b> · {n_cands} traders checked · following the best "
+                     f"{len(best)}: " + ", ".join(f"@{tgfmt.esc(k)} ({sc[k]['score']:.0f})" for k in best)
+                     + (f"\n➕ new: {', '.join('@' + tgfmt.esc(k) for k in joins)}" if joins else "")
+                     + (f"\n➖ dropped: {', '.join('@' + tgfmt.esc(k) for k in drops)} (open copies run until they "
+                        "close)" if drops else ""))
 
     # ---- selection ----------------------------------------------------------------------------------
     def on_ranking(self, ranking: list[str], n_scored: int, scores: dict) -> None:
@@ -963,7 +1003,8 @@ class Bot:
             self.search_pending = True
             self.scorer.search_req.set()
             self.ui.send("🔎 Checking for new wallets in the background; I will re-pick again when it finishes.")
-        elif c.name in ("/invo", "/invotrades", "/invotraders", "/invowallets", "/invofollow", "/invounfollow"):
+        elif c.name in ("/invo", "/invotrades", "/invotraders", "/invowallets", "/invofollow", "/invounfollow",
+                        "/invosearch"):
             self.invo_command(c)
         elif c.name == "/add":
             a = c.arg.strip()

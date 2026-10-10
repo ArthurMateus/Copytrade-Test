@@ -23,7 +23,12 @@ decisions) and README.md first. ~298 tests pass (`uv run pytest`, ~3 min). Every
 - The Invo ranking ANSWER shape was never recorded (only the request bodies): if `invo_discovered traders=0` shows in
   the log, record one answer (DevTools on app.invoapp.com/discover) and fix `invo.usernames` / add a fixture.
 
-## How Claude helps pick traders (only when the owner asks in a session; never on a schedule)
+## FOMO daily picks (scheduled Claude task, since 2026-10-10)
+- Task `fomo-daily-picks` at 13:00 on the owner's Claude PC, via Claude in Chrome (signed in to fomo.family). Never sign
+  in for the owner, even if asked to "auto-login": stop and ask. Details in CLAUDE.md; page
+  https://claude.ai/artifact/9mqHKHdwAqN1J8y9rSaJdj . The owner then sends /fomoadd <wallet> to the bot.
+
+## How Claude helps pick traders (only when the owner asks in a session; FOMO also by the daily task above)
 - FOMO: owner signs in to fomo.family in the browser pane; read the 7d/30d ranking and each candidate's last 100
   swaps in the signed-in tab (FOMO caps at 100), vet (win rate, PF, best-trade share, pace, USDC share), then find
   the real wallet = the SIGNER (besides FOMO's fee payer) of a FOMO-co-signed tx where its balance of that mint

@@ -218,8 +218,22 @@ instances on the same wallet.
   `ScoreParams` (coins=None) + Invo gates (`min_hl_share`, `min_hold_min`, `max_idle_days`). `("invo_review", n,
   scores, fails)`: a followed trader failing `invo.drop_after_fails` (2) searches in a row is unfollowed. The client is
   shared with the watcher (`_auth_lock`: one token refresh at a time, rotation-safe).
-- Claude still does browser deep dives (FOMO handles -> wallets) only when asked in a session; the daily work is the
-  bot's (it has the keys, the caches and the exact scoring), not a scheduled Claude task.
+- `/invosearch` (owner request 2026-10-10): `InvoScorer.req` now; when that search ends `Bot.invo_repick` follows the
+  best `invo.max_traders` eligible and drops followed ones outside them (empty result changes nothing). `/hypersearch`
+  and `/fomosearch` are the same for their books.
+- **FOMO daily picks by a scheduled Claude task (owner request 2026-10-10, owner dropped Helius).** Scheduled task
+  `fomo-daily-picks` (13:00 local, on the owner's Claude PC, ~/.claude/scheduled-tasks) uses Claude in
+  Chrome (owner's Chrome, signed in to fomo.family; the task must NEVER sign in itself: it stops and asks):
+  `tools/fomo_collect.js` (in the tab: leaderboards 24h/7d/30d -> last 100 swaps of the best 150 -> USDC/USDT legs ->
+  loose pre-screen) -> `fomoSend()` navigates the tab to `tools/fomo_receive.py` on 127.0.0.1:8765 with the data in the
+  #fragment (the extension truncates results ~1000 chars and blocks base64; fomo.family's CSP blocks fetch/iframe to
+  localhost; popups are blocked) -> `tools/fomo_picks.py score` (copybot.sol.scoring.full_score, config/sol.toml
+  unchanged; failing ONLY trades/active_days/history/positive_weeks = "promising", since FOMO shows 100 swaps) ->
+  `wallets` (free public RPC: probe each token's busyness, search the quietest ones' signatures near the swap time,
+  signer besides FOMO's fee payer whose balance moved by exactly the amount; getTransaction needs
+  maxSupportedTransactionVersion 1 since Solana v1 transactions) -> `report` (reports/fomo/, git-ignored) -> published to
+  https://claude.ai/artifact/9mqHKHdwAqN1J8y9rSaJdj . First run 2026-10-10: 353 on the boards, 150 read, 9 scored,
+  0 pass, 1 promising (OinkersRUs, already followed).
 
 ## Command families and resets (2026-10-08)
 - Hyperliquid: `/hyper<x>`; FOMO book: `/fomo<x>` (`tg.ALIASES`/`canon` turn every name into one canonical name

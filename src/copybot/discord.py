@@ -65,6 +65,7 @@ DESCRIPTIONS = {
     "/invowallets": "Invo: the same calls at trader size and at 1/2/5/10/20% risk, compared (live)",
     "/invofollow": "Invo: copy the calls a trader posts from now on (paper)",
     "/invounfollow": "Invo: stop copying a trader (open copies still exit normally)",
+    "/invosearch": "Invo: search Invo traders now with the strict rules and follow the best 7",
     "/fomoreset": "FOMO: the wallet back to the start, no open trades, traders kept (needs the PIN)",
 }
 

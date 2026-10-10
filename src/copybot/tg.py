@@ -34,7 +34,7 @@ HYPER_COMMANDS = ("/hyperstatus", "/hypertrades", "/hypertraders", "/hyperwallet
 FOMO_COMMANDS = ("/fomo", "/fomotrades", "/fomotraders", "/fomowallet", "/fomopositions", "/fomoleaders",
                  "/fomoprogress", "/fomosearch", "/fomopause", "/fomoresume", "/fomoflatten", "/fomoreset",
                  "/fomoadd", "/fomofollow", "/fomounfollow", "/fomowallets")
-INVO_COMMANDS = ("/invo", "/invotrades", "/invotraders", "/invowallets", "/invofollow", "/invounfollow")
+INVO_COMMANDS = ("/invo", "/invotrades", "/invotraders", "/invowallets", "/invofollow", "/invounfollow", "/invosearch")
 COMMANDS = ("/status", "/trades", "/traders", "/wallets", "/positions", "/leaders", "/progress", "/search", "/pause",
             "/resume", "/flatten", "/reset", "/restart", "/help", "/add", "/picks") + tuple(ALIASES) + FOMO_COMMANDS \
     + INVO_COMMANDS
@@ -309,5 +309,6 @@ HELP = ("🤖 <b>Copybot (paper)</b>\n\n"
         "/hyperadd 0x… – check one wallet with the strict rules, follow it if it passes\n"
         "/invo · /invotrades · /invotraders · /invowallets – the Invo wallets (live cards)\n"
         "/invofollow &lt;user&gt; · /invounfollow &lt;user&gt; – copy Invo traders' posted calls (paper)\n"
+        "/invosearch – search Invo traders now with the strict rules and follow the best 7\n"
         "/hyperreset &lt;PIN&gt; – every Hyperliquid wallet back to the start (no open trades), traders kept\n\n"
         "/restart – restart the bot")

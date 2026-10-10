@@ -1,0 +1,141 @@
+<title>FOMO Daily Picks</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=Figtree:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: one reading column; a summary line, the ranked picks as rows with their numbers, then why others left,
+   the rules and the score formula. Filled by tools/fomo_picks.py (the DATA object below). */
+:root {
+  --bg: #f6f5f1; --surface: #ffffff; --fg: #1f1d18; --muted: #6a655a; --line: #e2ded4; --chip: #efece4;
+  --accent: #a8620a; --good: #1f7a4d; --bad: #b3261e; --promise: #5a55b8;
+  --display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --body: "Figtree", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #151411; --surface: #1d1c18; --fg: #ece8df; --muted: #a59f92; --line: #2f2d27; --chip: #27251f;
+    --accent: #eaa649; --good: #5fcf94; --bad: #ff8a80; --promise: #a9a4f5; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #151411; --surface: #1d1c18; --fg: #ece8df; --muted: #a59f92; --line: #2f2d27; --chip: #27251f;
+  --accent: #eaa649; --good: #5fcf94; --bad: #ff8a80; --promise: #a9a4f5; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font-family: var(--body); font-size: 15px; line-height: 1.5; }
+.wrap { max-width: 900px; margin: 0 auto; padding-inline: 16px; padding-block: 36px 64px; }
+.eyebrow { font: 600 12px var(--body); letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); }
+h1 { font-family: var(--display); font-weight: 700; font-size: clamp(28px, 5vw, 42px); line-height: 1.05; margin: 6px 0 10px; text-wrap: balance; }
+h2 { font-family: var(--display); font-weight: 600; font-size: 20px; margin: 40px 0 10px; }
+.sum { color: var(--muted); max-width: 70ch; margin: 0; }
+.pick { display: grid; grid-template-columns: 2.2rem minmax(0, 1fr); gap: 4px 12px; padding: 16px 0; border-bottom: 1px solid var(--line); }
+.rank { font: 600 22px var(--display); color: var(--accent); font-variant-numeric: tabular-nums; }
+.name { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; }
+.name b { font-family: var(--display); font-size: 19px; font-weight: 600; }
+.pill { font-size: 11.5px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; padding: 2px 8px; border-radius: 4px; background: var(--chip); color: var(--muted); }
+.pill.passes { color: var(--good); }
+.pill.promising { color: var(--promise); }
+.pill.new { color: var(--accent); }
+.score { margin-left: auto; font: 600 15px var(--mono); font-variant-numeric: tabular-nums; }
+.stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr)); gap: 6px 14px; margin: 8px 0 0; }
+.stat { min-width: 0; }
+.stat dt { font-size: 11.5px; color: var(--muted); }
+.stat dd { margin: 0; font: 500 14px var(--mono); font-variant-numeric: tabular-nums; }
+.stat dd.pos { color: var(--good); } .stat dd.neg { color: var(--bad); }
+.miss { margin: 8px 0 0; font-size: 13.5px; color: var(--promise); }
+.cmd { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; min-width: 0; }
+.cmd code { font: 13px var(--mono); background: var(--chip); padding: 6px 9px; border-radius: 6px; overflow-wrap: anywhere; min-width: 0; }
+.cmd button { font: 500 12px var(--body); padding: 5px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--fg); cursor: pointer; }
+.cmd button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.nowallet { font-size: 13.5px; color: var(--muted); margin-top: 8px; }
+ul.plain { margin: 0; padding-left: 18px; }
+ul.plain li { margin: 4px 0; }
+.rules { width: 100%; border-collapse: collapse; font-size: 14px; }
+.rules td { padding: 8px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+.rules td:first-child { font-weight: 600; width: 9.5rem; padding-right: 14px; }
+.tablewrap { overflow-x: auto; }
+.note { color: var(--muted); font-size: 13.5px; max-width: 72ch; }
+.empty { padding: 20px 0; color: var(--muted); }
+</style>
+
+<div class="wrap">
+  <div class="eyebrow">FOMO · paper copy trading</div>
+  <h1 id="title">FOMO daily picks</h1>
+  <p class="sum" id="sum"></p>
+
+  <div id="picks"></div>
+
+  <section id="gone-sec" hidden>
+    <h2>Left since the last report</h2>
+    <ul class="plain" id="gone"></ul>
+  </section>
+
+  <section>
+    <h2>How to follow one</h2>
+    <p class="note">Send its <code>/fomoadd</code> command to the bot. The bot reads that wallet's full 30 days on-chain and applies the same rules; it follows only if they pass and a slot is free. To follow without that check, use <code>/fomofollow</code> with the same wallet.</p>
+  </section>
+
+  <section>
+    <h2>Most common reasons others failed</h2>
+    <ul class="plain" id="fails"></ul>
+  </section>
+
+  <section>
+    <h2>The rules (the bot's FOMO rules, unchanged)</h2>
+    <div class="tablewrap"><table class="rules" id="rules"></table></div>
+    <p class="note" id="scoretext"></p>
+    <p class="note">Candidates come from FOMO's 24-hour, 7-day and 30-day leaderboards. FOMO only shows each trader's last 100 swaps, so a trader can be "promising": it passes every rule except the amount of history. Only swaps paid in USDC or USDT count, like in the bot.</p>
+  </section>
+</div>
+
+<script>
+const DATA = /*DATA*/null;
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const usd = n => (n >= 0 ? "+" : "−") + "$" + Math.abs(n).toLocaleString("en-US");
+function render(d) {
+  if (!d) { $("sum").textContent = "No report yet."; return; }
+  $("title").textContent = "FOMO daily picks · " + d.day;
+  $("sum").textContent = (d.leaderboard ? `${d.leaderboard} traders on FOMO's 24h, 7d and 30d leaderboards; the best ${d.read} were read and ` : "")
+    + `${d.checked} not clearly failing were scored with the bot's FOMO rules: ${d.n_pass} pass, ${d.n_promising} promising (only FOMO's short history missing).` + (d.prev_day ? ` Compared with ${d.prev_day}.` : "");
+  $("picks").innerHTML = d.rows.length ? d.rows.map(r => `
+    <div class="pick">
+      <div class="rank">${r.rank}</div>
+      <div style="min-width:0">
+        <div class="name"><b>${esc(r.handle)}</b>
+          <span class="pill ${r.status}">${r.status === "passes" ? "passes every rule" : "promising"}</span>
+          ${r.new && d.prev_day ? '<span class="pill new">new</span>' : ""}
+          <span class="score">${r.score}/100</span></div>
+        <dl class="stats">
+          <div class="stat"><dt>Trades</dt><dd>${r.trades}</dd></div>
+          <div class="stat"><dt>Win rate</dt><dd>${r.win}%</dd></div>
+          <div class="stat"><dt>Profit factor</dt><dd>${r.pf}</dd></div>
+          <div class="stat"><dt>Profit</dt><dd class="${r.pnl >= 0 ? "pos" : "neg"}">${usd(r.pnl)}</dd></div>
+          <div class="stat"><dt>Last 7 days</dt><dd class="${r.pnl7d >= 0 ? "pos" : "neg"}">${usd(r.pnl7d)}</dd></div>
+          <div class="stat"><dt>Per copy, after costs</dt><dd>${r.edge > 0 ? "+" : ""}${r.edge}%</dd></div>
+          <div class="stat"><dt>Median hold</dt><dd>${r.hold_min} min</dd></div>
+          <div class="stat"><dt>Best trade</dt><dd>${r.best}% of profit</dd></div>
+          <div class="stat"><dt>Winning weeks</dt><dd>${r.weeks} of 4</dd></div>
+          <div class="stat"><dt>History seen</dt><dd>${r.days} days</dd></div>
+        </dl>
+        ${r.missing.length ? `<p class="miss">Only missing: ${esc(r.missing.join(", "))}. The bot checks its full 30 days on-chain.</p>` : ""}
+        ${r.cmd ? `<div class="cmd"><code>${esc(r.cmd)}</code><button type="button" data-copy="${esc(r.cmd)}">Copy</button></div>`
+                : `<p class="nowallet">Wallet not found automatically (its tokens were too busy to search on the free Solana connection).</p>`}
+      </div>
+    </div>`).join("") : '<p class="empty">Nobody passes the rules today.</p>';
+  $("gone-sec").hidden = !d.gone.length;
+  $("gone").innerHTML = d.gone.map(g => `<li><b>${esc(g.handle)}</b>: ${esc(g.why)}</li>`).join("");
+  $("fails").innerHTML = d.fails.map(([k, n]) => `<li>${esc(k)}: ${n} traders</li>`).join("") || "<li>None</li>";
+  $("rules").innerHTML = d.rules.map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`).join("");
+  $("scoretext").textContent = d.score_text;
+}
+document.addEventListener("click", async e => {
+  const b = e.target.closest("button[data-copy]");
+  if (!b) return;
+  try { await navigator.clipboard.writeText(b.dataset.copy); b.textContent = "Copied"; }
+  catch { b.textContent = "Select the text"; }
+  setTimeout(() => { b.textContent = "Copy"; }, 1500);
+});
+render(DATA);
+</script>
