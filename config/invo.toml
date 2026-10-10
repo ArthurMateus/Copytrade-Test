@@ -4,7 +4,8 @@
 # Without it this whole section stays off. Allowed ranges in brackets.
 enabled = true
 api_base = "https://api.invoapp.com/v1_0"
-poll_s = 30.0             # one request per followed trader per poll                                [1, 600]
+poll_s = 5.0              # seconds between rounds; each round asks every followed trader once      [1, 600]
+request_gap_s = 0.5       # spacing of requests to Invo (7 traders = ~3.5 s per round)             [0.2, 5]
 max_call_age_s = 180.0    # calls older than this when first seen are not copied (late entry)      [10, 1800]
 size_mult = 1.0           # our exposure = their size x leverage x this, of our 300$ (at least 10$) [0.1, 10]
 max_risk_pct = 2.0        # one copy never risks more than this % of our 300$ at our 3% stop (2% = 200$ max) [0.1, 20]

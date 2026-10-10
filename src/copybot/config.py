@@ -189,7 +189,10 @@ class Invo:
     INVO_TOKEN_FILE (a file holding the bot's own Invo account's refresh token), else it stays off."""
     enabled: bool = True
     api_base: str = "https://api.invoapp.com/v1_0"
-    poll_s: float = 30.0                  # one portfolio-list request per followed trader per poll
+    # how fast a new call is seen (owner request 2026-10-10, a 26 s copy lag): every poll_s the watcher asks each
+    # followed trader's portfolio list once, its requests spaced request_gap_s apart (7 traders: ~3.5 s + poll_s)
+    poll_s: float = 5.0
+    request_gap_s: float = 0.5
     max_call_age_s: float = 180.0         # a call older than this when we first see it is not copied (late entry)
     size_mult: float = 1.0                # our exposure = their size x leverage x this, of our equity (>= 10$)
     limits_pct: float = 5.0               # the wallet's limits are those of a side wallet at this risk level
@@ -337,6 +340,7 @@ CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
     ("sol", "extra_slippage_pct"): (0, 10),
     ("sol", "max_leaders"): (0, 7),
     ("invo", "poll_s"): (1, 600),
+    ("invo", "request_gap_s"): (0.2, 5.0),
     ("invo", "max_call_age_s"): (10, 1800),
     ("invo", "size_mult"): (0.1, 10.0),
     ("invo", "limits_pct"): (0.5, 20.0),

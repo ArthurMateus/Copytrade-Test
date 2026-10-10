@@ -196,6 +196,12 @@ instances on the same wallet.
   gets the refresh token with a DevTools console snippet (README) that decrypts `FlutterSecureStorage.REFRESH_TOKEN`
   (AES-GCM, key in `localStorage.FlutterSecureStorage`) and copies it; `tools/invo_check.py` verifies it.
 
+## Invo copy speed (owner request 2026-10-10)
+- `invo.poll_s` 30 -> 5 and `invo.request_gap_s` = 0.5 (the client's spacing, was a fixed 1 s): a new call is seen
+  within ~3.5 s (7 traders) + 5 s instead of up to ~40 s (a STRK copy was 26 s late). Invo has no push channel we can
+  use; if it starts refusing requests (watch `invo_poll_failed` in the log), raise them again. Copies are always filled
+  on Hyperliquid's real book at Hyperliquid's fees; Invo's entry price is only shown ("their entry").
+
 ## Account value = perp + spot stablecoins (bug found live 2026-10-10)
 - `/hyperadd` scored with the PERP account value only while the daily search used the leaderboard value, so the same
   wallet passed the search (3% drop) and failed /hyperadd (max_drawdown>30%): 0x6d73... had 1,481$ in perps and

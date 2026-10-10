@@ -122,7 +122,8 @@ class Bot:
                 x.cfg.risk.max_entry_age_s = cfg.invo.max_call_age_s + cfg.invo.poll_s
                 self.invo_extra.append(x)
                 self.sides.append(x)
-            self.invo_watch = InvoWatcher(InvoClient(cfg.invo.api_base, cfg.invo_token_file), self.q,
+            self.invo_watch = InvoWatcher(InvoClient(cfg.invo.api_base, cfg.invo_token_file,
+                                                     min_interval_s=cfg.invo.request_gap_s), self.q,
                                           lambda: {a[len(INVO):] for a in w.st.followed}, cfg.invo.poll_s,
                                           cfg.invo.max_call_age_s, self.stop)
         elif cfg.invo.enabled:
