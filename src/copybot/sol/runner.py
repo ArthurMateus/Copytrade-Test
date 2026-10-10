@@ -4,7 +4,7 @@ Threads: poller (leader swaps, on-chain; woken by the websocket) | websocket (so
 seeder (history -> leader balances) | scorer |
 this module's loop (decisions, paper broker, UI). Workers only talk to the loop through one queue, the loop is the
 only writer of state (ledger.append then State.apply, like the Hyperliquid side).
-It owns data/sol/ledger.jsonl and data/sol/cache/. Telegram/Discord go through the shared UI group.
+It owns data/sol/ledger.jsonl and data/sol/cache/. Discord goes through the shared UI.
 """
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ import time
 import shutil
 from pathlib import Path
 
-from copybot import log, picks, tgfmt
-from copybot.tgfmt import esc, fusd
+from copybot import log, picks, cardfmt
+from copybot.cardfmt import esc, fusd
 from copybot.config import Config
 from copybot.ledger import Ledger, now_ms
 from copybot.sol import fmt
@@ -106,7 +106,7 @@ class SolBot:
             return
         self.last_alert[k] = time.time()
         log.warn("sol_alert", text=text)
-        self.ui.send(f"⚠️ 🪙 {tgfmt.esc(text)}")
+        self.ui.send(f"⚠️ 🪙 {cardfmt.esc(text)}")
 
     def wanted(self) -> set[str]:
         """Traders to watch: the followed ones and every leader of an open copy in ANY wallet (its exits must come)."""
@@ -145,7 +145,7 @@ class SolBot:
             self.st.uncertain = problems
             self.rec({"ev": "pause", "reason": "uncertain restart"})
             self.ui.send("⚠️ 🪙 <b>FOMO restart with uncertainty</b> · ⏸️ entries paused, exits keep running\n"
-                         + "\n".join(f"• {tgfmt.esc(x)}" for x in problems[:10]) + "\nCheck, then /fomoresume.")
+                         + "\n".join(f"• {cardfmt.esc(x)}" for x in problems[:10]) + "\nCheck, then /fomoresume.")
         def boot_side(w):
             if not w.st.genesis_ms:
                 w.rec({"ev": "genesis", "equity0": w.c.start_equity, "btc_px0": 0.0})
@@ -394,7 +394,7 @@ class SolBot:
             plan = rebalance(self.st.sel, ranking, self.st.followed, set(self.st.paused_leaders), self.st.dropped,
                              now_ms(), self.c, keep=self.st.picked)
             self.apply_plan(plan, scores)
-        top = ", ".join(f"{tgfmt.short(a)} {scores.get(a, {}).get('score', 0) * 100:.0f} pts" for a in ranking[:3])
+        top = ", ".join(f"{cardfmt.short(a)} {scores.get(a, {}).get('score', 0) * 100:.0f} pts" for a in ranking[:3])
         self.ui.send(f"🔎 🪙 <b>FOMO search done</b> · {n_cands} FOMO traders checked · {n_el} pass the strict rules"
                      f" · {len(self.st.followed)} followed"
                      + (f" · +{len(plan.joins)} new" if plan and plan.joins else "")
@@ -407,7 +407,7 @@ class SolBot:
         """/fomoadd result: follow at once if it passes every rule and a slot is free, else say why not."""
         self.ranks = {x: i + 1 for i, x in enumerate(ranking)}
         self.scores = scores
-        who = f"<code>{tgfmt.short(a)}</code>"
+        who = f"<code>{cardfmt.short(a)}</code>"
         if score is None:
             self.ui.send(f"⚠️ 🪙 /fomoadd {who}: could not read its trades ({esc(err[:120])}). Try again later.")
         elif not score.get("eligible"):
@@ -434,7 +434,7 @@ class SolBot:
             self.rec({"ev": "unfollow", "leader": a, "reason": why})
             held = sum(1 for p in self.st.positions.values() if p.leader == a)
             log.info("sol_leader_dropped", leader=a, reason=why, open_copies=held)
-            self.ui.send(f"➖ 🪙 <b>Dropped</b> <code>{tgfmt.short(a)}</code> · {tgfmt.esc(why)}"
+            self.ui.send(f"➖ 🪙 <b>Dropped</b> <code>{cardfmt.short(a)}</code> · {cardfmt.esc(why)}"
                          + (f" · {held} copy still managed until exit" if held else ""))
         for a in plan.joins:
             self.rec({"ev": "follow", "leader": a, "rank": self.ranks.get(a)})
@@ -442,8 +442,8 @@ class SolBot:
             self.seed_q.put(a)
             s = scores.get(a, {})
             log.info("sol_leader_followed", leader=a, rank=self.ranks.get(a), score=s.get("score"))
-            self.ui.send(f"➕ 🪙 <b>Following</b> {tgfmt.esc(fmt.who(a, self.handle_of(a)))} · rank #{self.ranks.get(a)}\n"
-                         + tgfmt.pre([
+            self.ui.send(f"➕ 🪙 <b>Following</b> {cardfmt.esc(fmt.who(a, self.handle_of(a)))} · rank #{self.ranks.get(a)}\n"
+                         + cardfmt.pre([
                              ("Trades", str(s.get("trades", "-"))),
                              ("Win", f"{s.get('win_rate', 0) * 100:.0f}%"),
                              ("PF", f"{s.get('profit_factor', 0):.2f}"),
@@ -488,8 +488,8 @@ class SolBot:
             self.last_body.pop(key, None)
             self.ui.final_card(key, fmt.closed_card(t, self.handle_of(t["leader"])))
         elif kind == "leader_paused":
-            self.ui.send(f"⏸️ 🪙 <b>Leader paused</b> <code>{tgfmt.short(kw['leader'])}</code> · "
-                         f"{tgfmt.esc(kw['reason'])}\nNo new copies from it; open copies keep mirroring exits.")
+            self.ui.send(f"⏸️ 🪙 <b>Leader paused</b> <code>{cardfmt.short(kw['leader'])}</code> · "
+                         f"{cardfmt.esc(kw['reason'])}\nNo new copies from it; open copies keep mirroring exits.")
 
     def card_for(self, p, force: bool = False) -> None:
         key = f"sol:pos:{p.pos_id}"
@@ -512,7 +512,7 @@ class SolBot:
         if key == "sol:wallet":
             return fmt.wallet_card(self.st, marks, self.c, now)
         if key == "sol:wallets":
-            return tgfmt.wallets_card([(self.c.risk_per_trade_pct, self.st, True)]
+            return cardfmt.wallets_card([(self.c.risk_per_trade_pct, self.st, True)]
                                       + [(w.risk_pct, w.st, False, w.label) for w in self.sides], marks, now,
                                       title="🪙 <b>FOMO wallets</b> · same traders, different risk per trade")
         return fmt.leaders_card(self.st, self.ranks, handles, now, self.scores, self.scorer.progress)
@@ -557,14 +557,14 @@ class SolBot:
                 self.ui.send("Usage: /fomoadd &lt;Solana wallet address&gt; (32 to 44 letters and digits, no 0x)")
                 return
             self.scorer.add_q.put(a)
-            self.ui.send(f"🔎 🪙 Checking <code>{tgfmt.short(a)}</code> with the strict rules now (a minute or two); "
+            self.ui.send(f"🔎 🪙 Checking <code>{cardfmt.short(a)}</code> with the strict rules now (a minute or two); "
                          "I will follow it if it passes and a slot is free.")
         elif c.name in ("/fomofollow", "/fomounfollow"):
             a = c.arg.strip()
             if not re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", a) or a == self.c.fomo_fee_payer:
                 self.ui.send(f"Usage: {c.name} &lt;Solana wallet address&gt; (32 to 44 letters and digits, no 0x)")
                 return
-            who = f"<code>{tgfmt.short(a)}</code>"
+            who = f"<code>{cardfmt.short(a)}</code>"
             if c.name == "/fomounfollow":
                 if a not in self.st.followed:
                     self.ui.send(f"🪙 {who} is not followed.")

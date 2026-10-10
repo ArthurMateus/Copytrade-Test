@@ -1,11 +1,11 @@
-"""FOMO/Solana message rendering (Telegram HTML, converted for Discord). Same look as tgfmt: 🟢/🔴 = money only,
+"""FOMO/Solana message rendering (card HTML, converted for Discord). Same look as cardfmt: 🟢/🔴 = money only,
 labelled lines, one P&L number always AFTER fees, an "updated" footer."""
 from __future__ import annotations
 
 import statistics
 
 from copybot.ledger import Position, State
-from copybot.tgfmt import (by_rank, dot, dur, esc, fpct, fpx, fusd, lag_line, money, pctl, pf_text, pre, short,
+from copybot.cardfmt import (by_rank, dot, dur, esc, fpct, fpx, fusd, lag_line, money, pctl, pf_text, pre, short,
                            updated)
 
 FEE_PCT = 1.0     # the paper swap fee (config sol.swap_fee_pct); used for the "if the stop hits" estimate

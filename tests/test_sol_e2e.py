@@ -10,9 +10,9 @@ from pathlib import Path
 
 import pytest
 
-from copybot import config, log, tgfmt
+from copybot import config, log, cardfmt
 from copybot.runner import Bot
-from tests.fakes import FakeDiscord, FakeHL, FakeTelegram
+from tests.fakes import FakeDiscord, FakeHL
 from tests.fakes_sol import KEY, FakeDex, FakeSolana
 from tests.test_e2e import PIN, env_for, wait_for, write_config
 
@@ -33,8 +33,8 @@ def history_swaps(sol: FakeSolana, now_ms: int, wallet=GOOD, n=90, days=60, fomo
 
 class Env:
     def __init__(self, tmp_path: Path, key=KEY, discord=True, poll_s=60.0, history=True, extra="", auto=True):
-        self.hl, self.tg, self.sol, self.dex = FakeHL(), FakeTelegram(), FakeSolana(), FakeDex()
-        self.dc = FakeDiscord() if discord else None
+        self.hl, self.dc, self.sol, self.dex = FakeHL(), FakeDiscord(), FakeSolana(), FakeDex()
+        self.tg = self.dc                    # (the tests' old name for the chat: Discord is the only one since 2026-10-10)
         self.data = tmp_path / "data"
         self.data.mkdir(exist_ok=True)
         cdir = write_config(tmp_path, self.hl, self.tg, self.data)
@@ -45,16 +45,8 @@ class Env:
             'max_candidates = 10\ndiscover_pages = 1\ndiscover_per_page = 200\n'
             + f'auto_follow = {str(auto).lower()}\n'      # most tests cover the copy flow after an automatic pick
             + (extra or 'rescore_minutes = 0.03\n'), encoding="utf-8")
-        if self.dc:
-            (cdir / "discord.toml").write_text(
-                f'api_base = "{self.dc.api_base}"\ngateway_url = "{self.dc.gateway_url}"\n'
-                'edit_min_interval_s = 0.3\nmin_send_interval_s = 0.02\n', encoding="utf-8")
         self.cdir = cdir
-        env = {**env_for(self.tg), "HELIUS_API_KEY": key}
-        if self.dc:
-            env.update(DISCORD_BOT_TOKEN=self.dc.token, DISCORD_CHANNEL_ID=self.dc.channel,
-                       DISCORD_OWNER_ID=self.dc.owner)
-        self.env = env
+        self.env = {**env_for(self.dc), "HELIUS_API_KEY": key}
         self.bot = None
         self.th = None
         if history:
@@ -66,6 +58,7 @@ class Env:
         self.bot = Bot(config.load(self.cdir, env=self.env))
         self.th = threading.Thread(target=self.bot.run, daemon=True)
         self.th.start()
+        assert wait_for(lambda: self.bot.ui.connected, timeout=15)     # commands go to THIS bot's Discord session
         return self.bot
 
     def stop(self):
@@ -78,9 +71,8 @@ class Env:
 
     def close(self):
         self.stop()
-        for f in (self.hl, self.tg, self.sol, self.dex, self.dc):
-            if f:
-                f.close()
+        for f in (self.hl, self.sol, self.dex, self.dc):
+            f.close()
 
     def following(self, bot) -> bool:
         """GOOD followed, its history seeded, and the websocket subscribed to it (so a trade wakes the poller)."""
@@ -103,7 +95,7 @@ def env(tmp_path):
 def test_discover_follow_copy_close_and_survive_a_restart(env):
     bot = env.start()
     assert wait_for(lambda: env.following(bot), timeout=40), env.tg_text()
-    assert "Following" in env.tg_text() and tgfmt.short(GOOD) in env.tg_text()
+    assert "Following" in env.tg_text() and cardfmt.short(GOOD) in env.tg_text()
     assert "Live trades from: Helius" in env.tg_text()
     # with a key everything goes to Helius (the search within its daily credit cap), history in bulk pages
     assert all(k for _, k in env.sol.calls)
@@ -150,7 +142,7 @@ def test_discover_follow_copy_close_and_survive_a_restart(env):
     assert wait_for(lambda: "WIN" in env.tg_text() and "WIN" in env.dc_text(), timeout=10)
 
 
-def test_commands_from_telegram_and_discord(env):
+def test_commands_from_discord(env):
     bot = env.start()
     assert wait_for(lambda: GOOD in bot.sol.st.followed, timeout=40)
     assert wait_for(lambda: env.dc.connected() and env.dc.commands is not None, timeout=10)
@@ -313,7 +305,7 @@ def test_fomosearch_from_telegram_finds_scores_and_follows_the_best_at_once(tmp_
         assert "1 FOMO traders seen" in text and "+1 new" in text and "Following" in text
         assert any(m == "getTransactionsForAddress" and k for m, k in e.sol.calls)       # history in bulk (Helius)
         e.tg.say("/fomoleaders")
-        assert wait_for(lambda: "last search done" in e.tg_text() and tgfmt.short(GOOD) in e.tg_text(), timeout=10)
+        assert wait_for(lambda: "last search done" in e.tg_text() and cardfmt.short(GOOD) in e.tg_text(), timeout=10)
     finally:
         e.close()
 

@@ -5,11 +5,11 @@ from dataclasses import asdict
 
 import pytest
 
-from copybot import config, tgfmt
+from copybot import config, cardfmt
 from copybot.ledger import Ledger, Position, State, now_ms
 from copybot.sol import fmt
 from copybot.sol.runner import SolBot
-from copybot.tg import ALIASES, COMMANDS, FOMO_COMMANDS, HYPER_COMMANDS, ONCE, PIN_COMMANDS, SLASH_COMMANDS, Command, canon
+from copybot.chat import ALIASES, COMMANDS, FOMO_COMMANDS, HYPER_COMMANDS, PIN_COMMANDS, SLASH_COMMANDS, Command, canon
 
 PIN = "2468"
 A, B = "LeaderAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1", "LeaderBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB2"
@@ -39,10 +39,10 @@ def test_the_two_families_are_complete_and_symmetrical():
     assert all(len(c) - 1 <= 32 and c[1:].islower() for c in SLASH_COMMANDS)          # Discord's name rules
 
 
-def test_dangerous_commands_need_the_pin_and_are_never_replayed_after_a_restart():
+def test_dangerous_commands_need_the_pin():
+    # (Discord delivers an interaction once, to the live session only: no replay after a restart, unlike Telegram)
     for c in ("/hyperflatten", "/hyperreset", "/fomoflatten", "/fomoreset"):
-        assert canon(c) in PIN_COMMANDS and canon(c) in ONCE
-    assert "/restart" in ONCE
+        assert canon(c) in PIN_COMMANDS
 
 
 # ---- long / short ----------------------------------------------------------------------------------------------------
@@ -63,16 +63,16 @@ def closed_state(sides: list[int], open_sides: list[int] = ()) -> State:
 
 
 def test_progress_shows_longs_and_shorts_separately():
-    text = tgfmt.progress_text(closed_state([1, 1, -1, 1, -1, 1, 1, -1], [-1]), {}, None, now_ms())
+    text = cardfmt.progress_text(closed_state([1, 1, -1, 1, -1, 1, 1, -1], [-1]), {}, None, now_ms())
     assert "Longs: <b>5 closed" in text and "Shorts: <b>3 closed" in text and "1 open" in text
     assert "Every copy so far was a long" not in text
 
 
 def test_progress_warns_when_every_copy_so_far_was_a_long():
-    text = tgfmt.progress_text(closed_state([1] * 9), {}, None, now_ms())
+    text = cardfmt.progress_text(closed_state([1] * 9), {}, None, now_ms())
     assert "Shorts: <b>0 closed" in text and "Every copy so far was a long" in text
-    assert "Every copy so far was a long" not in tgfmt.progress_text(closed_state([1] * 3), {}, None, now_ms())  # too few
-    assert "Every copy so far was a long" not in tgfmt.progress_text(closed_state([1] * 9, [-1]), {}, None, now_ms())
+    assert "Every copy so far was a long" not in cardfmt.progress_text(closed_state([1] * 3), {}, None, now_ms())  # too few
+    assert "Every copy so far was a long" not in cardfmt.progress_text(closed_state([1] * 9, [-1]), {}, None, now_ms())
 
 
 # ---- the FOMO book: cards and resets ----------------------------------------------------------------------------------
@@ -129,12 +129,12 @@ def test_fomo_cards_show_the_book_the_trades_the_traders_and_the_wallet(sol):
     for name, key, needles in [
             ("/fomo", "sol:status", ["FOMO (paper)", "copying", "Wallet", "Solana data"]),
             ("/fomotrades", "sol:trades", ["FOMO trades", "1 open", "MEME", "⬆️ BUY", "Entry → now", "0.01 → 0.012",
-                                           "Sells when", tgfmt.short(A), "if hit", "If every stop hits"]),
-            ("/fomotraders", "sol:traders", ["FOMO traders", tgfmt.short(A), "Made for you", "Their record", "90 trades",
+                                           "Sells when", cardfmt.short(A), "if hit", "If every stop hits"]),
+            ("/fomotraders", "sol:traders", ["FOMO traders", cardfmt.short(A), "Made for you", "Their record", "90 trades",
                                              "Typical hold", "This week / today", "Following for"]),
             ("/fomowallet", "sol:wallet", ["FOMO wallet", "Cash", "In open trades", "Fees paid", "Today", "This week",
                                            "stops new copies at −5%", "max 8"]),
-            ("/fomoleaders", "sol:leaders", ["FOMO leaders", tgfmt.short(A), "#1"])]:
+            ("/fomoleaders", "sol:leaders", ["FOMO leaders", cardfmt.short(A), "#1"])]:
         bot.command(Command(name))
         assert key in chat.cards and key in bot.live_cards, name
         for n in needles:

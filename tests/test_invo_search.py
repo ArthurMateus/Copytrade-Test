@@ -1,6 +1,6 @@
 """The daily Invo search (copybot/invo_scorer.py) and the daily picks report (copybot/picks.py): pure scoring of call
 histories with the Hyperliquid rules, the report's day-to-day comparison, and the bot end to end (FakeHL +
-FakeTelegram + FakeInvo)."""
+FakeDiscord + FakeInvo)."""
 import copy
 import time
 
@@ -137,12 +137,12 @@ def test_daily_report_is_due_once_after_the_hour_local_time(tmp_path):
 # ---- the bot end to end ----------------------------------------------------------------------------------------
 @pytest.fixture
 def search_env(env, tmp_path):
-    hl, tg, data, cdir = env
+    hl, dc, data, cdir = env
     f = FakeInvo()
     tok = tmp_path / "invo.token"
     tok.write_text("REFRESH0", encoding="utf-8")
     (cdir / "invo.toml").write_text(f'api_base = "{f.url}"\npoll_s = 1.0\ndiscover_pages = 1\n', encoding="utf-8")
-    yield hl, tg, data, cdir, f, tok
+    yield hl, dc, data, cdir, f, tok
     f.close()
 
 
@@ -157,17 +157,17 @@ def add_trader(f: FakeInvo, name: str, good: bool) -> None:
 
 def test_the_search_finds_a_good_trader_reports_it_and_drops_a_followed_one_that_keeps_failing(search_env,
                                                                                               monkeypatch):
-    hl, tg, data, cdir, f, tok = search_env
+    hl, dc, data, cdir, f, tok = search_env
     add_trader(f, "steady", good=True)
     add_trader(f, "coinflip", good=False)
     f.ranked = ["steady", "coinflip"]
     monkeypatch.setenv("INVO_TOKEN_FILE", str(tok))
     monkeypatch.setattr(invo_scorer, "REQ_GAP_S", 0.0)
-    bot, th = start_bot((hl, tg, data, cdir))
-    text = lambda: " ".join(m["text"] for m in tg.sent + tg.edits)
+    bot, th = start_bot((hl, dc, data, cdir))
+    text = lambda: " ".join(m["text"] for m in dc.sent + dc.edits)
     try:
         assert bot.invo_search is not None
-        tg.say("/invofollow coinflip")
+        dc.say("/invofollow coinflip")
         assert wait_for(lambda: "invo:coinflip" in bot.invo.st.followed)
         # the first search (at start) is shown as soon as it ends
         assert wait_for(lambda: "Daily picks · 🧾 Invo" in text(), timeout=60)
@@ -180,12 +180,12 @@ def test_the_search_finds_a_good_trader_reports_it_and_drops_a_followed_one_that
         assert wait_for(lambda: "invo:coinflip" not in bot.invo.st.followed, timeout=60)
         assert wait_for(lambda: "fails the rules 2 searches in a row" in text()
                         and "/invofollow coinflip brings it back" in text())
-        n = len(tg.sent)
-        tg.say("/picks")
-        assert wait_for(lambda: any("Daily picks · 🔷 Hyperliquid" in m["text"] for m in tg.sent[n:]))
-        assert wait_for(lambda: any("Daily picks · 🧾 Invo" in m["text"] for m in tg.sent[n:]))
+        n = len(dc.sent)
+        dc.say("/picks")
+        assert wait_for(lambda: any("Daily picks · 🔷 Hyperliquid" in m["text"] for m in dc.sent[n:]))
+        assert wait_for(lambda: any("Daily picks · 🧾 Invo" in m["text"] for m in dc.sent[n:]))
         assert not (data / "picks.json").exists()                              # /picks never replaces the baseline
-        tg.say("/invofollow coinflip")                                          # no blacklist: it can come back
+        dc.say("/invofollow coinflip")                                          # no blacklist: it can come back
         assert wait_for(lambda: "invo:coinflip" in bot.invo.st.followed)
         assert "REFRESH" not in text()
     finally:
@@ -193,18 +193,18 @@ def test_the_search_finds_a_good_trader_reports_it_and_drops_a_followed_one_that
 
 
 def test_invosearch_searches_now_and_follows_the_best(search_env, monkeypatch):
-    hl, tg, data, cdir, f, tok = search_env
+    hl, dc, data, cdir, f, tok = search_env
     add_trader(f, "steady", good=True)
     add_trader(f, "coinflip", good=False)
     f.ranked = ["steady", "coinflip"]
     monkeypatch.setenv("INVO_TOKEN_FILE", str(tok))
     monkeypatch.setattr(invo_scorer, "REQ_GAP_S", 0.0)
-    bot, th = start_bot((hl, tg, data, cdir))
-    text = lambda: " ".join(m["text"] for m in tg.sent + tg.edits)
+    bot, th = start_bot((hl, dc, data, cdir))
+    text = lambda: " ".join(m["text"] for m in dc.sent + dc.edits)
     try:
-        tg.say("/invofollow coinflip")
+        dc.say("/invofollow coinflip")
         assert wait_for(lambda: "invo:coinflip" in bot.invo.st.followed)
-        tg.say("/invosearch")
+        dc.say("/invosearch")
         assert wait_for(lambda: "Invo search finished" in text(), timeout=90)
         assert "invo:steady" in bot.invo.st.followed and "invo:coinflip" not in bot.invo.st.followed
         assert wait_for(lambda: "@steady" in text() and "➖ dropped: @coinflip" in text())

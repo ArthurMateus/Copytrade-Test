@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from copybot.tgfmt import esc
+from copybot.cardfmt import esc
 
 
 @dataclass

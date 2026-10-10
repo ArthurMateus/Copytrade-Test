@@ -85,7 +85,7 @@ class State:
     closed: list[dict] = field(default_factory=list)
     lags_ms: list[float] = field(default_factory=list)
     sel: dict = field(default_factory=dict)                        # selection hysteresis state
-    cards: dict[str, int] = field(default_factory=dict)            # telegram card key -> message id
+    cards: dict[str, int] = field(default_factory=dict)            # chat card key ("dc:<key>" for Discord) -> message id
     open_intents: dict[str, dict] = field(default_factory=dict)
     uncertain: list[str] = field(default_factory=list)
     counters: dict[str, int] = field(default_factory=dict)

@@ -45,4 +45,4 @@ decisions) and README.md first. ~298 tests pass (`uv run pytest`, ~3 min). Every
 - Never commit the owner's untracked files in the repo root (copilot-*.md): stage paths explicitly, never `git add -A`.
 - Writing Python strings with backslash escapes through bash heredocs gets mangled: use the Write/Edit tools or a
   script file.
-- Some timing-based tests (telegram card edits, discord rate limit) can fail rarely under load: rerun first.
+- Some timing-based tests (discord card edits and rate limit) can fail rarely under load: rerun first.

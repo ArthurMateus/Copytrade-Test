@@ -1,9 +1,10 @@
-"""Discord: the same owner-only commands and live cards as Telegram, over Discord's REST API + Gateway websocket.
+"""Discord: the bot's only chat (Telegram was removed 2026-10-10). Owner-only slash commands and live cards over
+Discord's REST API + Gateway websocket.
 
-- Reuses TelegramUI's outbox, rate limits and edit-in-place card logic; only the transport differs.
+- `chat.ChatUI` has the outbox, rate limits and edit-in-place card logic; this module is the transport.
 - Commands are guild slash commands (registered on connect). Only DISCORD_OWNER_ID may use them; every reply to
   an interaction is ephemeral (only the owner sees it), so /flatten's PIN never shows in the channel.
-- Cards are the same Telegram HTML converted to Discord markdown, in an embed whose colour follows the money
+- Cards are written in a small HTML subset (chat.py) converted to Discord markdown, in an embed whose colour follows the money
   (green making / red losing).
 - The bot token is only in a request header and the identify payload, never logged. The PIN is never logged.
 """
@@ -22,7 +23,7 @@ from websockets.sync.client import connect
 
 from copybot import log
 from copybot.config import Config
-from copybot.tg import COMMANDS, PIN_COMMANDS, SLASH_COMMANDS, WALLET_COMMANDS, Command, TelegramUI, TgError, canon
+from copybot.chat import COMMANDS, PIN_COMMANDS, SLASH_COMMANDS, WALLET_COMMANDS, ChatError, ChatUI, Command, canon
 
 GREEN, RED, ORANGE, BLURPLE = 0x2ECC71, 0xE74C3C, 0xF39C12, 0x5865F2
 MAX_EMBED = 4096
@@ -74,7 +75,7 @@ _MD = re.compile(r"([\\*_~`|])")
 
 
 def html_to_md(text: str) -> str:
-    """Telegram HTML (b, i, code, pre) -> Discord markdown, escaping markdown characters in plain text."""
+    """Card HTML (b, i, code, pre) -> Discord markdown, escaping markdown characters in plain text."""
     out, code = [], False
     for part in _TAG.split(text):
         if part in ("<b>", "</b>"):
@@ -133,26 +134,26 @@ class DiscordApi:
             if e.code == 404 or (isinstance(b, dict) and b.get("code") == 10008):
                 desc = f"message to edit not found ({desc})"
             ra = float(b.get("retry_after", 0)) if isinstance(b, dict) else 0.0
-            raise TgError(e.code, desc, ra) from None
+            raise ChatError(e.code, desc, ra) from None
         except urllib.error.URLError as e:
-            raise TgError(0, f"network: {e.reason}") from None
+            raise ChatError(0, f"network: {e.reason}") from None
         except (OSError, http.client.HTTPException, ValueError) as e:
-            raise TgError(0, f"network: {type(e).__name__}: {e}") from None
+            raise ChatError(0, f"network: {type(e).__name__}: {e}") from None
 
 
-class DiscordUI(TelegramUI):
+class DiscordUI(ChatUI):
+    name = "discord"
+
     def __init__(self, cfg: Config, on_command, on_card_id, clock=time.monotonic):
-        super().__init__(cfg, on_command, on_card_id, clock)
+        super().__init__(cfg, on_command, on_card_id, cfg.discord, clock)
         self.enabled = bool(cfg.dc_token and cfg.dc_channel_id and cfg.dc_owner_id)
         self.api = DiscordApi(cfg.discord.api_base, cfg.dc_token) if self.enabled else None
         self.channel = cfg.dc_channel_id
         self.owner = str(cfg.dc_owner_id)
-        self.limits = cfg.discord
-        self.name = "discord"
         self.registered = False
         self.connected = False
 
-    # ---- transport (TelegramUI's outbox calls this) ---------------------------------------------
+    # ---- transport (ChatUI's outbox calls this) -------------------------------------------------
     def _call(self, method: str, params: dict):
         if method == "sendMessage":
             r = self.api.call("POST", f"/channels/{self.channel}/messages",
@@ -247,7 +248,7 @@ class DiscordUI(TelegramUI):
         try:
             self.api.call("POST", f"/interactions/{d['id']}/{d['token']}/callback",
                           {"type": 4, "data": {"content": text, "flags": 64}})
-        except TgError as e:
+        except ChatError as e:
             log.warn("discord_reply_failed", err=e.desc)
 
     def _interaction(self, d: dict) -> None:
@@ -265,43 +266,3 @@ class DiscordUI(TelegramUI):
                                         else ""))
         self.on_command(Command(name, str(opts.get("pin") or opts.get("wallet") or "").strip()))
 
-
-class MultiUI:
-    """Fans every message and card out to all chats (Telegram and Discord). Card ids of Discord are kept in the
-    ledger under 'dc:<key>' so both platforms keep editing their own messages after a restart."""
-
-    def __init__(self, tg: TelegramUI, dc: DiscordUI):
-        self.tg, self.dc = tg, dc
-        self.uis = [tg, dc]
-
-    def send(self, text: str) -> None:
-        for u in self.uis:
-            if u.enabled:
-                u.send(text)
-
-    def set_card(self, key: str, text: str, new: bool = False) -> None:
-        for u in self.uis:
-            if u.enabled:
-                u.set_card(key, text, new)
-
-    def final_card(self, key: str, text: str) -> None:
-        for u in self.uis:
-            if u.enabled:
-                u.final_card(key, text)
-
-    def restore_card(self, key: str, msg_id: int) -> None:
-        if key.startswith("dc:"):
-            self.dc.restore_card(key[3:], msg_id)
-        else:
-            self.tg.restore_card(key, msg_id)
-
-    def check_pin(self, given: str) -> bool:
-        return self.tg.check_pin(given)
-
-    def start(self) -> None:
-        for u in self.uis:
-            u.start()
-
-    def shutdown(self) -> None:
-        for u in self.uis:
-            u.stop.set()

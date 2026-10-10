@@ -1,7 +1,7 @@
 """Config: TOML files in one folder, one file per section, validated against hard ceilings at start.
 
 Unknown keys are an error (typos must not silently fall back to defaults).
-Secrets (Telegram token, chat id, PIN, Discord token/channel/owner, Helius key) come from environment variables ONLY.
+Secrets (PIN, Discord token/channel/owner, Helius key, Invo token file) come from environment variables ONLY.
 """
 from __future__ import annotations
 
@@ -97,20 +97,13 @@ class Selection:
 
 
 @dataclass
-class Telegram:
-    api_base: str = "https://api.telegram.org"
-    edit_min_interval_s: float = 5.0      # per message
-    min_send_interval_s: float = 1.1      # all API writes to the chat, globally
-    poll_timeout_s: int = 25
-    utc_offset_hours: float = 0.0         # times on every card are shown in this time zone (Brazil: -3)
-
-
-@dataclass
 class Discord:
+    """The bot's chat (Telegram was removed 2026-10-10)."""
     api_base: str = "https://discord.com/api/v10"
     gateway_url: str = "wss://gateway.discord.gg/?v=10&encoding=json"
     edit_min_interval_s: float = 5.0      # per message
     min_send_interval_s: float = 1.1      # all API writes to the channel, globally
+    utc_offset_hours: float = 0.0         # times on every card are shown in this time zone (Brazil: -3)
 
 
 @dataclass
@@ -241,7 +234,7 @@ class Runtime:
 class Picks:
     """The daily picks report (owner request 2026-10-09): the best wallets of each book under the strict rules,
     compared with the previous day's report. /picks sends it at any time."""
-    hour: float = 13.0                    # local time (telegram.utc_offset_hours) of the daily report
+    hour: float = 13.0                    # local time (discord.utc_offset_hours) of the daily report
     top_n: int = 7
 
 
@@ -250,15 +243,12 @@ class Config:
     risk: Risk = field(default_factory=Risk)
     broker: Broker = field(default_factory=Broker)
     selection: Selection = field(default_factory=Selection)
-    telegram: Telegram = field(default_factory=Telegram)
     discord: Discord = field(default_factory=Discord)
     runtime: Runtime = field(default_factory=Runtime)
     sol: Sol = field(default_factory=Sol)
     invo: Invo = field(default_factory=Invo)
     picks: Picks = field(default_factory=Picks)
     # secrets (env only, never logged)
-    tg_token: str = field(default="", repr=False)
-    tg_chat_id: str = field(default="", repr=False)
     pin: str = field(default="", repr=False)
     dc_token: str = field(default="", repr=False)
     dc_channel_id: str = field(default="", repr=False)
@@ -267,7 +257,7 @@ class Config:
     invo_token_file: str = field(default="", repr=False)     # INVO_TOKEN_FILE: the bot's Invo login (optional)
 
 
-SECTIONS = ("risk", "broker", "selection", "telegram", "discord", "runtime", "sol", "invo", "picks")
+SECTIONS = ("risk", "broker", "selection", "discord", "runtime", "sol", "invo", "picks")
 
 # (section, key) -> (min, max). The documented hard ceilings; a config outside them refuses to start.
 CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
@@ -314,11 +304,9 @@ CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
     ("selection", "pool_size"): (7, 400),
     ("selection", "alt_min_coins"): (2, 1000),
     ("selection", "alt_max_coin_share"): (0.1, 1.0),
-    ("telegram", "edit_min_interval_s"): (0.05, 600),
-    ("telegram", "utc_offset_hours"): (-12, 14),
+    ("discord", "utc_offset_hours"): (-12, 14),
     ("discord", "edit_min_interval_s"): (0.05, 600),
     ("discord", "min_send_interval_s"): (0.0, 60),
-    ("telegram", "min_send_interval_s"): (0.0, 60),
     ("runtime", "trading_timeout_s"): (0.1, 2.0),
     ("runtime", "weight_per_min"): (1, 1200),
     ("runtime", "tick_s"): (0.01, 1.0),
@@ -424,8 +412,6 @@ def load(config_dir: str | os.PathLike, env: dict | None = None) -> Config:
                 raise ConfigError(f"{path.name}: {k} must be {type(default).__name__}")
             setattr(obj, k, type(default)(v))
     validate(cfg)
-    cfg.tg_token = env.get("TELEGRAM_BOT_TOKEN", "")
-    cfg.tg_chat_id = env.get("TELEGRAM_CHAT_ID", "")
     cfg.pin = env.get("COPYBOT_PIN", "")
     cfg.dc_token = env.get("DISCORD_BOT_TOKEN", "")
     cfg.dc_channel_id = env.get("DISCORD_CHANNEL_ID", "")
@@ -482,6 +468,6 @@ def scaled(cfg: Config, risk_pct: float) -> Config:
 def public_dict(cfg: Config) -> dict:
     """Config without secrets, safe to log."""
     d = asdict(cfg)
-    for k in ("tg_token", "tg_chat_id", "pin", "dc_token", "dc_channel_id", "dc_owner_id", "helius_key", "invo_token_file"):
+    for k in ("pin", "dc_token", "dc_channel_id", "dc_owner_id", "helius_key", "invo_token_file"):
         d.pop(k)
     return d

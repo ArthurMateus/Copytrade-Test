@@ -29,8 +29,8 @@ def test_unknown_key_is_an_error(tmp_path):
 
 
 def test_secrets_only_from_env_and_never_in_public_dict(tmp_path):
-    cfg = config.load(tmp_path, env={"TELEGRAM_BOT_TOKEN": "123456:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-                                     "TELEGRAM_CHAT_ID": "42", "COPYBOT_PIN": "9876"})
+    cfg = config.load(tmp_path, env={"DISCORD_BOT_TOKEN": "MTIzNDU2.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                                     "DISCORD_CHANNEL_ID": "42", "DISCORD_OWNER_ID": "7", "COPYBOT_PIN": "9876"})
     assert cfg.pin == "9876"
     s = repr(cfg) + str(config.public_dict(cfg))
     assert "9876" not in s and "AAAAAAAA" not in s

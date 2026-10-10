@@ -1,7 +1,7 @@
 # CLAUDE.md: context for working on this repo
 
 Hyperliquid copy-trading bot, **PAPER MODE ONLY**. It copies up to 7 automatically selected wallets on a
-simulated $300 wallet. It is controlled from Telegram and runs unattended for 2–4 weeks on the owner's Windows PC.
+simulated $300 wallet. It is controlled from Discord (Telegram removed 2026-10-10) and runs unattended for 2–4 weeks on the owner's Windows PC.
 The full original brief is in [docs/SPEC.md](docs/SPEC.md). It is the scope reference: do not add features
 that are not listed there unless the owner asks. The README covers run instructions and design choices.
 
@@ -14,15 +14,14 @@ that are not listed there unless the owner asks. The README covers run instructi
 ## Hard rules (never break)
 - Never import a signing library, read a wallet key, or call an exchange/order endpoint.
   `tests/test_safety.py` enforces this.
-- Secrets come from environment variables only: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `COPYBOT_PIN`,
-  `DISCORD_BOT_TOKEN`, `DISCORD_CHANNEL_ID`, `DISCORD_OWNER_ID`, for the Solana book `HELIUS_API_KEY` (optional), and
+- Secrets come from environment variables only: `COPYBOT_PIN`, `DISCORD_BOT_TOKEN`, `DISCORD_CHANNEL_ID`, `DISCORD_OWNER_ID`, for the Solana book `HELIUS_API_KEY` (optional), and
   for the Invo calls wallet `INVO_TOKEN_FILE` (path of the file holding the bot's Invo refresh token; optional).
   Never log or commit them. `log.py` redacts them.
 - Every order goes through `RiskGate.check` (`risk.py`). Exits (reduce/close/stop) are never refused; entries
   fail closed.
 - Every state change goes through the ledger: `ledger.append(ev)` then `state.apply(ev)`. A restart replays the
   same `apply`, so never mutate `State` outside an event.
-- Tests fake only the network (`tests/fakes.py`: loopback HL REST + WS + Telegram). Never mock our own code.
+- Tests fake only the network (`tests/fakes.py`: loopback HL REST + WS + Discord REST/Gateway; `FakeDiscord.say("/cmd arg")` sends a slash command and `sent`/`edits` carry `text` = the card HTML rebuilt from the markdown, `md_to_card`). Never mock our own code.
   Parsers are tested against real recorded responses in `tests/fixtures` (re-record with
   `tools/record_samples.py`).
 - Run `uv run pytest` after every change (about 2.5 minutes, 250+ tests at the time of writing, including real-process
@@ -42,8 +41,8 @@ that are not listed there unless the owner asks. The README covers run instructi
 | `scoring.py` | Pure, deterministic: `prescreen` → `fill_screen` (first 2,000 fills) → `full_score` (180 d fills + 1h candles, 0–100 points) → `ranking`. `VERSION` invalidates cached results |
 | `selection.py` | Pure `select()` hysteresis; `Scorer` thread with a disk cache in `data/cache` (resumes after a restart) |
 | `feed.py` | Websocket (allMids + userFills, max 15 users) and the exchange `Clock` offset estimate |
-| `tg.py`, `tgfmt.py` | Telegram: owner-only commands, outbox; cards edited in place, rate-limited; renderers (shared by Discord). Live cards: /status, /leaders, /trades, /traders, /wallets (`Bot.render_card`). Card conventions: 🟢/🔴 = money only, ⬆️/⬇️ = side, one P&L after fees+funding, `label: value` lines (no `<pre>`), times in `telegram.utc_offset_hours` |
-| `discord.py` | Discord (owner request 2026-10-06), runs NEXT TO Telegram via `MultiUI`: `DiscordUI` subclasses `TelegramUI` (same outbox/card logic) over REST + Gateway (stdlib + `websockets.sync`), guild slash commands, owner-only, ephemeral replies (PIN never shown). Telegram HTML → markdown embeds coloured by money. Discord card ids live in the ledger as `dc:<key>` |
+| `chat.py`, `cardfmt.py` | Platform-free chat: command names/aliases/help, `ChatUI` outbox (cards edited in place, rate-limited, 429-aware); renderers in a small HTML subset. Live cards: /status, /leaders, /trades, /traders, /wallets (`Bot.render_card`). Card conventions: 🟢/🔴 = money only, ⬆️/⬇️ = side, one P&L after fees+funding, `label: value` lines (no `<pre>`), times in `discord.utc_offset_hours` |
+| `discord.py` | The ONLY chat (Telegram removed 2026-10-10 at the owner's request): `DiscordUI(ChatUI)` over REST + Gateway (stdlib + `websockets.sync`), guild slash commands, owner-only, ephemeral replies (PIN never shown), card HTML → markdown embeds coloured by money. Card ids live in the ledger as `dc:<key>` (keys without the prefix are old Telegram messages, ignored) |
 | `runner.py` | `Bot`: boot/repair, worker threads, trading loop, commands, selection application, heartbeat |
 | `wallets.py` | Side wallets: same moves at other risk levels (`risk.side_wallets_risk_pct`), own ledger in `data/wallets/<name>/`, limits scaled by `config.scaled`; `boot_repair` shared with the main wallet |
 | `sol/` | **Solana memecoin paper book** (own $300, own ledger `data/sol/`, own risk gate). `chain.py` Solana RPC client + swap parser + FOMO trader discovery + websocket alerts, `scoring.py` strict pure scoring, `scorer.py` thread + cache, `market.py` DexScreener + paper broker, `risk.py` gate, `trader.py` detector + positions, `runner.py` `SolBot` (threads inside the main process), `fmt.py` cards |
@@ -80,7 +79,7 @@ instances on the same wallet.
   `data/wallets/` to `data/archive/reset-<UTC>/`, writes a fresh ledger seeded with genesis + followed (original
   'since') + drop cooldowns + pauses + selection streaks, freezes the old ledgers and restarts. `/restart` stops
   the loop after 3 s; the owner's PowerShell `while` loop starts it again. `/reset`, `/restart`, `/flatten` sent
-  before the current start are ignored (Telegram can redeliver them).
+  before the current start used to be ignored (Telegram redelivered them; Discord never does).
 - Side wallets (owner request 2026-10-05): 2/5/10/20% risk, $300 each, compared by `/wallets`. EVERY risk limit
   scales with the level (per-symbol, total, consensus, daily/weekly loss stops capped at 100%); leverage, stop
   distance and liquidation buffer do not. They are allowed above the CEILINGS on purpose (paper comparison only).
@@ -181,7 +180,7 @@ instances on the same wallet.
 - Live UI (owner request 2026-10-09): `/invo`, `/invotrades`, `/invotraders` are live cards (keys `invo:*`,
   `Bot.render_card`, edited only when the body changes); each copy has its own live card `invo:pos:<pos_id>` with the
   trader's call (and resizes) that becomes the final summary on any close (the Invo wallet's PositionManager notifies
-  `Bot.on_invo_notify`). `tgfmt.short("invo:x")` -> "@x".
+  `Bot.on_invo_notify`). `cardfmt.short("invo:x")` -> "@x".
 - Risk-level wallets (owner request 2026-10-09: "1/2/5/10/20% of OUR wallet, same levels everywhere, set in config"):
   Invo: `invo.risk_wallets_pct` -> `Bot.invo_extra` = `SideWallet(own_leaders=True)` named `invo_risk_<r>pct`
   (fixed-risk sizing, no sizer), following the trader-size wallet's Invo traders (`sync_invo_extras`); `on_invo` runs
@@ -217,7 +216,7 @@ instances on the same wallet.
   writes a `follow` event (clears the pause; side wallets lift it in `sync_leaders`/`sync`).
 - `copybot/picks.py`: `Book`/`Entry`, `render` (🆕/✅/❌ vs the previous DAILY report, follow command in `<code>`),
   `Store` = `data/picks.json` (UI memory, not ledger state). `Bot.tick` sends it once a day after `picks.hour` (13, local
-  via `telegram.utc_offset_hours`) and >= 3 min after a start (`picks.due`); `/picks` sends it without saving.
+  via `discord.utc_offset_hours`) and >= 3 min after a start (`picks.due`); `/picks` sends it without saving.
   Builders: `Bot.hyper_book`, `SolBot.picks_book(n, prev)`, `Bot.invo_book`.
 - Invo search `copybot/invo_scorer.py` (`InvoScorer` thread, cache `data/cache/invo/scores.json`): candidates =
   followed + `usernames()` of `/trending/get_portfolios_pl` (filter trending/month/all_time, `{"filter", "params":
@@ -259,10 +258,10 @@ instances on the same wallet.
   traders were all long, or the market) until a ledger shows otherwise: send `data/ledger.jsonl` to investigate.
 
 ## Findings from the real API (2026-10-05)
-- `tests/test_telegram.py::test_card_is_edited_in_place_rate_limited_and_skips_unchanged` is timing-based and can
+- `tests/test_discord.py::test_rate_limit_is_honoured` is timing-based and can
   fail rarely under load; rerun before suspecting a bug.
 - Hyperliquid closes the websocket about every 3 h with code 1000 "Expired"; the bot reconnects in 2–17 s and
-  reconciles. Only an outage longer than `runtime.ws_alert_after_s` (60 s) alerts on Telegram.
+  reconciles. Only an outage longer than `runtime.ws_alert_after_s` (60 s) alerts on Discord.
 - One websocket can track at most 15 users. Live `userFills` messages have no `isSnapshot`, and `hash` can be all zeros.
 - Spot fills (`@107`) have `dir` = `Buy`/`Sell`. Builder perps (`xyz:TSLA`) appear in fills and are ignored. `#140` candles return HTTP 500.
 - The owner's PC clock runs about 1.4–1.7 s ahead of the exchange (±0.15 s). It is corrected via the `Clock` offset.
@@ -273,7 +272,7 @@ instances on the same wallet.
 ## Status and open questions
 - **Current state (2026-10-09): see `context.md`** (what runs where, how Claude helps pick FOMO/Invo traders, gotchas).
   Owner's bot PC: `C:\Users\gedeo\Copytrade-test` (uv on PATH there; restart loop
-  `while ($true) { uv run copybot; Start-Sleep 10 }`). Secrets set there: Telegram, Discord, PIN, HELIUS_API_KEY,
+  `while ($true) { uv run copybot; Start-Sleep 10 }`). Secrets set there: Discord, PIN, HELIUS_API_KEY,
   INVO_TOKEN_FILE. Invo login verified working 2026-10-09 (refresh = GET; POST answers 405).
 - Git hygiene: the owner keeps unrelated untracked files in the repo root (copilot-*.md, committed once by mistake and
   removed); always stage explicit paths, never `git add -A`.

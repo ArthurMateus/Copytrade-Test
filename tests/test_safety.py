@@ -10,7 +10,7 @@ from pathlib import Path
 from copybot import config, log
 from copybot.ledger import Ledger, Position
 from copybot.runner import Bot
-from tests.fakes import FakeHL, FakeTelegram
+from tests.fakes import FakeHL, FakeDiscord
 from tests.test_e2e import LEADER, env_for, wait_for, write_config
 
 SRC = Path(__file__).resolve().parent.parent / "src" / "copybot"
@@ -41,10 +41,10 @@ def test_importing_the_bot_loads_no_signing_library():
 
 
 def test_uncertain_restart_pauses_entries_alerts_and_still_runs_stops(tmp_path):
-    hl, tg = FakeHL(), FakeTelegram()
+    hl, dc = FakeHL(), FakeDiscord()
     data = tmp_path / "data"
     data.mkdir()
-    cdir = write_config(tmp_path, hl, tg, data)
+    cdir = write_config(tmp_path, hl, dc, data)
     lg = Ledger(data / "ledger.jsonl")
     lg.replay()
     lg.append({"ev": "genesis", "equity0": 300, "btc_px0": 100_000})
@@ -56,25 +56,25 @@ def test_uncertain_restart_pauses_entries_alerts_and_still_runs_stops(tmp_path):
     lg.close()
     hl.positions[LEADER] = {"ETH": 30.0}
     log.setup(None)
-    bot = Bot(config.load(cdir, env=env_for(tg)))
+    bot = Bot(config.load(cdir, env=env_for(dc)))
     th = threading.Thread(target=bot.run, daemon=True)
     th.start()
     try:
-        assert wait_for(lambda: any("Restart with uncertainty" in m["text"] for m in tg.sent))
+        assert wait_for(lambda: any("Restart with uncertainty" in m["text"] for m in dc.sent))
         assert bot.st.entries_paused
-        msg = next(m["text"] for m in tg.sent if "uncertainty" in m["text"])
+        msg = next(m["text"] for m in dc.sent if "uncertainty" in m["text"])
         assert "intent dead" in msg
         hl.mids["ETH"] = 2900.0                       # exits keep working while paused
         assert wait_for(lambda: "ETH" not in bot.st.positions)
         assert bot.st.closed[-1]["reason"] == "stop"
-        tg.say("/resume")                             # owner acknowledges
+        dc.say("/resume")                             # owner acknowledges
         assert wait_for(lambda: not bot.st.entries_paused and not bot.st.uncertain)
     finally:
         bot.stop.set()
         th.join(5)
         bot.shutdown()
         hl.close()
-        tg.close()
+        dc.close()
     # next restart is clean: the acknowledged issue does not pause again
     st = Ledger(data / "ledger.jsonl").replay()
     assert not st.uncertain and not st.entries_paused

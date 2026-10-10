@@ -7,7 +7,7 @@ import pytest
 from copybot import config, log
 from copybot.discord import BLURPLE, GREEN, RED, DiscordUI, color_for, embed, html_to_md
 from copybot.runner import Bot
-from tests.fakes import FakeDiscord, FakeHL, FakeTelegram
+from tests.fakes import FakeDiscord, FakeHL
 from tests.test_e2e import LEADER, PIN, env_for, leader_fill, seed_ledger, wait_for, write_config
 
 
@@ -84,6 +84,40 @@ def test_cards_are_edited_in_place_and_reposted_if_deleted(dc):
     assert wait_for(lambda: len(fake.sent) == 2 and "+3.00$" in fake.sent[1]["description"])
 
 
+def test_final_card_edits_the_same_message_then_forgets(dc):
+    fake, ui, _, cards = dc
+    ui.set_card("pos:ETH", "open")
+    assert wait_for(lambda: len(fake.sent) == 1)
+    ui.final_card("pos:ETH", "✅ closed")
+    assert wait_for(lambda: ("pos:ETH", None) in cards)
+    assert fake.text(fake.sent[0]["id"]) == "✅ closed"
+    assert len(fake.sent) == 1 and not ui.has_card("pos:ETH")
+
+
+def test_restored_card_keeps_editing_old_message_after_restart(dc):
+    fake, ui, _, _ = dc
+    fake.messages[555] = {"description": "before restart"}
+    ui.restore_card("pos:SOL", 555)
+    ui.set_card("pos:SOL", "after restart")
+    assert wait_for(lambda: fake.text(555) == "after restart")
+    assert not fake.sent
+
+
+def test_owner_only_and_the_pin_is_never_logged(dc, tmp_path):
+    fake, ui, cmds, _ = dc
+    log.setup(str(tmp_path))
+    log.add_secret(PIN)
+    assert wait_for(fake.connected)
+    fake.say("/status", user="999")                          # a stranger
+    fake.say(f"/hyperflatten {PIN}")
+    c = cmds.get(timeout=5)
+    assert c.name == "/flatten" and c.arg == PIN and cmds.empty()
+    for h in log.log.handlers:
+        h.flush()
+    text = (tmp_path / "copybot.log").read_text(encoding="utf-8")
+    assert PIN not in text and "discord_unauthorized" in text
+
+
 def test_rate_limit_is_honoured(dc):
     fake, ui, _, _ = dc
     fake.fail_429 = 1
@@ -103,20 +137,18 @@ def test_gateway_reconnects_after_a_drop(dc):
     assert cmds.get(timeout=5).name == "/help"
 
 
-# ---- the whole bot on Telegram AND Discord ------------------------------------------------------------
-def test_full_bot_on_telegram_and_discord(tmp_path):
-    hl, tg, fake = FakeHL(), FakeTelegram(), FakeDiscord()
+# ---- the whole bot on Discord -----------------------------------------------------------------------
+def test_full_bot_on_discord(tmp_path):
+    hl, fake = FakeHL(), FakeDiscord()
     data = tmp_path / "data"
     data.mkdir()
-    cdir = write_config(tmp_path, hl, tg, data)
+    cdir = write_config(tmp_path, hl, fake, data)
     (cdir / "discord.toml").write_text(f'api_base = "{fake.api_base}"\ngateway_url = "{fake.gateway_url}"\n'
                                        f'edit_min_interval_s = 0.3\nmin_send_interval_s = 0.02\n', encoding="utf-8")
     seed_ledger(data)
-    e = {**env_for(tg), "DISCORD_BOT_TOKEN": fake.token, "DISCORD_CHANNEL_ID": fake.channel,
-         "DISCORD_OWNER_ID": fake.owner}
-    cfg = config.load(cdir, env=e)
+    cfg = config.load(cdir, env=env_for(fake))
     log.setup(str(data / "logs"))
-    for s in (cfg.tg_token, cfg.pin, cfg.dc_token):
+    for s in (cfg.pin, cfg.dc_token):
         log.add_secret(s)
     bot = Bot(cfg)
     th = threading.Thread(target=bot.run, daemon=True)
@@ -125,16 +157,13 @@ def test_full_bot_on_telegram_and_discord(tmp_path):
         assert wait_for(lambda: LEADER in hl.subscribed_users() and bot.health().clock_ok and fake.connected())
         assert wait_for(lambda: any("Copybot started" in m["description"] for m in fake.sent))
         hl.push_fills(LEADER, [leader_fill(hl, "ETH", 50, "B")])
-        # the same live trade card on both platforms
-        assert wait_for(lambda: any("<b>ETH</b> ⬆️ LONG" in m["text"] for m in tg.sent))
+        # the live trade card, as Discord markdown in an embed
         assert wait_for(lambda: any("**ETH** ⬆️ LONG" in m["description"] for m in fake.sent))
         card = next(m["id"] for m in fake.sent if "**ETH** ⬆️ LONG" in m["description"])
         hl.mids["ETH"] = 3030.0
         assert wait_for(lambda: "3,030" in fake.text(card) or "3030" in fake.text(card))
-        # a Discord command answers in both chats (one bot, one state)
         fake.interact("hypertrades")
         assert wait_for(lambda: any("💼 **Trades** · 1 open" in m["description"] for m in fake.sent))
-        assert wait_for(lambda: any("💼 <b>Trades</b> · 1 open" in m["text"] for m in tg.sent))
         # restart keeps editing the same Discord card (its id is in the ledger under dc:)
         assert wait_for(lambda: f"dc:pos:{bot.st.positions['ETH'].pos_id}" in bot.st.cards)
         # /flatten with the PIN from Discord closes everything; the PIN never reaches the log or the channel
@@ -151,5 +180,4 @@ def test_full_bot_on_telegram_and_discord(tmp_path):
         th.join(5)
         bot.shutdown()
         hl.close()
-        tg.close()
         fake.close()

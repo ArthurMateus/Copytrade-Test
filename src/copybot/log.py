@@ -10,7 +10,7 @@ from pathlib import Path
 
 log = logging.getLogger("copybot")
 _SECRETS: list[str] = []
-_TOKEN_RE = re.compile(r"\d{6,}:[A-Za-z0-9_-]{25,}")  # Telegram bot token shape
+_TOKEN_RE = re.compile(r"\d{6,}:[A-Za-z0-9_-]{25,}")  # a bot token shape (kept: redacting more never hurts)
 
 
 def add_secret(s: str) -> None:

@@ -1,27 +1,27 @@
-"""Telegram: owner-only command polling and a rate-limited outbox that edits live cards in place.
+"""The chat side of the bot, independent of the platform (Discord: copybot/discord.py; Telegram was removed at the
+owner's request on 2026-10-10).
 
-- New messages only for new events. Live cards (one per open trade, /status, /leaders) are EDITED.
-- Per-card edits at most every `edit_min_interval_s`; skipped when the text did not change.
-- All writes to the chat are globally spaced by `min_send_interval_s`; HTTP 429 honours retry_after.
-- The token is only in the request URL, which is never logged. The PIN is never logged.
+- The command names, their aliases and the help text.
+- `ChatUI`: a rate-limited outbox. New messages only for new events; live cards (one per open trade, /status,
+  /leaders ...) are EDITED in place, at most every `edit_min_interval_s` and only when their text changed. All writes
+  are globally spaced by `min_send_interval_s`; HTTP 429 honours retry_after. A platform subclass implements
+  `_call("sendMessage" | "editMessageText", params)` and `start()`.
+- Message text is a small HTML subset (<b>, <i>, <code>, <pre>, &lt; &gt; &amp;) that the platform converts.
+- The PIN is never logged.
 """
 from __future__ import annotations
 
 import hmac
-import http.client
-import json
 import queue
 import threading
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass, field
 
 from copybot import log
 from copybot.config import Config
 
-# The bot has two books. Hyperliquid commands are /hyper<x> (the short originals /status, /trades, ... still work),
-# the Solana/FOMO book's are /fomo<x>. Everything is turned into one canonical name by `canon` before it is handled.
+# Three books. Hyperliquid commands are /hyper<x> (the short originals /status, /trades, ... are kept as aliases),
+# the Solana/FOMO book's are /fomo<x>, Invo's /invo<x>. `canon` turns every name into one canonical name.
 ALIASES = {"/hyperstatus": "/status", "/hypertrades": "/trades", "/hypertraders": "/traders",
            "/hyperwallet": "/wallets", "/hyperwallets": "/wallets", "/hyperpositions": "/positions",
            "/hyperleaders": "/leaders", "/hyperprogress": "/progress", "/hypersearch": "/search",
@@ -38,55 +38,28 @@ INVO_COMMANDS = ("/invo", "/invotrades", "/invotraders", "/invowallets", "/invof
 COMMANDS = ("/status", "/trades", "/traders", "/wallets", "/positions", "/leaders", "/progress", "/search", "/pause",
             "/resume", "/flatten", "/reset", "/restart", "/help", "/add", "/picks") + tuple(ALIASES) + FOMO_COMMANDS \
     + INVO_COMMANDS
-# what Discord shows in its slash-command list (the short Hyperliquid originals stay Telegram-only)
+# what Discord shows in its slash-command list
 SLASH_COMMANDS = ("/help", "/restart", "/picks") + HYPER_COMMANDS + FOMO_COMMANDS + INVO_COMMANDS
 PIN_COMMANDS = ("/flatten", "/reset", "/fomoflatten", "/fomoreset")
-WALLET_COMMANDS = ("/add", "/fomoadd", "/fomofollow", "/fomounfollow", "/invofollow", "/invounfollow")       # take a wallet address as their argument
-ONCE = ("/reset", "/restart", "/flatten", "/fomoflatten", "/fomoreset")   # never acted on twice after a restart
+WALLET_COMMANDS = ("/add", "/fomoadd", "/fomofollow", "/fomounfollow", "/invofollow", "/invounfollow")   # take a wallet
+                                                                                     # address or username argument
 
 
 def canon(name: str) -> str:
     return ALIASES.get(name, name)
 
 
-class TgError(Exception):
+class ChatError(Exception):
     def __init__(self, code: int, desc: str, retry_after: float = 0):
-        super().__init__(f"telegram {code}: {desc}")
+        super().__init__(f"chat {code}: {desc}")
         self.code, self.desc, self.retry_after = code, desc, retry_after
-
-
-class TgApi:
-    def __init__(self, base: str, token: str):
-        self._url = f"{base}/bot{token}/"
-
-    def call(self, method: str, params: dict, timeout: float = 10.0):
-        req = urllib.request.Request(self._url + method, json.dumps(params).encode(),
-                                     {"Content-Type": "application/json"})
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                body = json.loads(r.read())
-        except urllib.error.HTTPError as e:
-            try:
-                body = json.loads(e.read())
-            except Exception:
-                body = {"description": f"HTTP {e.code}"}
-            ra = float((body.get("parameters") or {}).get("retry_after", 0))
-            raise TgError(e.code, body.get("description", ""), ra) from None
-        except urllib.error.URLError as e:
-            raise TgError(0, f"network: {e.reason}") from None
-        except (OSError, http.client.HTTPException, ValueError) as e:
-            # a read timeout, a dropped connection or a broken reply: a network error like any other
-            raise TgError(0, f"network: {type(e).__name__}: {e}") from None
-        if not body.get("ok"):
-            raise TgError(int(body.get("error_code", 0)), body.get("description", ""))
-        return body["result"]
 
 
 @dataclass
 class Card:
     key: str
     msg_id: int | None
-    text: str = ""            # last text Telegram has
+    text: str = ""            # last text the chat has
     want: str = ""            # text we want shown
     last_edit: float = 0.0
     final: bool = False
@@ -98,14 +71,14 @@ class Command:
     arg: str = field(default="", repr=False)   # may hold the PIN: never logged
 
 
-class TelegramUI:
-    def __init__(self, cfg: Config, on_command, on_card_id, clock=time.monotonic):
+class ChatUI:
+    name = "chat"
+
+    def __init__(self, cfg: Config, on_command, on_card_id, limits, clock=time.monotonic):
         """on_command(Command) and on_card_id(key, msg_id | None) are called from worker threads; they must
-        only enqueue work for the trading loop."""
+        only enqueue work for the trading loop. `limits` has edit_min_interval_s and min_send_interval_s."""
         self.cfg = cfg
-        self.enabled = bool(cfg.tg_token and cfg.tg_chat_id)
-        self.api = TgApi(cfg.telegram.api_base, cfg.tg_token) if self.enabled else None
-        self.chat = cfg.tg_chat_id
+        self.enabled = False
         self.on_command, self.on_card_id = on_command, on_card_id
         self.clock = clock
         self.outbox: queue.Queue = queue.Queue()
@@ -113,17 +86,16 @@ class TelegramUI:
         self.lock = threading.Lock()
         self.last_write = 0.0
         self.blocked_until = 0.0
-        self.offset = 0
         self.stop = threading.Event()
         self.wake = threading.Event()
         self.started = time.time()
-        self.limits = cfg.telegram          # edit_min_interval_s / min_send_interval_s
-        self.name = "telegram"
+        self.limits = limits
 
     # ---- API used by the trading loop (non-blocking) ------------------------------------------
     def send(self, text: str) -> None:
-        self.outbox.put(text)
-        self.wake.set()
+        if self.enabled:
+            self.outbox.put(text)
+            self.wake.set()
 
     def restore_card(self, key: str, msg_id: int) -> None:
         with self.lock:
@@ -132,6 +104,8 @@ class TelegramUI:
     def set_card(self, key: str, text: str, new: bool = False) -> None:
         """Show `text` in the card `key`; creates the message if needed. new=True posts a fresh message
         (e.g. a new /status request) and abandons the old one."""
+        if not self.enabled:
+            return
         with self.lock:
             c = self.cards.get(key)
             if c is None or new:
@@ -140,6 +114,8 @@ class TelegramUI:
         self.wake.set()
 
     def final_card(self, key: str, text: str) -> None:
+        if not self.enabled:
+            return
         with self.lock:
             c = self.cards.get(key) or Card(key, None)
             self.cards[key] = c
@@ -150,13 +126,15 @@ class TelegramUI:
         with self.lock:
             return key in self.cards
 
-    # ---- worker threads -----------------------------------------------------------------------
-    def start(self) -> None:
-        if not self.enabled:
-            log.warn("telegram_disabled", why="TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set")
-            return
-        threading.Thread(target=self._poll_loop, name="tg-poll", daemon=True).start()
-        threading.Thread(target=self._out_loop, name="tg-out", daemon=True).start()
+    def check_pin(self, given: str) -> bool:
+        return bool(self.cfg.pin) and hmac.compare_digest(given.encode(), self.cfg.pin.encode())
+
+    def shutdown(self) -> None:
+        self.stop.set()
+
+    # ---- the outbox worker ----------------------------------------------------------------------
+    def _call(self, method: str, params: dict):
+        raise NotImplementedError
 
     def _write(self, method: str, params: dict):
         """One rate-limited write. Blocks this worker thread only."""
@@ -169,17 +147,13 @@ class TelegramUI:
             self.last_write = self.clock()
             try:
                 return self._call(method, params)
-            except TgError as e:
+            except ChatError as e:
                 if e.code == 429:
                     self.blocked_until = self.clock() + max(1.0, e.retry_after)
                     log.warn(f"{self.name}_429", retry_after=e.retry_after)
                     continue
                 raise
         return None
-
-    def _call(self, method: str, params: dict):
-        return self.api.call(method, {"chat_id": self.chat, "parse_mode": "HTML",
-                                      "disable_web_page_preview": True, **params})
 
     def _out_loop(self) -> None:
         while not self.stop.is_set():
@@ -200,7 +174,7 @@ class TelegramUI:
                 break
             try:
                 self._write("sendMessage", {"text": text})
-            except TgError as e:
+            except ChatError as e:
                 log.error(f"{self.name}_send_failed", err=e.desc)
         with self.lock:
             cards = list(self.cards.values())
@@ -214,7 +188,7 @@ class TelegramUI:
             if c.msg_id is None:
                 try:
                     res = self._write("sendMessage", {"text": c.want})
-                except TgError as e:
+                except ChatError as e:
                     log.error(f"{self.name}_send_failed", err=e.desc, card=c.key)
                     continue
                 c.msg_id, c.text, c.last_edit = res["message_id"], c.want, self.clock()
@@ -224,7 +198,7 @@ class TelegramUI:
                 try:
                     self._write("editMessageText", {"message_id": c.msg_id, "text": want})
                     c.text = want
-                except TgError as e:
+                except ChatError as e:
                     if "not modified" in e.desc:
                         c.text = want
                     elif "not found" in e.desc or "can't be edited" in e.desc:
@@ -242,58 +216,9 @@ class TelegramUI:
                 del self.cards[c.key]
         self.on_card_id(c.key, None)
 
-    def _poll_loop(self) -> None:
-        backoff = 1.0
-        while not self.stop.is_set():
-            try:
-                ups = self.api.call("getUpdates", {"offset": self.offset, "timeout": self.cfg.telegram.poll_timeout_s,
-                                                   "allowed_updates": ["message"]},
-                                    timeout=self.cfg.telegram.poll_timeout_s + 10)
-                backoff = 1.0
-            except TgError as e:
-                log.warn("telegram_poll_error", err=e.desc)
-                time.sleep(backoff)
-                backoff = min(60.0, backoff * 2)
-                continue
-            except Exception:   # never let the command thread die: /flatten must keep working
-                log.exception("telegram_poll_crash")
-                time.sleep(backoff)
-                backoff = min(60.0, backoff * 2)
-                continue
-            for u in ups:
-                self.offset = max(self.offset, u["update_id"] + 1)
-                try:
-                    self.handle_update(u)
-                except Exception:
-                    log.exception("telegram_update_error")
-
-    def handle_update(self, u: dict) -> None:
-        msg = u.get("message") or {}
-        chat = str((msg.get("chat") or {}).get("id", ""))
-        text = (msg.get("text") or "").strip()
-        if not text.startswith("/"):
-            return
-        name, _, arg = text.partition(" ")
-        name = name.split("@")[0].lower()
-        if chat != str(self.chat):
-            log.warn("telegram_unauthorized", chat=chat, cmd=name)
-            return
-        if name not in COMMANDS:
-            self.send("❓ Unknown command. /help")
-            return
-        name = canon(name)
-        if name in ONCE and msg.get("date") and msg["date"] < self.started - 5:
-            log.warn("telegram_stale_command", cmd=name)   # sent before this start (e.g. the /restart itself)
-            return
-        log.info("telegram_command", cmd=name)     # never the argument (may be the PIN)
-        self.on_command(Command(name, arg.strip()))
-
-    def check_pin(self, given: str) -> bool:
-        return bool(self.cfg.pin) and hmac.compare_digest(given.encode(), self.cfg.pin.encode())
-
 
 HELP = ("🤖 <b>Copybot (paper)</b>\n\n"
-        "⚡ <b>Hyperliquid</b> (the short names /status, /trades ... work too)\n"
+        "⚡ <b>Hyperliquid</b>\n"
         "/hyperstatus – wallet, P&amp;L, health (live)\n"
         "/hypertrades – open trades at live prices + P&amp;L vs the start (live)\n"
         "/hypertraders – followed traders and what copying them earned (live)\n"

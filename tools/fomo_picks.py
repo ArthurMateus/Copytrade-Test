@@ -39,7 +39,7 @@ TOP = 7
 
 def today() -> str:
     cfg = config.load(ROOT / "config", env={})
-    return (datetime.now(timezone.utc) + timedelta(hours=cfg.telegram.utc_offset_hours)).strftime("%Y-%m-%d")
+    return (datetime.now(timezone.utc) + timedelta(hours=cfg.discord.utc_offset_hours)).strftime("%Y-%m-%d")
 
 
 def day_dir(day: str) -> Path:

@@ -7,8 +7,9 @@ endpoint. A test enforces this (`tests/test_safety.py`).
 ## Run (Windows, Python 3.11, uv)
 
 ```powershell
-setx TELEGRAM_BOT_TOKEN "<token from @BotFather>"
-setx TELEGRAM_CHAT_ID   "<your numeric chat id>"
+setx DISCORD_BOT_TOKEN  "<the bot's token>"
+setx DISCORD_CHANNEL_ID "<the channel it posts in>"
+setx DISCORD_OWNER_ID   "<your Discord user id>"
 setx COPYBOT_PIN        "<a PIN for /flatten>"
 # open a NEW terminal so the variables are visible, then:
 uv run copybot
@@ -20,10 +21,10 @@ For unattended runs, restart the bot automatically if it crashes. It is designed
 while ($true) { uv run copybot; Start-Sleep 10 }
 ```
 
-Discord (optional, runs next to Telegram): create a bot at https://discord.com/developers/applications (scopes
-`bot` + `applications.commands`; permissions View Channels, Send Messages, Embed Links, Read Message History),
-then set `DISCORD_BOT_TOKEN`, `DISCORD_CHANNEL_ID` and `DISCORD_OWNER_ID` the same way. The same commands appear
-as slash commands; only the owner can use them, and replies to commands are private.
+Discord is the bot's only chat (Telegram was removed on 2026-10-10): create a bot at
+https://discord.com/developers/applications (scopes `bot` + `applications.commands`; permissions View Channels, Send
+Messages, Embed Links, Read Message History). The commands appear as slash commands; only the owner can use them, and
+replies to commands are private. Card times follow `utc_offset_hours` in `config/discord.toml`.
 
 Keep the PC from sleeping. State lives in `data/ledger.jsonl` (append-only, fsync on every write) and the
 download cache lives in `data/cache/`. Logs go to `logs/copybot.log` (rotating, key=value, no secrets).
@@ -44,10 +45,10 @@ Run the tests: `uv run pytest` (about 2 minutes; this includes real-process kill
 | Websocket feed (15-user cap) and exchange-clock estimate | `feed.py` |
 | Pre-screen, first-page screen, 180-day score (deterministic) | `scoring.py` |
 | Hysteresis, background scorer, disk cache | `selection.py` |
-| Telegram commands and in-place edited cards | `tg.py`, `tgfmt.py` |
+| Commands, outbox and in-place edited cards; Discord transport; card rendering | `chat.py`, `discord.py`, `cardfmt.py` |
 | Threads and the trading loop | `runner.py` |
 
-Commands (Telegram `/x`; Discord shows the same names as slash commands). The bot has two books that run at the same
+Commands (Discord slash commands). The bot has two books that run at the same
 time in one process, each with its own family of commands:
 
 | Hyperliquid | FOMO (Solana) | What it does |
@@ -67,7 +68,7 @@ time in one process, each with its own family of commands:
 | `/hyperflatten <PIN>` | `/fomoflatten <PIN>` | close everything of that book and pause it |
 | `/hyperreset <PIN>` | `/fomoreset <PIN>` | that book back to the start ($300, no history, traders kept, old history archived; refused while a trade is open) |
 
-Plus `/picks`, `/help` and `/restart`. The short Hyperliquid names (`/status`, `/trades`, `/reset`, ...) still work on Telegram.
+Plus `/picks`, `/help` and `/restart`. 
 Each open trade gets one message, which is edited until it becomes the final ✅/❌ summary. A reset restarts the
 process, so run the bot in the restart loop below. `/hyperreset` never touches FOMO and `/fomoreset` never touches Hyperliquid.
 
@@ -99,7 +100,7 @@ trips in a row, at least 45% of its last 15 round trips won, and no drop above 1
 - **Wallet score 1–100:** a daily review screens pre-screened wallets until the top 100 are fully scored. Wallets that cannot be copied are rejected; every other wallet gets points out of 100 (edge after costs 25, profit factor 15, monthly consistency 15, number of trades 15, win rate 10, max drawdown 10, current drawdown 5, concentration 5). The top 7 are followed (rank ≤ 7 for 2 hourly cycles; drop at rank > 15 for 2 cycles).
 - **Live account check:** every time a wallet is scored (followed leaders every hour), its open positions are read. A losing position it keeps open counts as a lost trade in its win rate and profit factor, so a trader cannot look good by never closing losers. A wallet whose open losses exceed `max_open_loss` (15%) of its account, or whose perp account is empty, is not eligible, and a followed one leaves after 2 cycles.
 - **Reviews:** the scorer rescores the followed leaders and the top 15 every hour. A daily review downloads the leaderboard again and screens up to 400 pre-screened wallets (it stops once 100 are scored). A screen result is kept for 7 days.
-- **Restart with doubt:** if the ledger has a torn line, an order intent with no result, or a position without a valid stop, the bot pauses entries, sends a Telegram alert and keeps running stops and exits. `/resume` acknowledges the problem.
+- **Restart with doubt:** if the ledger has a torn line, an order intent with no result, or a position without a valid stop, the bot pauses entries, sends a Discord alert and keeps running stops and exits. `/resume` acknowledges the problem.
 
 ## Solana memecoin book (FOMO traders, followed on-chain)
 
@@ -217,7 +218,7 @@ starts and its result is posted as soon as it ends.
 5. In PowerShell: `setx INVO_TOKEN_FILE "C:\Users\gedeo\Copytrade-test\secrets\invo.token"`, open a NEW window,
    check it with `uv run python tools/invo_check.py nicush` (prints "login OK" and nicush's portfolios), then start
    the bot as usual. The token lasts about a year and is renewed by the bot itself.
-If Invo refuses the login later, the bot alerts on Telegram/Discord; repeat steps 1-4.
+If Invo refuses the login later, the bot alerts on Discord; repeat steps 1-4.
 
 ## Findings from the real API (recorded in `tests/fixtures`, re-record with `tools/record_samples.py`)
 - One websocket can track at most **15 users** (`"Cannot track more than 15 total users."`).

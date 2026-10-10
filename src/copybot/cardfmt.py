@@ -1,4 +1,4 @@
-"""Chat message rendering (pure functions, Telegram HTML; Discord converts it, see discord.py).
+"""Chat message rendering (pure functions, a small HTML subset that discord.py converts to markdown).
 
 Conventions, the same on every card:
   🟢 / 🔴  money only: making / losing money (⚪ flat)      ⬆️ LONG / ⬇️ SHORT  the side of a trade
@@ -12,7 +12,7 @@ import time
 
 from copybot.ledger import Position, State
 
-UTC_OFFSET_H = 0.0   # shown times are in the owner's time zone (telegram.utc_offset_hours)
+UTC_OFFSET_H = 0.0   # shown times are in the owner's time zone (discord.utc_offset_hours)
 
 
 def set_utc_offset(hours: float) -> None:
@@ -80,7 +80,7 @@ def money(x: float, base: float | None = None) -> str:
 
 
 def pre(pairs) -> str:
-    """Readable 'label: value' lines (no <pre>: Telegram shows a COPY CODE box on those)."""
+    """Readable 'label: value' lines (no <pre> blocks: plain lines read better in an embed)."""
     return "\n".join(f"{esc(k)}: <b>{esc(v)}</b>" for k, v in pairs)
 
 

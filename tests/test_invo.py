@@ -1,5 +1,5 @@
 """Invo calls: parsers on REAL recorded answers, the client's token refresh, the watcher, and the bot end to end
-(FakeHL + FakeTelegram + FakeInvo)."""
+(FakeHL + FakeDiscord + FakeInvo)."""
 import queue
 import threading
 import time
@@ -114,13 +114,13 @@ def test_watcher_reports_an_unknown_username_once(fake, tmp_path):
 # ---- the bot end to end -----------------------------------------------------------------------------------
 @pytest.fixture
 def invo_env(env, tmp_path):
-    hl, tg, data, cdir = env
+    hl, dc, data, cdir = env
     f = FakeInvo()
     tok = tmp_path / "invo.token"
     tok.write_text("REFRESH0", encoding="utf-8")
     # the daily Invo search has its own tests (test_invo_search.py): off here so it does not share the fake's login
     (cdir / "invo.toml").write_text(f'api_base = "{f.url}"\npoll_s = 1.0\nsearch = false\n', encoding="utf-8")
-    yield hl, tg, data, cdir, f, tok
+    yield hl, dc, data, cdir, f, tok
     f.close()
 
 
@@ -130,12 +130,12 @@ def start_with_invo(env, tok, monkeypatch):
 
 
 def test_bot_copies_an_invo_call_and_closes_it_when_the_trader_does(invo_env, monkeypatch):
-    hl, tg, data, cdir, f, tok = invo_env
+    hl, dc, data, cdir, f, tok = invo_env
     pid = f.add_user("nicush")[0]
-    bot, th = start_with_invo((hl, tg, data, cdir), tok, monkeypatch)
+    bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
     try:
         assert bot.invo is not None
-        tg.say("/invofollow @nicush")
+        dc.say("/invofollow @nicush")
         assert wait_for(lambda: "invo:nicush" in bot.invo.st.followed)
         assert wait_for(lambda: bot.invo_watch.known.get("nicush") is not None, timeout=10)     # baseline taken
         f.open_call(pid, "ETH", long=True, leverage=10, size=0.05, entry=2990.0, target=3300, stop=2800)
@@ -152,26 +152,26 @@ def test_bot_copies_an_invo_call_and_closes_it_when_the_trader_does(invo_env, mo
             q = w.st.positions["ETH"]
             assert q.size * q.entry_px == pytest.approx(300 * w.risk_pct / 100 / 0.03, rel=0.05), w.name
             assert "invo:nicush" in w.st.followed
-        tg.say("/invowallets")
+        dc.say("/invowallets")
         assert wait_for(lambda: any("Invo wallets" in m["text"] and "invo 20% risk" in m["text"]
-                                    for m in tg.sent + tg.edits))
-        text = lambda: " ".join(m["text"] for m in tg.sent + tg.edits)
+                                    for m in dc.sent + dc.edits))
+        text = lambda: " ".join(m["text"] for m in dc.sent + dc.edits)
         assert wait_for(lambda: "Invo call by @nicush" in text() and "<b>ETH</b>" in text())   # its live trade card
         for cmd, needle in (("/invo", "Invo calls"), ("/invotrades", "Invo trades"), ("/invotraders", "Invo traders")):
-            tg.say(cmd)
+            dc.say(cmd)
             assert wait_for(lambda: needle in text()), cmd
         assert "@nicush" in text() and "Invo: " in text()                        # Invo's own record on the card
-        n_edits = len(tg.edits)
+        n_edits = len(dc.edits)
         hl.mids["ETH"] = 3015.0                                                     # the price moves: cards are edited
-        assert wait_for(lambda: len(tg.edits) > n_edits, timeout=10)
+        assert wait_for(lambda: len(dc.edits) > n_edits, timeout=10)
         cid = f.calls[pid][0]["id"]
         f.close_call(pid, cid)
         assert wait_for(lambda: "ETH" not in bot.invo.st.positions, timeout=10)
         assert bot.invo.st.closed[-1]["leader"] == "invo:nicush"
         assert wait_for(lambda: all("ETH" not in w.st.positions for w in bot.invo_extra), timeout=10)
         assert wait_for(lambda: "closed by the trader" in text())               # the card became the summary
-        assert "REFRESH" not in " ".join(m["text"] for m in tg.sent)               # no token ever shown
-        tg.say("/invounfollow nicush")
+        assert "REFRESH" not in " ".join(m["text"] for m in dc.sent)               # no token ever shown
+        dc.say("/invounfollow nicush")
         assert wait_for(lambda: "invo:nicush" not in bot.invo.st.followed)
         assert set(bot.st.followed) == {LEADER}                                   # the main wallet untouched
     finally:
@@ -181,11 +181,11 @@ def test_bot_copies_an_invo_call_and_closes_it_when_the_trader_does(invo_env, mo
 def test_a_huge_call_is_capped_at_max_risk_pct_also_after_the_traders_add(invo_env, monkeypatch):
     """The STRK case: 25% x 5x = 125% of the portfolio. The copy is capped at invo.max_risk_pct (2%) of our 300$
     at our 3% stop = 200$, and the trader's later add does not push it past the cap."""
-    hl, tg, data, cdir, f, tok = invo_env
+    hl, dc, data, cdir, f, tok = invo_env
     pid = f.add_user("lazy")[0]
-    bot, th = start_with_invo((hl, tg, data, cdir), tok, monkeypatch)
+    bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
     try:
-        tg.say("/invofollow lazy")
+        dc.say("/invofollow lazy")
         assert wait_for(lambda: bot.invo_watch.known.get("lazy") is not None, timeout=10)
         cid = f.open_call(pid, "ETH", long=False, leverage=5, size=0.25, entry=3000.0)
         assert wait_for(lambda: "ETH" in bot.invo.st.positions, timeout=10)
@@ -202,30 +202,30 @@ def test_a_huge_call_is_capped_at_max_risk_pct_also_after_the_traders_add(invo_e
 
 
 def test_without_a_token_file_invo_is_off_and_says_how_to_turn_it_on(env, monkeypatch):
-    hl, tg, data, cdir = env
+    hl, dc, data, cdir = env
     monkeypatch.delenv("INVO_TOKEN_FILE", raising=False)
     bot, th = start_bot(env)
     try:
         assert bot.invo is None and all(not w.own_leaders for w in bot.sides)
-        tg.say("/invofollow nicush")
-        assert wait_for(lambda: any("Invo is off" in m["text"] for m in tg.sent))
+        dc.say("/invofollow nicush")
+        assert wait_for(lambda: any("Invo is off" in m["text"] for m in dc.sent))
     finally:
         stop_bot(bot, th)
 
 
 def test_our_stop_closes_an_invo_copy_and_its_card_becomes_the_summary(invo_env, monkeypatch):
-    hl, tg, data, cdir, f, tok = invo_env
+    hl, dc, data, cdir, f, tok = invo_env
     pid = f.add_user("akira")[0]
-    bot, th = start_with_invo((hl, tg, data, cdir), tok, monkeypatch)
+    bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
     try:
-        tg.say("/invofollow akira")
+        dc.say("/invofollow akira")
         assert wait_for(lambda: bot.invo_watch.known.get("akira") is not None, timeout=10)
         f.open_call(pid, "SOL", long=True, leverage=5, size=0.05, entry=150.0)
         assert wait_for(lambda: "SOL" in bot.invo.st.positions, timeout=10)
         hl.mids["SOL"] = 140.0                                    # -6.7%: through our 3% stop
         assert wait_for(lambda: "SOL" not in bot.invo.st.positions, timeout=10)
         assert bot.invo.st.closed[-1]["reason"] == "stop"
-        text = lambda: " ".join(m["text"] for m in tg.sent + tg.edits)
+        text = lambda: " ".join(m["text"] for m in dc.sent + dc.edits)
         assert wait_for(lambda: "stop-loss hit" in text() and "Invo call by @akira" in text())
         assert "closed by the trader" not in text()
     finally:
@@ -235,11 +235,11 @@ def test_our_stop_closes_an_invo_copy_and_its_card_becomes_the_summary(invo_env,
 def test_a_trader_whose_copies_lose_too_much_is_dropped_at_once(invo_env, monkeypatch):
     """The wallet leader pause rules (copy drawdown > 10% of equity / 7, or 5 losses in a row) also apply to Invo
     traders: the first breach drops the trader from every Invo wallet; /invofollow brings it back."""
-    hl, tg, data, cdir, f, tok = invo_env
+    hl, dc, data, cdir, f, tok = invo_env
     pid = f.add_user("lazy")[0]
-    bot, th = start_with_invo((hl, tg, data, cdir), tok, monkeypatch)
+    bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
     try:
-        tg.say("/invofollow lazy")
+        dc.say("/invofollow lazy")
         assert wait_for(lambda: bot.invo_watch.known.get("lazy") is not None, timeout=10)
         f.open_call(pid, "SOL", long=True, leverage=5, size=0.25, entry=150.0)     # capped at 200$
         assert wait_for(lambda: "SOL" in bot.invo.st.positions, timeout=10)
@@ -247,9 +247,9 @@ def test_a_trader_whose_copies_lose_too_much_is_dropped_at_once(invo_env, monkey
         hl.mids["SOL"] = 140.0                                    # our stop: about -13$ > 10% of 300$/7
         assert wait_for(lambda: "invo:lazy" not in bot.invo.st.followed, timeout=10)
         assert wait_for(lambda: all("invo:lazy" not in w.st.followed for w in bot.invo_extra))
-        text = lambda: " ".join(m["text"] for m in tg.sent + tg.edits)
+        text = lambda: " ".join(m["text"] for m in dc.sent + dc.edits)
         assert wait_for(lambda: "copying it lost too much" in text() and "/invofollow lazy brings it back" in text())
-        tg.say("/invofollow lazy")
+        dc.say("/invofollow lazy")
         assert wait_for(lambda: "invo:lazy" in bot.invo.st.followed and "invo:lazy" not in bot.invo.st.paused_leaders)
     finally:
         stop_bot(bot, th)
@@ -286,11 +286,11 @@ def test_watcher_reports_an_add_or_a_trim_of_an_open_call(fake, tmp_path):
 
 
 def test_bot_mirrors_the_traders_add_and_partial_close(invo_env, monkeypatch):
-    hl, tg, data, cdir, f, tok = invo_env
+    hl, dc, data, cdir, f, tok = invo_env
     pid = f.add_user("glitty")[0]
-    bot, th = start_with_invo((hl, tg, data, cdir), tok, monkeypatch)
+    bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
     try:
-        tg.say("/invofollow glitty")
+        dc.say("/invofollow glitty")
         assert wait_for(lambda: bot.invo_watch.known.get("glitty") is not None, timeout=10)
         cid = f.open_call(pid, "ETH", long=True, leverage=5, size=0.04, entry=3000.0)      # 4% x 5x = 20% of 300$
         assert wait_for(lambda: "ETH" in bot.invo.st.positions, timeout=10)
@@ -303,7 +303,7 @@ def test_bot_mirrors_the_traders_add_and_partial_close(invo_env, monkeypatch):
         f.resize_call(pid, cid, 0.03)                                                      # they take half off
         assert wait_for(lambda: bot.invo.st.positions["ETH"].size < size0, timeout=10)
         assert bot.invo.st.positions["ETH"].size == pytest.approx(size0 * 0.75, rel=0.03)
-        text = lambda: " ".join(m["text"] for m in tg.sent + tg.edits)
+        text = lambda: " ".join(m["text"] for m in dc.sent + dc.edits)
         assert wait_for(lambda: "resized by the trader 6.0% → 3.0%" in text())
         f.close_call(pid, cid)
         assert wait_for(lambda: "ETH" not in bot.invo.st.positions, timeout=10)

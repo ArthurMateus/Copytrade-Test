@@ -2,7 +2,7 @@
 
 Threads: trading loop (this module) | ws feed | health worker (clock + REST price fallback) |
 sync worker (leader reconcile + meta/funding) | scorer (leaderboard, fills, candles, scoring) |
-telegram poll + outbox. Workers only talk to the trading loop through one queue.
+discord gateway + outbox. Workers only talk to the trading loop through one queue.
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ import time
 import traceback
 from pathlib import Path
 
-from copybot import config, hl, log, picks, tgfmt
+from copybot import config, hl, log, picks, cardfmt
 from copybot.broker import PaperBroker
 from copybot.detector import Detector, Move
 from copybot.invo import PREFIX as INVO, InvoClient, Watcher as InvoWatcher
@@ -29,10 +29,10 @@ from copybot.ledger import Ledger, now_ms
 from copybot.positions import PositionManager
 from copybot.risk import Health, RiskGate
 from copybot.selection import Plan, Scorer, rebalance, select
-from copybot.discord import DiscordUI, MultiUI
+from copybot.discord import DiscordUI
 from copybot.sol.fmt import FOMO_HELP
 from copybot.sol.runner import SolBot
-from copybot.tg import HELP, TelegramUI
+from copybot.chat import HELP
 from copybot.wallets import SideWallet, boot_repair
 
 
@@ -129,9 +129,9 @@ class Bot:
             log.info("invo_off", why="INVO_TOKEN_FILE not set")
         self.det = Detector()
         on_cmd = lambda c: self.q.put(("cmd", c))
-        self.ui = MultiUI(TelegramUI(cfg, on_cmd, lambda k, m: self.q.put(("card", k, m))),
-                          DiscordUI(cfg, on_cmd, lambda k, m: self.q.put(("card", "dc:" + k, m))))
-        tgfmt.set_utc_offset(cfg.telegram.utc_offset_hours)
+        # Discord card ids are kept in the ledger as "dc:<key>" (since Telegram ran next to it until 2026-10-10)
+        self.ui = DiscordUI(cfg, on_cmd, lambda k, m: self.q.put(("card", "dc:" + k, m)))
+        cardfmt.set_utc_offset(cfg.discord.utc_offset_hours)
         self.sol: SolBot | None = None
         if cfg.sol.enabled:
             self.sol = SolBot(cfg, self.ui, self.alert, restart=lambda: setattr(self, "restart_at", time.time() + 3))
@@ -208,7 +208,7 @@ class Bot:
             return
         self.last_alert[k] = time.time()
         log.warn("alert", text=text)
-        self.ui.send(f"⚠️ {tgfmt.esc(text)}")
+        self.ui.send(f"⚠️ {cardfmt.esc(text)}")
 
     # ---- startup -----------------------------------------------------------------------------------
     def boot(self) -> None:
@@ -229,7 +229,7 @@ class Bot:
         problems = boot_repair(self.st, self.rec, self.gate, "main")
         if problems:
             self.ui.send("⚠️ <b>Restart with uncertainty</b> · ⏸️ entries paused, exits and stops keep running\n"
-                         + "\n".join(f"• {tgfmt.esc(x)}" for x in problems[:10])
+                         + "\n".join(f"• {cardfmt.esc(x)}" for x in problems[:10])
                          + "\nCheck, then /resume.")
 
         def boot_side(w):
@@ -238,8 +238,8 @@ class Bot:
             w.rec({"ev": "boot", "positions": len(w.st.positions), "followed": len(w.st.followed)})
             side_problems = boot_repair(w.st, w.rec, w.gate, w.name)
             if side_problems:
-                self.ui.send(f"⚠️ <b>Side wallet {tgfmt.esc(w.label)} restarted with uncertainty</b> · ⏸️ its entries "
-                             f"paused\n" + "\n".join(f"• {tgfmt.esc(x)}" for x in side_problems[:5])
+                self.ui.send(f"⚠️ <b>Side wallet {cardfmt.esc(w.label)} restarted with uncertainty</b> · ⏸️ its entries "
+                             f"paused\n" + "\n".join(f"• {cardfmt.esc(x)}" for x in side_problems[:5])
                              + "\n/resume resumes every wallet.")
             if self.st.entries_paused and not w.st.entries_paused:
                 w.rec({"ev": "pause", "reason": self.st.pause_reason or "main wallet paused"})
@@ -248,7 +248,8 @@ class Bot:
         self.on_sides("boot", boot_side)
         self.sync_sides()
         for key, mid in self.st.cards.items():
-            self.ui.restore_card(key, mid)
+            if key.startswith("dc:"):                 # (keys without the prefix were Telegram messages)
+                self.ui.restore_card(key[3:], mid)
         log.info("state", equity=round(self.st.equity(), 2), positions=len(self.st.positions),
                  followed=len(self.st.followed), paused=self.st.entries_paused, trades=len(self.st.closed))
         for p in self.st.positions.values():
@@ -335,21 +336,21 @@ class Bot:
         leader = INVO + name.lower()
         if c.name == "/invounfollow":
             if leader not in w.st.followed:
-                return self.ui.send(f"🧾 @{tgfmt.esc(name)} is not followed.")
+                return self.ui.send(f"🧾 @{cardfmt.esc(name)} is not followed.")
             held = sum(1 for p in w.st.positions.values() if p.leader == leader)
             w.rec({"ev": "unfollow", "leader": leader, "reason": "/invounfollow"})
             self.sync_invo_extras()
             self.invo_watch.forget(name.lower())
-            return self.ui.send(f"➖ 🧾 <b>Unfollowed</b> @{tgfmt.esc(name)}"
+            return self.ui.send(f"➖ 🧾 <b>Unfollowed</b> @{cardfmt.esc(name)}"
                                 + (f" · {held} open copy still managed until its stop or its close" if held else ""))
         if leader in w.st.followed:
-            return self.ui.send(f"✅ 🧾 @{tgfmt.esc(name)} is already followed.")
+            return self.ui.send(f"✅ 🧾 @{cardfmt.esc(name)} is already followed.")
         if len(w.st.followed) >= self.cfg.invo.max_traders:
             return self.ui.send(f"⛔ 🧾 Already following {len(w.st.followed)} Invo traders (the maximum): "
                                 "/invounfollow one first.")
         w.rec({"ev": "follow", "leader": leader})
         self.sync_invo_extras()
-        self.ui.send(f"➕ 🧾 <b>Following</b> @{tgfmt.esc(name)} on Invo · calls they open from now on are copied in "
+        self.ui.send(f"➕ 🧾 <b>Following</b> @{cardfmt.esc(name)} on Invo · calls they open from now on are copied in "
                      "the 'invo calls' wallet (/hyperwallet compares it). Calls already open are not copied.")
 
     def invo_size(self, m, px: float, equity: float) -> float:
@@ -396,7 +397,7 @@ class Bot:
             return
         coin = self.invo_coin(call.ticker)
         if kind == "invo_open" and coin is None:
-            return self.ui.send(f"🧾 Invo · @{tgfmt.esc(trader)} called {tgfmt.esc(call.ticker)}: not on "
+            return self.ui.send(f"🧾 Invo · @{cardfmt.esc(trader)} called {cardfmt.esc(call.ticker)}: not on "
                                 "Hyperliquid, not copied.")
         self.sync_invo_extras()
         for w in self.invo_wallets():
@@ -428,10 +429,10 @@ class Bot:
                 self.invo_calls[(w.name, call.id)] = coin
                 if primary:
                     self.invo_info[p.pos_id] = (
-                        f"Invo call by @{tgfmt.esc(trader)}: {call.committed * 100:.1f}% x {call.leverage:g}x of their "
-                        f"paper portfolio · their entry {tgfmt.fpx(call.entry)} · target "
-                        f"{tgfmt.fpx(call.target) if call.target else '-'} · stop "
-                        f"{tgfmt.fpx(call.stop) if call.stop else '-'}")
+                        f"Invo call by @{cardfmt.esc(trader)}: {call.committed * 100:.1f}% x {call.leverage:g}x of their "
+                        f"paper portfolio · their entry {cardfmt.fpx(call.entry)} · target "
+                        f"{cardfmt.fpx(call.target) if call.target else '-'} · stop "
+                        f"{cardfmt.fpx(call.stop) if call.stop else '-'}")
                     self.invo_card(p, force=True)
             return
         if kind == "invo_resize":
@@ -472,7 +473,7 @@ class Bot:
         key = f"invo:pos:{t['pos_id']}"
         self.last_body.pop(key, None)
         info = self.invo_info.pop(t["pos_id"], "")
-        self.ui.final_card(key, tgfmt.closed_card(t) + "\n🧾 Invo" + (f" · closed by the trader ({tgfmt.esc(why)})"
+        self.ui.final_card(key, cardfmt.closed_card(t) + "\n🧾 Invo" + (f" · closed by the trader ({cardfmt.esc(why)})"
                                                                      if why else "") + (f"\n{info}" if info else ""))
 
     def score_dict(self, leader: str) -> dict:
@@ -569,18 +570,18 @@ class Bot:
             self.handle(item)
             self.mids.update(self.feed.mids()[0])
         # 3. the daily picks report (picks.hour, local time), calendar marks for the loss limits, funding
-        if time.time() - self.started_s > 180 and                 picks.due(self.picks, time.time(), self.cfg.telegram.utc_offset_hours, self.cfg.picks.hour):
+        if time.time() - self.started_s > 180 and                 picks.due(self.picks, time.time(), self.cfg.discord.utc_offset_hours, self.cfg.picks.hour):
             try:
                 self.send_picks(daily=True)
             except Exception:
                 log.exception("picks_failed")
-                self.picks.data["sent_day"] = picks.local_day(time.time(), self.cfg.telegram.utc_offset_hours)
+                self.picks.data["sent_day"] = picks.local_day(time.time(), self.cfg.discord.utc_offset_hours)
         now = now_ms()
         eq = self.st.equity(self.mids)
         for kind, key in (("day", day_key(now)), ("week", week_key(now))):
             if self.st.marks.get(kind, {}).get("key") != key:
                 if kind == "day" and self.st.marks.get("day"):
-                    self.ui.send(tgfmt.progress_text(self.st, self.mids, self.mids.get("BTC"), now))
+                    self.ui.send(cardfmt.progress_text(self.st, self.mids, self.mids.get("BTC"), now))
                 self.rec({"ev": "mark", "kind": kind, "key": key, "equity": eq})
 
         def marks(w):
@@ -660,7 +661,7 @@ class Bot:
         elif kind == "invo_review":
             self.on_invo_review(*item[1:])
         elif kind == "invo_unknown":
-            self.ui.send(f"⚠️ 🧾 No Invo user called @{tgfmt.esc(item[1])}: /invounfollow {tgfmt.esc(item[1])} and "
+            self.ui.send(f"⚠️ 🧾 No Invo user called @{cardfmt.esc(item[1])}: /invounfollow {cardfmt.esc(item[1])} and "
                          "check the name (as in app.invoapp.com/&lt;username&gt;).")
         elif kind == "invo_auth":
             if item[1]:
@@ -673,7 +674,7 @@ class Bot:
             self.ui.send(f"🔎 <b>{'Weekly' if weekly else 'Daily'} review</b> · {n_pre} passed the pre-screen · "
                          f"{n_scored} fully scored · {n_el} eligible")
             if weekly:
-                self.ui.send(tgfmt.progress_text(self.st, self.mids, self.mids.get("BTC"), now_ms()))
+                self.ui.send(cardfmt.progress_text(self.st, self.mids, self.mids.get("BTC"), now_ms()))
         elif kind == "alert":
             self.alert(item[1])
 
@@ -684,7 +685,7 @@ class Bot:
         es = []
         for a in rank:
             s = sc[a]
-            es.append(picks.Entry(a, tgfmt.short(a), s.get("score", 0), (
+            es.append(picks.Entry(a, cardfmt.short(a), s.get("score", 0), (
                 f"{s.get('win_rate', 0) * 100:.0f}% win · PF {min(s.get('profit_factor', 0), 99):.1f} · "
                 f"{s.get('trades', 0)} trades · biggest drop {s.get('max_dd', 0) * 100:.0f}% · "
                 + ("all perps" if s.get("diversified") else "main coins")), f"/hyperadd {a}", a in self.st.followed))
@@ -734,7 +735,7 @@ class Bot:
         if self.invo is not None:
             books.append(self.invo_book(n) if self.invo_search else
                          picks.Book("invo", "🧾 Invo", [], "the Invo search is off (invo.search = false)"))
-        day = picks.local_day(time.time(), self.cfg.telegram.utc_offset_hours)
+        day = picks.local_day(time.time(), self.cfg.discord.utc_offset_hours)
         for b in books:
             self.ui.send(picks.render(b, self.picks.prev(b.key), day, n))
         if daily:
@@ -750,7 +751,7 @@ class Bot:
         if w is None:
             return
         if first:      # the very first Invo search: show its result now instead of at the next daily report
-            day = picks.local_day(time.time(), self.cfg.telegram.utc_offset_hours)
+            day = picks.local_day(time.time(), self.cfg.discord.utc_offset_hours)
             self.ui.send(picks.render(self.invo_book(self.cfg.picks.top_n), self.picks.prev("invo"), day,
                                       self.cfg.picks.top_n))
         for leader in list(w.st.followed):
@@ -762,9 +763,9 @@ class Bot:
                        "reason": f"fails the rules {fails[name]} searches in a row"})
                 self.sync_invo_extras()
                 self.invo_watch.forget(name)
-                self.ui.send(f"➖ 🧾 <b>Dropped</b> @{tgfmt.esc(name)} · fails the rules {fails[name]} searches in a "
-                             f"row ({tgfmt.esc(why)})" + (f" · {held} open copy still managed" if held else "")
-                             + f" · /invofollow {tgfmt.esc(name)} brings it back")
+                self.ui.send(f"➖ 🧾 <b>Dropped</b> @{cardfmt.esc(name)} · fails the rules {fails[name]} searches in a "
+                             f"row ({cardfmt.esc(why)})" + (f" · {held} open copy still managed" if held else "")
+                             + f" · /invofollow {cardfmt.esc(name)} brings it back")
         if self.invo_search_pending:
             self.invo_search_pending = False
             self.invo_repick(n_cands)
@@ -780,9 +781,9 @@ class Bot:
         w.rec({"ev": "unfollow", "leader": leader, "reason": f"paused: {why}"})
         self.sync_invo_extras()
         self.invo_watch.forget(name)
-        self.ui.send(f"➖ 🧾 <b>Dropped</b> @{tgfmt.esc(name)} · copying it lost too much ({tgfmt.esc(why)})"
+        self.ui.send(f"➖ 🧾 <b>Dropped</b> @{cardfmt.esc(name)} · copying it lost too much ({cardfmt.esc(why)})"
                      + (f" · {held} open copy still managed" if held else "")
-                     + f" · /invofollow {tgfmt.esc(name)} brings it back")
+                     + f" · /invofollow {cardfmt.esc(name)} brings it back")
 
     def invo_repick(self, n_cands: int) -> None:
         """/invosearch finished: follow the best `invo.max_traders` that pass every rule, drop followed ones outside
@@ -802,9 +803,9 @@ class Bot:
             w.rec({"ev": "follow", "leader": INVO + name})
         self.sync_invo_extras()
         self.ui.send(f"🔎 🧾 <b>Invo search finished</b> · {n_cands} traders checked · following the best "
-                     f"{len(best)}: " + ", ".join(f"@{tgfmt.esc(k)} ({sc[k]['score']:.0f})" for k in best)
-                     + (f"\n➕ new: {', '.join('@' + tgfmt.esc(k) for k in joins)}" if joins else "")
-                     + (f"\n➖ dropped: {', '.join('@' + tgfmt.esc(k) for k in drops)} (open copies run until they "
+                     f"{len(best)}: " + ", ".join(f"@{cardfmt.esc(k)} ({sc[k]['score']:.0f})" for k in best)
+                     + (f"\n➕ new: {', '.join('@' + cardfmt.esc(k) for k in joins)}" if joins else "")
+                     + (f"\n➖ dropped: {', '.join('@' + cardfmt.esc(k) for k in drops)} (open copies run until they "
                         "close)" if drops else ""))
 
     # ---- selection ----------------------------------------------------------------------------------
@@ -837,15 +838,15 @@ class Bot:
         """/hyperadd result: follow at once if it passes every rule and a slot is free, else say why not."""
         self.ranking, self.scores = list(ranking), scores
         self.ranks = {x: i + 1 for i, x in enumerate(ranking)}
-        who = f"<code>{tgfmt.short(a)}</code>"
+        who = f"<code>{cardfmt.short(a)}</code>"
         if screened is None:
             self.ui.send(f"⚠️ /hyperadd {who}: could not read its trades from Hyperliquid. Try again in a minute.")
         elif not screened.get("ok"):
-            self.ui.send(f"❌ /hyperadd {who} did not pass the first check: {tgfmt.esc(screened.get('reason', '?'))}. "
+            self.ui.send(f"❌ /hyperadd {who} did not pass the first check: {cardfmt.esc(screened.get('reason', '?'))}. "
                          "Not followed.")
         elif not score or not score.get("eligible"):
             why = ", ".join((score or {}).get("reasons") or ["not scored"])
-            self.ui.send(f"❌ /hyperadd {who} fails the strict rules: {tgfmt.esc(why)}. Not followed.")
+            self.ui.send(f"❌ /hyperadd {who} fails the strict rules: {cardfmt.esc(why)}. Not followed.")
         elif a in self.st.paused_leaders:          # no blacklist: the owner's re-add lifts the pause
             self.rec({"ev": "follow", "leader": a, "rank": self.ranks.get(a)})
             self.sync_sides()
@@ -875,18 +876,18 @@ class Bot:
             self.rec({"ev": "unfollow", "leader": a, "reason": why})
             held = sum(1 for p in self.st.positions.values() if p.leader == a)
             log.info("leader_dropped", leader=a, reason=why, open_copies=held)
-            self.ui.send(f"➖ <b>Dropped</b> <code>{tgfmt.short(a)}</code> · {tgfmt.esc(why)}"
+            self.ui.send(f"➖ <b>Dropped</b> <code>{cardfmt.short(a)}</code> · {cardfmt.esc(why)}"
                          + (f" · {held} copy still managed until exit" if held else ""))
         for a in plan.joins:
             self.rec({"ev": "follow", "leader": a, "rank": self.ranks.get(a)})
             s = scores.get(a, {})
             log.info("leader_followed", leader=a, rank=self.ranks.get(a), score=s.get("score"))
-            self.ui.send(f"➕ <b>Following</b> <code>{tgfmt.short(a)}</code> · rank #{self.ranks.get(a)}\n" + tgfmt.pre([
+            self.ui.send(f"➕ <b>Following</b> <code>{cardfmt.short(a)}</code> · rank #{self.ranks.get(a)}\n" + cardfmt.pre([
                 ("Score", f"{s.get('score', 0):.0f}/100"),
                 ("Coins", "all perps 🎲 (diversified)" if s.get("diversified") else "main coins"),
                 ("Trades", str(s.get("trades", "-"))),
                 ("Win", f"{s.get('win_rate', 0) * 100:.0f}%"),
-                ("PF", tgfmt.pf_text(s.get("profit_factor", 0))),
+                ("PF", cardfmt.pf_text(s.get("profit_factor", 0))),
                 ("Avg per trade", f"{s.get('copy_edge_bps', 0) / 100:+.2f}% after our costs"),
                 ("Biggest drop", f"{s.get('max_dd', 0) * 100:.0f}%"),
             ]))
@@ -903,38 +904,38 @@ class Bot:
             t = kw["trade"]
             key = f"pos:{t['pos_id']}"
             self.last_body.pop(key, None)
-            self.ui.final_card(key, tgfmt.closed_card(t))
+            self.ui.final_card(key, cardfmt.closed_card(t))
         elif kind == "consensus":
             p = self.st.positions.get(kw["coin"])
             if p:
                 self.card_for(p, force=True)
-                extra = f"+{tgfmt.fusd(kw['size'] * p.entry_px, sign=False)} size" if kw["size"] else "no extra size"
-                self.ui.send(f"🤝 <b>{tgfmt.esc(p.coin)}</b> {tgfmt.side_tag(p.side)} · "
-                             f"<code>{tgfmt.short(kw['leader'])}</code> agrees with <code>{tgfmt.short(p.leader)}</code>"
+                extra = f"+{cardfmt.fusd(kw['size'] * p.entry_px, sign=False)} size" if kw["size"] else "no extra size"
+                self.ui.send(f"🤝 <b>{cardfmt.esc(p.coin)}</b> {cardfmt.side_tag(p.side)} · "
+                             f"<code>{cardfmt.short(kw['leader'])}</code> agrees with <code>{cardfmt.short(p.leader)}</code>"
                              f" · {extra}")
         elif kind == "handover":
             p = self.st.positions.get(kw["coin"])
             if p:
                 self.card_for(p, force=True)
-            self.ui.send(f"🔁 <b>{tgfmt.esc(kw['coin'])}</b> kept: <code>{tgfmt.short(kw['prev'])}</code> exited, "
-                         f"<code>{tgfmt.short(kw['leader'])}</code> still holds and now leads the copy")
+            self.ui.send(f"🔁 <b>{cardfmt.esc(kw['coin'])}</b> kept: <code>{cardfmt.short(kw['prev'])}</code> exited, "
+                         f"<code>{cardfmt.short(kw['leader'])}</code> still holds and now leads the copy")
         elif kind == "conflict":
-            self.ui.send(f"⚔️ <b>{tgfmt.esc(kw['coin'])}</b> conflict: switching to <code>{tgfmt.short(kw['leader'])}</code>"
-                         f" (score {kw['score']:.0f}) over <code>{tgfmt.short(kw['holder'])}</code>"
+            self.ui.send(f"⚔️ <b>{cardfmt.esc(kw['coin'])}</b> conflict: switching to <code>{cardfmt.short(kw['leader'])}</code>"
+                         f" (score {kw['score']:.0f}) over <code>{cardfmt.short(kw['holder'])}</code>"
                          f" (score {kw['holder_score']:.0f})")
         elif kind == "leader_paused":
             self.sync_sides()
-            self.ui.send(f"⏸️ <b>Leader paused</b> <code>{tgfmt.short(kw['leader'])}</code> · "
-                         f"{tgfmt.esc(kw['reason'])}\nNo new copies from it; open copies keep mirroring exits.")
+            self.ui.send(f"⏸️ <b>Leader paused</b> <code>{cardfmt.short(kw['leader'])}</code> · "
+                         f"{cardfmt.esc(kw['reason'])}\nNo new copies from it; open copies keep mirroring exits.")
 
     def card_for(self, p, force: bool = False, prefix: str = "pos:", extra: str = "") -> None:
         key = f"{prefix}{p.pos_id}"
         mark = self.mids.get(p.coin)
-        body = tgfmt.trade_card(p, mark, 0) + extra
+        body = cardfmt.trade_card(p, mark, 0) + extra
         if not force and self.last_body.get(key) == body:
             return   # nothing changed: no edit (the time stamp alone is not a change)
         self.last_body[key] = body
-        self.ui.set_card(key, tgfmt.trade_card(p, mark, now_ms()) + extra)
+        self.ui.set_card(key, cardfmt.trade_card(p, mark, now_ms()) + extra)
 
     def invo_card(self, p, force: bool = False) -> None:
         info = self.invo_info.get(p.pos_id)
@@ -958,25 +959,25 @@ class Bot:
         if key.startswith("invo:") and self.invo is not None:
             w = self.invo
             if key == "invo:wallets":
-                return tgfmt.wallets_card([(x.risk_pct, x.st, False, x.label) for x in self.invo_wallets()], self.mids,
+                return cardfmt.wallets_card([(x.risk_pct, x.st, False, x.label) for x in self.invo_wallets()], self.mids,
                                           now, title="🧾 <b>Invo wallets</b> · same Invo calls, different sizing")
             if key == "invo:trades":
-                return tgfmt.trades_card(w.st, self.mids, now, title="🧾 <b>Invo trades</b>")
+                return cardfmt.trades_card(w.st, self.mids, now, title="🧾 <b>Invo trades</b>")
             if key == "invo:traders":
-                return tgfmt.traders_card(w.st, self.mids, {}, {}, now, title="🧾 <b>Invo traders</b>",
+                return cardfmt.traders_card(w.st, self.mids, {}, {}, now, title="🧾 <b>Invo traders</b>",
                                           extra=self.invo_record_rows())
-            return tgfmt.invo_text(w.st, self.mids, self.invo_watch, now)
+            return cardfmt.invo_text(w.st, self.mids, self.invo_watch, now)
         if key == "status":
-            return tgfmt.status_card(self.st, self.mids, h, now, self.mids.get("BTC"))
+            return cardfmt.status_card(self.st, self.mids, h, now, self.mids.get("BTC"))
         if key == "trades":
-            return tgfmt.trades_card(self.st, self.mids, now)
+            return cardfmt.trades_card(self.st, self.mids, now)
         if key == "traders":
-            return tgfmt.traders_card(self.st, self.mids, self.ranks, self.scores, now)
+            return cardfmt.traders_card(self.st, self.mids, self.ranks, self.scores, now)
         if key == "wallets":
-            return tgfmt.wallets_card([(self.cfg.risk.risk_per_trade_pct, self.st, True)]
+            return cardfmt.wallets_card([(self.cfg.risk.risk_per_trade_pct, self.st, True)]
                                       + [(w.risk_pct, w.st, False, w.label) for w in self.sides if not w.own_leaders],
                                       self.mids, now)
-        return tgfmt.leaders_card(self.st, self.ranks, now, self.scores)
+        return cardfmt.leaders_card(self.st, self.ranks, now, self.scores)
 
     # ---- commands ------------------------------------------------------------------------------------
     def command(self, c) -> None:
@@ -996,9 +997,9 @@ class Bot:
             self.last_body.pop(key, None)
             self.ui.set_card(key, self.render_card(key, self.health(), now), new=True)
         elif c.name == "/positions":
-            self.ui.send(tgfmt.positions_text(self.st, self.mids))
+            self.ui.send(cardfmt.positions_text(self.st, self.mids))
         elif c.name == "/progress":
-            self.ui.send(tgfmt.progress_text(self.st, self.mids, self.mids.get("BTC"), now))
+            self.ui.send(cardfmt.progress_text(self.st, self.mids, self.mids.get("BTC"), now))
         elif c.name == "/pause":
             self.rec({"ev": "pause", "reason": "/pause"})
             self.on_sides("pause", lambda w: w.rec({"ev": "pause", "reason": "/pause"}))
@@ -1031,7 +1032,7 @@ class Bot:
                 self.ui.send("Usage: /hyperadd 0x… (a Hyperliquid wallet address, 0x and 40 hex characters)")
                 return
             self.scorer.add_q.put(a.lower())
-            self.ui.send(f"🔎 Checking <code>{tgfmt.short(a.lower())}</code> with the strict rules now (about a "
+            self.ui.send(f"🔎 Checking <code>{cardfmt.short(a.lower())}</code> with the strict rules now (about a "
                          "minute); I will follow it if it passes and a slot is free.")
         elif c.name == "/picks":
             self.send_picks(daily=False)
@@ -1051,8 +1052,8 @@ class Bot:
                 return
             where = self.reset_wallets()
             self.ui.send(f"♻️ <b>Reset done</b> · every wallet is back to "
-                         f"{tgfmt.fusd(self.cfg.risk.start_equity, sign=False)}, traders kept. Old history saved in "
-                         f"<code>{tgfmt.esc(where)}</code>.\n🔄 Restarting… back in about 15 seconds.")
+                         f"{cardfmt.fusd(self.cfg.risk.start_equity, sign=False)}, traders kept. Old history saved in "
+                         f"<code>{cardfmt.esc(where)}</code>.\n🔄 Restarting… back in about 15 seconds.")
             self.restart_at = time.time() + 3
         elif c.name == "/flatten":
             if not self.ui.check_pin(c.arg):
@@ -1117,7 +1118,7 @@ class Bot:
         lags = self.st.lags_ms
         if lags:
             log.info("lag_stats", n=len(lags), p50_ms=round(statistics.median(lags)),
-                     p95_ms=round(tgfmt.pctl(lags, 0.95)))
+                     p95_ms=round(cardfmt.pctl(lags, 0.95)))
 
     def shutdown(self) -> None:
         self.stop.set()
@@ -1143,7 +1144,7 @@ def main(argv: list[str] | None = None) -> None:
     except config.ConfigError as e:
         print(f"config error: {e}", file=sys.stderr)
         raise SystemExit(2)
-    for s in (cfg.tg_token, cfg.pin, cfg.dc_token, cfg.helius_key):
+    for s in (cfg.pin, cfg.dc_token, cfg.helius_key):
         log.add_secret(s)
     log.setup(cfg.runtime.log_dir)
     if not cfg.invo_token_file and os.path.exists(DEFAULT_INVO_TOKEN):

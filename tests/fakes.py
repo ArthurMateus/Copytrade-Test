@@ -5,7 +5,9 @@ Responses are built from the real recorded fixtures in tests/fixtures. Our own c
 from __future__ import annotations
 
 import copy
+import html
 import json
+import re
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -242,89 +244,29 @@ class FakeHL:
                 pass
 
 
-class FakeTelegram:
-    def __init__(self, token="123456789:TESTTOKENTESTTOKENTESTTOKENTEST", chat_id=4242):
-        self.token = token
-        self.chat_id = chat_id
-        self.updates: list[dict] = []
-        self.sent: list[dict] = []        # every sendMessage
-        self.edits: list[dict] = []       # every editMessageText
-        self.messages: dict[int, str] = {}
-        self.calls: list[tuple[float, str]] = []
-        self.next_id = 100
-        self.upd_id = 1
-        self.fail_429 = 0
-        self.lock = threading.Lock()
-        fake = self
+_MD_TOKEN = re.compile(r"(```\n?.*?\n?```|`[^`]*`|\*\*|\*|\\.|[^`*\\]+)", re.S)
 
-        class H(BaseHTTPRequestHandler):
-            def log_message(self, *a):
-                pass
 
-            def _send(self, code, obj):
-                b = json.dumps(obj).encode()
-                self.send_response(code)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(b)))
-                self.end_headers()
-                self.wfile.write(b)
-
-            def do_POST(self):
-                path = urlparse(self.path).path
-                n = int(self.headers.get("Content-Length") or 0)
-                body = json.loads(self.rfile.read(n) or b"{}")
-                if not path.startswith(f"/bot{fake.token}/"):
-                    return self._send(401, {"ok": False, "description": "Unauthorized"})
-                method = path.rsplit("/", 1)[1]
-                self._send(*fake.handle(method, body))
-
-        self.http = _Server(("127.0.0.1", 0), H)
-        threading.Thread(target=self.http.serve_forever, daemon=True).start()
-
-    @property
-    def api_base(self):
-        return f"http://127.0.0.1:{self.http.server_address[1]}"
-
-    def close(self):
-        self.http.shutdown()
-
-    def say(self, text, chat_id=None):
-        with self.lock:
-            self.updates.append({"update_id": self.upd_id, "message": {
-                "message_id": self.upd_id, "chat": {"id": chat_id or self.chat_id}, "text": text}})
-            self.upd_id += 1
-
-    def handle(self, method, body):
-        if method == "getUpdates":
-            deadline = time.time() + min(float(body.get("timeout", 0)), 1.0)
-            while True:
-                with self.lock:
-                    ups = [u for u in self.updates if u["update_id"] >= body.get("offset", 0)]
-                if ups or time.time() >= deadline:
-                    return 200, {"ok": True, "result": ups}
-                time.sleep(0.02)
-        with self.lock:
-            self.calls.append((time.time(), method))
-            if self.fail_429 > 0:
-                self.fail_429 -= 1
-                return 429, {"ok": False, "error_code": 429, "description": "Too Many Requests: retry after 1",
-                             "parameters": {"retry_after": 1}}
-            if method == "sendMessage":
-                mid = self.next_id
-                self.next_id += 1
-                self.messages[mid] = body["text"]
-                self.sent.append({**body, "message_id": mid})
-                return 200, {"ok": True, "result": {"message_id": mid, "text": body["text"]}}
-            if method == "editMessageText":
-                mid = body["message_id"]
-                if mid not in self.messages:
-                    return 400, {"ok": False, "description": "Bad Request: message to edit not found"}
-                if self.messages[mid] == body["text"]:
-                    return 400, {"ok": False, "description": "Bad Request: message is not modified"}
-                self.messages[mid] = body["text"]
-                self.edits.append(body)
-                return 200, {"ok": True, "result": {"message_id": mid}}
-        return 200, {"ok": True, "result": True}
+def md_to_card(md: str) -> str:
+    """Discord markdown -> the bot's card HTML (b, i, code, pre, escaped text), so assertions can be written against
+    what the bot rendered. The inverse of copybot.discord.html_to_md for the subset it produces."""
+    out, bold, ital = [], False, False
+    for t in _MD_TOKEN.findall(md):
+        if t.startswith("```"):
+            out.append("<pre>" + html.escape(t[3:-3].strip("\n"), quote=False) + "</pre>")
+        elif t.startswith("`"):
+            out.append("<code>" + html.escape(t[1:-1], quote=False) + "</code>")
+        elif t == "**":
+            out.append("</b>" if bold else "<b>")
+            bold = not bold
+        elif t == "*":
+            out.append("</i>" if ital else "<i>")
+            ital = not ital
+        elif t.startswith("\\"):
+            out.append(html.escape(t[1:], quote=False))
+        else:
+            out.append(html.escape(t, quote=False))
+    return "".join(out)
 
 
 class FakeDiscord:
@@ -393,7 +335,8 @@ class FakeDiscord:
         self.ws.shutdown()
 
     def text(self, mid) -> str:
-        return self.messages[mid]["description"]
+        """A message's current text, as card HTML (see md_to_card)."""
+        return md_to_card(self.messages[mid]["description"])
 
     # ---- REST -----------------------------------------------------------------------------------
     def rest(self, verb, path, body, auth):
@@ -417,14 +360,16 @@ class FakeDiscord:
                 mid = self.next_id
                 self.next_id += 1
                 self.messages[mid] = body["embeds"][0]
-                self.sent.append({**body["embeds"][0], "id": mid})
+                self.sent.append({**body["embeds"][0], "id": mid, "message_id": mid,
+                                  "text": md_to_card(body["embeds"][0]["description"])})
                 return 200, {"id": str(mid), "channel_id": self.channel}
             if verb == "PATCH" and p.startswith(f"/channels/{self.channel}/messages/"):
                 mid = int(p.rsplit("/", 1)[1])
                 if mid not in self.messages:
                     return 404, {"message": "Unknown Message", "code": 10008}
                 self.messages[mid] = body["embeds"][0]
-                self.edits.append({**body["embeds"][0], "id": mid})
+                self.edits.append({**body["embeds"][0], "id": mid, "message_id": mid,
+                                   "text": md_to_card(body["embeds"][0]["description"])})
                 return 200, {"id": str(mid)}
         return 404, {"message": "404: Not Found", "code": 0}
 
@@ -461,13 +406,24 @@ class FakeDiscord:
         with self.lock:
             return bool(self._conns)
 
+    def say(self, text: str, user=None) -> None:
+        """The owner types a slash command, e.g. "/hyperadd 0xabc" or "/reset 1234": the argument goes in the
+        option the bot registers for it ("pin" or "wallet"). Waits for the bot's gateway connection first."""
+        from copybot.chat import PIN_COMMANDS, WALLET_COMMANDS, canon
+        end = time.time() + 15
+        while not self.connected() and time.time() < end:
+            time.sleep(0.02)
+        name, _, arg = text.strip().partition(" ")
+        opt = "pin" if canon(name) in PIN_COMMANDS else ("wallet" if canon(name) in WALLET_COMMANDS else None)
+        self.interact(name.lstrip("/"), {opt: arg.strip()} if opt and arg.strip() else None, user=user)
+
     def interact(self, name, options=None, user=None):
         d = {"id": f"i{self._next()}", "token": "itoken", "type": 2, "channel_id": self.channel,
              "member": {"user": {"id": user or self.owner}},
              "data": {"name": name, "options": [{"name": k, "type": 3, "value": v} for k, v in (options or {}).items()]}}
         msg = json.dumps({"op": 0, "t": "INTERACTION_CREATE", "s": self._next(), "d": d})
         with self.lock:
-            conns = list(self._conns)
+            conns = self._conns[-1:]          # like Discord: only the newest session gets the interaction
         for c in conns:
             c.send(msg)
 
