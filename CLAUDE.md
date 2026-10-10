@@ -1,9 +1,12 @@
 # CLAUDE.md: context for working on this repo
 
-Hyperliquid copy-trading bot, **PAPER MODE ONLY**. It copies up to 7 automatically selected wallets on a
-simulated $300 wallet. It is controlled from Discord (Telegram removed 2026-10-10) and runs unattended for 2–4 weeks on the owner's Windows PC.
-The full original brief is in [docs/SPEC.md](docs/SPEC.md). It is the scope reference: do not add features
-that are not listed there unless the owner asks. The README covers run instructions and design choices.
+Copy-trading bot, **PAPER MODE ONLY**, with three books in one process: ⚡ Hyperliquid wallets, 🪙 FOMO (Solana
+memecoin) traders followed on-chain, and 🧾 Invo traders' posted calls (traded on Hyperliquid prices). Each book has
+simulated $300 wallets at several risk levels. It is controlled from Discord only (Telegram removed 2026-10-10) and
+runs unattended on the owner's Windows PC. **New chat? Read `context.md` first** (current state, who does what, what
+Claude must never do), then this file. The original brief is [docs/SPEC.md](docs/SPEC.md) (Hyperliquid only; the
+FOMO and Invo books and everything marked "owner request" were added later at the owner's request). Do not add
+features nobody asked for. The README covers run instructions and design choices.
 
 ## Owner
 - Runs Windows 11 with a Brazilian Portuguese locale (Windows error messages come out in Portuguese) and uses
@@ -24,8 +27,8 @@ that are not listed there unless the owner asks. The README covers run instructi
 - Tests fake only the network (`tests/fakes.py`: loopback HL REST + WS + Discord REST/Gateway; `FakeDiscord.say("/cmd arg")` sends a slash command and `sent`/`edits` carry `text` = the card HTML rebuilt from the markdown, `md_to_card`). Never mock our own code.
   Parsers are tested against real recorded responses in `tests/fixtures` (re-record with
   `tools/record_samples.py`).
-- Run `uv run pytest` after every change (about 2.5 minutes, 250+ tests at the time of writing, including real-process
-  kill -9 restarts).
+- Run `uv run pytest` after every change (about 5.5 minutes, 320+ tests at the time of writing, including
+  real-process kill -9 restarts).
 
 ## Layout (`src/copybot/`)
 | Module | Role |
@@ -41,17 +44,26 @@ that are not listed there unless the owner asks. The README covers run instructi
 | `scoring.py` | Pure, deterministic: `prescreen` → `fill_screen` (first 2,000 fills) → `full_score` (180 d fills + 1h candles, 0–100 points) → `ranking`. `VERSION` invalidates cached results |
 | `selection.py` | Pure `select()` hysteresis; `Scorer` thread with a disk cache in `data/cache` (resumes after a restart) |
 | `feed.py` | Websocket (allMids + userFills, max 15 users) and the exchange `Clock` offset estimate |
-| `chat.py`, `cardfmt.py` | Platform-free chat: command names/aliases/help, `ChatUI` outbox (cards edited in place, rate-limited, 429-aware); renderers in a small HTML subset. Live cards: /status, /leaders, /trades, /traders, /wallets (`Bot.render_card`). Card conventions: 🟢/🔴 = money only, ⬆️/⬇️ = side, one P&L after fees+funding, `label: value` lines (no `<pre>`), times in `discord.utc_offset_hours` |
+| `chat.py`, `cardfmt.py` | Platform-free chat: command names (`VERBS` x `BOOKS`)/aliases/help, `ChatUI` outbox (cards edited in place, rate-limited, 429-aware); renderers in a small HTML subset. Live cards: status, trades, traders, wallets of each book (`Bot.render_card`, `SolBot.render`). Card conventions: 🟢/🔴 = money only, ⬆️/⬇️ = side, one P&L after fees+funding, `label: value` lines (no `<pre>`), times in `discord.utc_offset_hours` |
 | `discord.py` | The ONLY chat (Telegram removed 2026-10-10 at the owner's request): `DiscordUI(ChatUI)` over REST + Gateway (stdlib + `websockets.sync`), guild slash commands, owner-only, ephemeral replies (PIN never shown), card HTML → markdown embeds coloured by money. Card ids live in the ledger as `dc:<key>` (keys without the prefix are old Telegram messages, ignored) |
-| `runner.py` | `Bot`: boot/repair, worker threads, trading loop, commands, selection application, heartbeat |
+| `runner.py` | `Bot`: boot/repair (also boots the FOMO book), worker threads, trading loop, commands of the Hyperliquid and Invo books, selection application, daily picks, heartbeat |
+| `invo.py`, `invo_scorer.py` | Invo: parsers, `InvoClient` (rotating refresh token), `Watcher` (polls followed traders, portfolio filter); the daily Invo search scoring each trader's calls with `scoring.full_score` |
+| `picks.py` | The daily picks report (render, day-to-day comparison, `data/picks.json`) |
 | `wallets.py` | Side wallets: same moves at other risk levels (`risk.side_wallets_risk_pct`), own ledger in `data/wallets/<name>/`, limits scaled by `config.scaled`; `boot_repair` shared with the main wallet |
 | `sol/` | **Solana memecoin paper book** (own $300, own ledger `data/sol/`, own risk gate). `chain.py` Solana RPC client + swap parser + FOMO trader discovery + websocket alerts, `scoring.py` strict pure scoring, `scorer.py` thread + cache, `market.py` DexScreener + paper broker, `risk.py` gate, `trader.py` detector + positions, `runner.py` `SolBot` (threads inside the main process), `fmt.py` cards |
 
-Runtime state: `data/ledger.jsonl` (the source of truth), `data/cache/`, `data/bot.lock` (single instance) and
-`logs/copybot.log`. All of these are git-ignored. Moving the bot to another PC means copying `data/`. Never run two
+Tools (`tools/`): `hyper_why.py` / `fomo_why.py` / `invo_why.py` (why traders fail), `invo_check.py` (Invo login),
+`record_samples.py` / `record_chain.py` (fixtures), and the FOMO daily-picks pipeline `fomo_collect.js` +
+`fomo_receive.py` + `fomo_picks.py` + `fomo_picks.html` (run by a scheduled Claude task, see below).
+
+Runtime state: `data/ledger.jsonl` (the source of truth), `data/wallets/<name>/` (side and Invo wallets),
+`data/sol/` (FOMO book), `data/cache/`, `data/picks.json`, `data/bot.lock` (single instance) and
+`logs/copybot.log`; `reports/` on the Claude PC (FOMO picks). All of these are git-ignored. Moving the bot to another PC means copying `data/`. Never run two
 instances on the same wallet.
 
 ## Decisions made where the spec was open
+(Hyperliquid commands below use their canonical short names: `/resume` = `/hyperresume`, `/search` = `/hypersearch`,
+`/wallets` = `/hyperwallets`, ... The owner types the `/hyper…` names in Discord.)
 - One net position per coin (as on the exchange), owned by one leader. Owner decision (2026-10-05):
   - **Agreement:** a second followed leader opening the SAME side becomes a *backer*; we add `risk.consensus_risk_pct`
     (0.5%) extra risk, still capped by the 1.5% per-symbol limit. Backer adds/reduces only refresh its size; its
@@ -85,14 +97,15 @@ instances on the same wallet.
   distance and liquidation buffer do not. They are allowed above the CEILINGS on purpose (paper comparison only).
   They follow the main wallet's followed/paused sets (`sync_leaders`), never pause leaders themselves, post no trade
   cards, and get the main wallet's moves after it (books reused for 1 s). A side-wallet error is logged/alerted and
-  never reaches the main wallet. /pause, /resume and /flatten act on every wallet.
+  never reaches the main wallet. /hyperpause, /hyperresume and /hyperflatten act on every Hyperliquid wallet (not on
+  the Invo wallets, which have their own /invo… controls since 2026-10-10).
 - Lag = exchange-clock time of our paper fill minus the leader's fill time.
 - Mirror side wallet (owner request 2026-10-09): `mirror_x10` in `data/wallets/`, sized by `Bot.mirror_size` =
   leader's new position notional / (its perp account value + spot stablecoins, since 2026-10-10) (leverage included) x `risk.mirror_mult` (10) x our
   equity, lifted to `min_notional_usd` (so small bets are not skipped). Limits = a `mirror_limits_pct` (5%) side
   wallet's (they clamp big bets). Account values of followed leaders: `sync_worker` every 5 min (BULK); unknown value
   -> the fixed 1% risk size (log `mirror_size_fallback`). Adds/reduces follow `k` like every wallet. Shown in
-  /hyperwallet as "mirror x10 (their % of account)".
+  /hyperwallets as "mirror x10 (their % of account)".
 - HL floors changed (owner request 2026-10-09): `min_win_rate` 0.60 -> 0.45, plus a NEW hard gate
   `max_best_trade_share` 0.30 (best round trip / total pnl, "one_trade>30%_of_profit"). Both are in
   `ScoreParams.rules()`, so cached scores are redone at the next start. `tools/hyper_why.py` explains rejections.
@@ -117,16 +130,16 @@ instances on the same wallet.
   so a dead websocket adds lag but never loses a trade.
 - Search UX (owner request 2026-10-08): `/fomosearch` (or the first review when nobody is followed) ends with
   `hysteresis.rebalance`: top `max_leaders` (7) followed at once, followed ones outside it dropped, empty ranking drops
-  nobody. `SolScorer.progress` feeds the search line in `/fomo` and `/fomoleaders` (also "best found, not followed");
+  nobody. `SolScorer.progress` feeds the search line in `/fomostatus` and `/fomotraders`;
   a `/fomosearch` during a running search only reports progress. `history_days` = 30 to keep a search affordable.
   Seeder and scorer can read one wallet's history together: `SolScorer.history` locks per wallet (Windows refused two
   writers of one cache file).
-- `/hyperadd 0x…` and `/fomoadd <wallet>` (owner request 2026-10-09): the owner (or Claude, only when asked in a
-  session; never on a schedule) supplies a wallet; the scorer thread checks it at once (`add_q`, also between wallets
+- `/hyperadd 0x…` and `/fomoadd <wallet>` (owner request 2026-10-09): the owner supplies a wallet (Claude suggests
+  some in a session or in the FOMO daily-picks task; only the owner sends the commands); the scorer thread checks it at once (`add_q`, also between wallets
   of a running review: HL re-screens even if screened this week; FOMO marks it `manual` in the pool, never pruned and
   re-checked at every search). Same strict rules, no bypass. Passes + free slot (< max_leaders) -> followed at once
   (`apply_plan`); else the reply says why (rules failed, already followed, paused, or full -> next search). Discord gets
-  a required `wallet` option (`tg.WALLET_COMMANDS`).
+  a required `wallet` option (`chat.WALLET_COMMANDS`).
 - Owner picks (owner request 2026-10-09: "use Claude, not Helius, to find FOMO traders"): `/fomofollow <wallet>`
   follows at once WITHOUT the strict scoring (follow event `picked: true` -> `State.picked`, kept by `/fomoreset`);
   `select`/`rebalance` never drop a pick for rank (`keep=`), only when paused after a bad copy streak; the RiskGate and
@@ -144,8 +157,8 @@ instances on the same wallet.
   speck of the intermediate token (fixture `chain_tx_fomo_routed.json`): the token with the largest relative balance
   change wins if every other moved < 10%. SOL-priced swaps (~1 in 40) are skipped (no USD price). Leg id = signature.
 - pump.fun was checked and has no trader leaderboard (Cloudflare, undocumented endpoints): not used.
-- Discord is the owner's own implementation (`discord.py`, slash commands over the Gateway, `MultiUI` fan-out); the Solana
-  book just talks to the same `ui`. Slash commands `/fomo`, `/fomotrades`, ... are in `tg.COMMANDS`.
+- Discord (`discord.py`, slash commands over the Gateway) is the only chat; the Solana book talks to the same `ui`.
+  `/fomo…` commands go to `SolBot.command` (`chat.canon` first).
 - Ledger reuse: Solana positions are `Position(side=+1, leverage=1, coin=<mint>, sym=<symbol>)` in the same `State`; a
   `cursor` event stores the newest handled swap time per leader so a restart never re-copies old swaps.
 - Entries need DexScreener liquidity >= `min_liquidity_usd`; bonding-curve pools often have none -> refused (fail closed).
@@ -171,13 +184,14 @@ instances on the same wallet.
   their positionSize x leverage x `invo.size_mult` x our equity (>= 10$), capped by `Bot.invo_cap` =
   `invo.max_risk_pct` (2%) of equity at our stop, for opens AND adds (`PositionManager.cap`, skip `copy_cap`; owner
   request 2026-10-09 after a 25% x 5x STRK call became a 375$ copy). Tickers mapped to HL names case-insensitively;
-  not on HL -> told, not copied. `/hyperreset` keeps the Invo follows. Off without INVO_TOKEN_FILE (`/invo` says how).
+  not on HL -> told, not copied. `/hyperreset` does not touch the Invo wallets (`/invoreset` does). Off without
+  INVO_TOKEN_FILE (`/invostatus` says how).
 - Adds and trims (owner request 2026-10-09): a call's COMMITTED size is `entrySize` (percent, fixed unless the trader
   adds or trims); `positionSize` drifts with the price and must not drive copies. Synthetic Moves use the committed
   exposure (entrySize/100 x leverage) as the leader "position", so `k = our size / exposure` and PositionManager
   mirrors an add (entry, RiskGate) or a trim (exit, never refused) in proportion. The watcher re-reads a portfolio's
   calls when its `updatedAt` changes and reports `("invo_resize", user, old, new)` for changes > `invo.RESIZE_MIN` (2%).
-- Live UI (owner request 2026-10-09): `/invo`, `/invotrades`, `/invotraders` are live cards (keys `invo:*`,
+- Live UI (owner request 2026-10-09): `/invostatus`, `/invotrades`, `/invotraders`, `/invowallets` are live cards (keys `invo:*`,
   `Bot.render_card`, edited only when the body changes); each copy has its own live card `invo:pos:<pos_id>` with the
   trader's call (and resizes) that becomes the final summary on any close (the Invo wallet's PositionManager notifies
   `Bot.on_invo_notify`). `cardfmt.short("invo:x")` -> "@x".
@@ -185,7 +199,7 @@ instances on the same wallet.
   Invo: `invo.risk_wallets_pct` -> `Bot.invo_extra` = `SideWallet(own_leaders=True)` named `invo_risk_<r>pct`
   (fixed-risk sizing, no sizer), following the trader-size wallet's Invo traders (`sync_invo_extras`); `on_invo` runs
   every Invo wallet (`invo_one`, errors isolated per wallet; `invo_calls` keyed (wallet, call id)); only the trader-size
-  wallet posts trade cards/notes. `/invowallets` compares them; `/hyperwallet` now lists only HL wallets
+  wallet posts trade cards/notes. `/invowallets` compares them; `/hyperwallets` now lists only HL wallets
   (`not w.own_leaders`). FOMO: `sol.side_wallets_risk_pct` (2/5/10/20) -> `SolBot.sides` = `sol/wallets.SolSide`
   (own ledger `data/sol/wallets/<name>/`, own SolGate with `scaled()` limits, shared Prices/Detector, synced
   followed+pauses every tick, moves after the main wallet, `on_sides` isolates errors, prices fetched for every
@@ -286,12 +300,11 @@ instances on the same wallet.
   https://claude.ai/artifact/9mqHKHdwAqN1J8y9rSaJdj . First run 2026-10-10: 353 on the boards, 150 read, 9 scored,
   0 pass, 1 promising (OinkersRUs, already followed).
 
-## Command families and resets (2026-10-08)
-- Hyperliquid: `/hyper<x>`; FOMO book: `/fomo<x>` (`tg.ALIASES`/`canon` turn every name into one canonical name
-  before `Bot.command`; `/fomo*` goes to `SolBot.command`). Discord lists only `/hyper*`, `/fomo*`, `/help`, `/restart`.
-- `/hyperreset` (HL ledgers + side wallets) and `/fomoreset` (`data/sol/`) each archive the old ledger under their own
-  `archive/reset-<stamp>/`, keep followed traders, pauses, cooldowns and swap cursors, are refused while a trade is open,
-  and restart the process (`restart_at`). Neither touches the other book.
+## Resets (2026-10-08, Invo 2026-10-10)
+- `/hyperreset` (main + HL side wallets), `/fomoreset` (`data/sol/`) and `/invoreset` (the Invo wallets) each archive
+  their old ledgers under their own `archive/…reset-<stamp>/`, keep followed traders (and owner picks), pauses,
+  cooldowns and swap cursors, are refused while a trade of that book is open, and restart the process (`restart_at`).
+  None touches another book.
 - HL eligibility now also needs: loss_7d <= 3%, loss_24h <= 1.5%, <= 4 losses in a row, last-15 win rate >= 45%, 7d
   drawdown <= 10% (`selection.max_loss_7d` ... `max_dd_7d`; in `ScoreParams.rules()` so cached scores are redone).
 - `/hyperprogress` shows longs vs shorts and warns when every copy was a long. Code path checked: the detector and the
@@ -311,18 +324,19 @@ instances on the same wallet.
   go flat (verified on real wallets; it is not a bug). Because of this, `max_candidates` was raised from 60 to 400, then to 2000 (owner request).
 
 ## Status and open questions
-- **Current state (2026-10-09): see `context.md`** (what runs where, how Claude helps pick FOMO/Invo traders, gotchas).
-  Owner's bot PC: `C:\Users\gedeo\Copytrade-test` (uv on PATH there; restart loop
-  `while ($true) { uv run copybot; Start-Sleep 10 }`). Secrets set there: Discord, PIN, HELIUS_API_KEY,
-  INVO_TOKEN_FILE. Invo login verified working 2026-10-09 (refresh = GET; POST answers 405).
+- **Current state (2026-10-10): see `context.md`** (what runs where, the three books, Claude's scheduled FOMO task,
+  what Claude must never do, gotchas). Owner's bot PC: `C:\Users\gedeo\Copytrade-test` (uv on PATH there; restart
+  loop `while ($true) { uv run copybot; Start-Sleep 10 }`); updates = `git pull` there + `/restart` in Discord. Secrets
+  set there: Discord, PIN, HELIUS_API_KEY (optional), INVO_TOKEN_FILE. Invo login verified 2026-10-09 (refresh = GET).
 - Git hygiene: the owner keeps unrelated untracked files in the repo root (copilot-*.md, committed once by mistake and
   removed); always stage explicit paths, never `git add -A`.
-- **Live since 2026-10-05** on the owner's notebook (started from PowerShell with `python -m uv run copybot` in a
-  restart loop; `uv` is not on PATH there). Telegram works against the real API. First review: 400 screened,
+- **Live since 2026-10-05** (first on the owner's notebook, now on the bot PC above; Telegram until 2026-10-10,
+  Discord only since). First review: 400 screened,
   13 fully scored; under the strict floors 3 leaders followed (0xc0b2…, 0x8a80…, 0xb556…). First copy 2026-10-06
   09:55 UTC: NEAR long from 0x8a80…, copied by all 5 wallets in ~0.5 s.
-- Real-world issues already fixed: Telegram read timeouts killed the command thread; a second program polled the
-  same bot token (getUpdates conflict; the owner changed tokens); websocket "Expired" closes every ~3 h alerted.
+- Real-world issues already fixed: chat read timeouts killed the command thread; a second program polled the same
+  Telegram token; websocket "Expired" closes every ~3 h alerted; /hyperadd ignored spot USDC; a trailed stop past the
+  entry was flagged at restart; an oversized Invo copy (cap added).
 - Owner environment quirks: the Claude desktop app is a packaged app, so anything it installs under %APPDATA%
   is invisible to the owner's own terminal (install uv/Python from the owner's terminal). A VS Code-style terminal
   may auto-activate `.venv` (`(copybot)` prompt): run `deactivate` first, and load the secrets with
@@ -336,7 +350,7 @@ instances on the same wallet.
   off-list (alt) trading is ignored, not held against it: a first live run with a "main-coin share ≥ 50%" gate
   rejected 41 of the first 120 candidates (many top wallets trade HYPE/alts with some BTC/ETH on the side). Quality is points out of 100 (`scoring.WEIGHTS`):
   edge 25, profit factor 15, consistency 15, trade count 15, win rate 10, max DD 10, current DD 5, concentration 5.
-  Eligibility floors (owner request 2026-10-05): win rate ≥ `min_win_rate` (60%), score ≥ `min_score` (70) and profit
+  Eligibility floors (owner request 2026-10-05): win rate ≥ `min_win_rate` (60%, 45% since 2026-10-09), score ≥ `min_score` (70) and profit
   factor ≥ `min_profit_factor` (2.0), biggest drop ≤ `max_drawdown` (30%, owner request 2026-10-06). Each score stores its `rules`; changing a floor rescores at the next start.
   **Live account (owner request 2026-10-06, `scoring.VERSION` 5):** `Scorer.score` reads the wallet's
   `clearinghouseState` (`Info.account`, BULK). Each losing open position in the scored coins counts as a lost trade
@@ -348,10 +362,11 @@ instances on the same wallet.
   `max_candidates` = 2000 (≈ all of the ~2,200 pre-screened; the first full pass takes 5–6 h, about 7 wallets/min).
   `scoring.SCREEN_VERSION` and `scoring.VERSION` are separate: a score-only change rescores the screened wallets
   from cached fills at startup (`Scorer.rescore_missing`) instead of re-screening 400 wallets.
-  A review screens until `pool_size` (100) wallets are fully scored; `join_rank` = 7 so the top 7 get followed
-  (hysteresis unchanged). Check `review_done` / `event=scored` in the log.
+  A review screens until `pool_size` (100) wallets are fully scored. Since 2026-10-09 nobody is followed
+  automatically (`auto_follow` false): the daily picks report the top 7. Check `review_done` / `event=scored` in the log.
 - **Diversified wallets unlock alts/memecoins (owner request 2026-10-05):** a wallet that is profitable overall, net
   profitable in ≥ `alt_min_coins` (3) coins and has no coin above `alt_max_coin_share` (50%) of its profit is
   scored on ALL its core perps and copied in all of them (`Score.diversified`, `RiskGate.alts_ok`). Everyone else
   stays on the main coins. Spot (`@`), outcome (`#`) and builder (`xyz:`) markets stay excluded.
-- Success metrics and the kill criterion are in the README and shown by `/progress`.
+- Success metrics and the kill criterion are in the README and shown by `/hyperprogress` (and `/fomoprogress`,
+  `/invoprogress`).
