@@ -35,6 +35,10 @@ from copybot.chat import HELP
 from copybot.wallets import SideWallet, boot_repair
 
 
+def _traders(n: int) -> str:
+    return f"{n} trader" + ("" if n == 1 else "s")
+
+
 def day_key(ms: float) -> str:
     return time.strftime("%Y-%m-%d", time.gmtime(ms / 1000))
 
@@ -146,6 +150,7 @@ class Bot:
                                           self.data / "cache", self.stop, skip=self.invo_skip)
             self.invo_scores = dict(self.invo_search.scores)
         self.picks = picks.Store(self.data / "picks.json")
+        self.sol_booted = False
         self.invo_search_pending = False   # /invosearch: re-pick the Invo traders when the search ends
         self.started_s = time.time()     # the daily report waits a few minutes after a start (rankings load first)
         self.ranks: dict[str, int] = {}
@@ -256,15 +261,28 @@ class Bot:
         for p in self.st.positions.values():
             log.info("position_restored", coin=p.coin, side=p.side, size=p.size, entry=p.entry_px, stop=p.stop_px,
                      leader=p.leader)
-        self.ui.send(f"🤖 <b>Copybot started</b> (paper) · {len(self.st.positions)} open · "
-                     f"{len(self.st.followed)} leaders" + (" · ⏸️ paused" if self.st.entries_paused else ""))
+        lines = [f"⚡ Hyperliquid: {len(self.st.positions)} open · {_traders(len(self.st.followed))}"
+                 + (" · ⏸️ paused" if self.st.entries_paused else "")]
+        if self.sol:
+            try:
+                self.sol.boot()
+                self.sol_booted = True
+                lines.append(self.sol.start_line)
+            except Exception:
+                log.exception("sol_boot_failed")
+                lines.append("🪙 FOMO: failed to start (logged); the other books run")
+        if self.invo is not None:
+            lines.append(f"🧾 Invo: {sum(len(w.st.positions) for w in self.invo_wallets())} open · "
+                         f"{_traders(len(self.invo.st.followed))}" + (" · ⏸️ paused" if self.invo.st.entries_paused else ""))
+        # one start message for every book (owner request 2026-10-10)
+        self.ui.send("🤖 <b>Copybot started</b> (paper)\n" + "\n".join(lines))
 
     def start_threads(self) -> None:
         self.feed.set_users(self.wanted_users())
         self.feed.start()
         self.ui.start()
         if self.sol:
-            threading.Thread(target=self.sol.run, name="sol", daemon=True).start()
+            threading.Thread(target=self.sol.run, kwargs={"booted": self.sol_booted}, name="sol", daemon=True).start()
         threading.Thread(target=self.health_worker, name="health", daemon=True).start()
         threading.Thread(target=self.sync_worker, name="sync", daemon=True).start()
         if self.invo_watch:
@@ -946,7 +964,7 @@ class Bot:
                       keep=self.st.picked)
         self.apply_plan(plan)
         self.rec({"ev": "sel", "state": plan.state})
-        if not ranking:
+        if not ranking and self.cfg.selection.auto_follow:     # report-only (default): the daily picks say it
             self.alert("no eligible wallet this cycle: following nobody new", key="no_eligible", every_s=6 * 3600)
 
     def on_searched(self, ranking: list[str], scores: dict) -> None:

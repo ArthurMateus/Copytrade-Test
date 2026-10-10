@@ -39,6 +39,10 @@ def week_key(ms: float) -> str:
     return f"{y}-W{w:02d}"
 
 
+
+def _traders(n: int) -> str:
+    return f"{n} trader" + ("" if n == 1 else "s")
+
 class SolBot:
     def __init__(self, cfg: Config, ui, alert, restart=lambda: None):
         self.cfg, self.c, self.ui, self.alert_fn, self.restart = cfg, cfg.sol, ui, alert, restart
@@ -164,9 +168,9 @@ class SolBot:
         log.info("sol_source", live=self.live_source)
         log.info("sol_state", equity=round(self.st.equity(), 2), positions=len(self.st.positions),
                  followed=len(self.st.followed), paused=self.st.entries_paused, trades=len(self.st.closed))
-        self.ui.send(f"🪙 <b>FOMO book started</b> (paper) · {len(self.st.positions)} open · "
-                     f"{len(self.st.followed)} leaders" + (" · ⏸️ paused" if self.st.entries_paused else "")
-                     + f"\nLive trades from: {esc(self.live_source)}")
+        # the main bot's single start message shows this line (owner request 2026-10-10: one message, not three)
+        self.start_line = (f"🪙 FOMO: {len(self.st.positions)} open · {_traders(len(self.st.followed))}"
+                           + (" · ⏸️ paused" if self.st.entries_paused else "") + f" · live trades from {self.live_source}")
 
     def start_threads(self) -> None:
         for name, fn in (("sol-poll", self.poll_worker), ("sol-price", self.price_worker),
@@ -265,8 +269,9 @@ class SolBot:
             self.stop.wait(self.c.price_poll_s)
 
     # ---- trading loop -----------------------------------------------------------------------------------
-    def run(self) -> None:
-        self.boot()
+    def run(self, booted: bool = False) -> None:
+        if not booted:              # the main bot boots the FOMO book itself, to report it in its start message
+            self.boot()
         self.start_threads()
         last_ui = last_beat = 0.0
         while not self.stop.is_set():
@@ -379,7 +384,8 @@ class SolBot:
             return
         self.apply_plan(select(self.st.sel, ranking, self.st.followed, set(self.st.paused_leaders), self.st.dropped,
                                now, c, keep=self.st.picked), scores)
-        if not ranking and not self.scorer.busy:      # mid-search rankings are partial: the search end reports it
+        # only when searches follow by themselves: in report-only mode (the default) the daily picks say who passes
+        if not ranking and not self.scorer.busy and c.auto_follow:
             self.alert("no Solana wallet passed the strict scoring: following nobody new", key="no_eligible",
                        every_s=6 * 3600)
 

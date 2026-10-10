@@ -196,6 +196,11 @@ instances on the same wallet.
   gets the refresh token with a DevTools console snippet (README) that decrypts `FlutterSecureStorage.REFRESH_TOKEN`
   (AES-GCM, key in `localStorage.FlutterSecureStorage`) and copies it; `tools/invo_check.py` verifies it.
 
+## One start message (owner request 2026-10-10)
+- `Bot.boot` boots the FOMO book itself (`SolBot.boot`, then `SolBot.run(booted=True)` on its thread) and sends ONE
+  "Copybot started" message with a line per book (`SolBot.start_line`). The "nobody passed / following nobody new"
+  alerts only fire when searches follow by themselves (`auto_follow`); in report-only mode the daily picks say it.
+
 ## Invo portfolio filter and blocks (owner request 2026-10-10)
 - A trader's calls are copied only from its portfolios with win rate >= `invo.min_portfolio_win_rate` (0.80), return
   >= `min_portfolio_pnl_pct` (100%; Invo's `plSnapshot` is the portfolio's % return: $100 -> $130 shows ~28-30) and

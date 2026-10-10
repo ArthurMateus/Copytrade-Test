@@ -96,7 +96,7 @@ def test_discover_follow_copy_close_and_survive_a_restart(env):
     bot = env.start()
     assert wait_for(lambda: env.following(bot), timeout=40), env.tg_text()
     assert "Following" in env.tg_text() and cardfmt.short(GOOD) in env.tg_text()
-    assert "Live trades from: Helius" in env.tg_text()
+    assert "live trades from Helius" in env.tg_text()
     # with a key everything goes to Helius (the search within its daily credit cap), history in bulk pages
     assert all(k for _, k in env.sol.calls)
     assert any(m == "getTransactionsForAddress" for m, _ in env.sol.calls)
@@ -332,5 +332,23 @@ def test_fomoadd_checks_any_solana_wallet_and_follows_it_when_it_passes(tmp_path
         e.tg.say(f"/fomoadd {loser}")
         assert wait_for(lambda: "fails the strict rules" in e.tg_text(), timeout=30), e.tg_text()
         assert loser not in bot.sol.st.followed and "lost money (30 d)" in e.tg_text()
+    finally:
+        e.close()
+
+
+def test_one_start_message_for_every_book_and_no_search_warning_at_start(tmp_path):
+    """Owner request 2026-10-10: a single start message (Hyperliquid, FOMO, Invo), and no "nobody passed" warning when
+    no search has run (report-only mode: the daily picks say who passes)."""
+    e = Env(tmp_path, key="", poll_s=1.0, history=False, auto=False)
+    try:
+        bot = e.start()
+        assert wait_for(lambda: "Copybot started" in e.tg_text(), timeout=15)
+        start = next(m["text"] for m in e.dc.sent if "Copybot started" in m["text"])
+        assert "⚡ Hyperliquid: 0 open" in start and "🪙 FOMO: 0 open" in start and "live trades from" in start
+        bot.sol.on_ranking([], 10, {})
+        time.sleep(1.5)
+        text = e.tg_text()
+        assert "FOMO book started" not in text and "following nobody new" not in text
+        assert sum("started" in m["text"] for m in e.dc.sent) == 1
     finally:
         e.close()

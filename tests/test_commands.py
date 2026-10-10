@@ -269,6 +269,7 @@ def test_fomo_card_helpers_are_safe_with_empty_data():
 def test_a_partial_ranking_during_a_search_does_not_say_nobody_passed(sol):
     bot, chat, _ = sol
     bot.c.min_scored_to_start = 1
+    bot.c.auto_follow = True              # (report-only mode never says it: the daily picks do)
     bot.scorer.progress = {**bot.scorer.progress, "phase": "scoring", "done": 10, "todo": 200}
     bot.on_ranking([], 10, {"W": {"eligible": False}})
     assert not any("passed the strict scoring" in m for m in chat.sent)
