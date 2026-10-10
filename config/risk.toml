@@ -7,6 +7,8 @@ stop_pct = 3.0                # stop distance from entry, % of price         [0.
 daily_loss_pct = 5.0          # equity down this much today -> no new entries until 00:00 UTC   [0.1, 5]
 weekly_loss_pct = 10.0        # same for the ISO week (Monday 00:00 UTC)    [0.1, 10]
 max_leverage = 10.0           # per position                                 [1, 10]
+trail_after_pct = 3.0         # trailing stop: once a trade is this % in profit, the stop follows the price ...  [0 = off, 50]
+trail_pct = 3.0               # ... this % behind the best price, never below break-even (fees included)       [0.2, 20]
 liq_buffer_mult = 3.0         # liquidation distance >= this x stop distance [3, 100]
 max_leaders = 7               #                                              [0, 7]
 max_positions = 10            #                                              [0, 10]

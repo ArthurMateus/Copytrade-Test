@@ -320,7 +320,30 @@ class PositionManager:
             m = self.mids.get(p.coin)
             if m and p.stop_hit(m):
                 log.warn("stop_hit", coin=p.coin, mark=m, stop=p.stop_px)
-                self.close(p.coin, "stop")
+                self.close(p.coin, "trail_stop" if self.locked_in(p) else "stop")
+            elif m:
+                self.trail(p, m)
+
+    def locked_in(self, p: Position) -> bool:
+        """The stop sits on the winning side of the entry (it was trailed): a hit closes at a profit."""
+        return (p.stop_px - p.entry_px) * p.side > 0
+
+    def trail(self, p: Position, mark: float) -> None:
+        """Trailing stop (risk.trail_after_pct / trail_pct): once the price is trail_after_pct in our favour, the stop
+        follows trail_pct behind the best price, never below break-even (entry + our round-trip fees). It only ever
+        moves in our favour, by at least 0.2% of the price at a time (one ledger event per step)."""
+        r = self.cfg.risk
+        if r.trail_after_pct <= 0 or (mark - p.entry_px) * p.side < p.entry_px * r.trail_after_pct / 100:
+            return
+        fees = 2 * (self.cfg.broker.taker_fee_pct + self.cfg.broker.extra_slippage_bps / 100) / 100
+        be = p.entry_px * (1 + p.side * fees)
+        want = mark * (1 - p.side * r.trail_pct / 100)
+        want = max(want, be) if p.side > 0 else min(want, be)
+        if (want - p.stop_px) * p.side < mark * 0.002:
+            return
+        self._rec({"ev": "stop_set", "coin": p.coin, "pos_id": p.pos_id, "stop_px": want, "why": "trail"})
+        log.info("stop_trailed", coin=p.coin, mark=mark, stop=want)
+        self.notify("updated", coin=p.coin)
 
     def apply_funding(self, assets: dict[str, Asset], hour_key: str) -> None:
         for p in list(self.st.positions.values()):

@@ -197,6 +197,17 @@ instances on the same wallet.
   gets the refresh token with a DevTools console snippet (README) that decrypts `FlutterSecureStorage.REFRESH_TOKEN`
   (AES-GCM, key in `localStorage.FlutterSecureStorage`) and copies it; `tools/invo_check.py` verifies it.
 
+## Trailing stop and Invo trader drops (owner request 2026-10-10)
+- `risk.trail_after_pct` / `trail_pct` (3 / 3): `PositionManager.trail` (called from `check_stops` every tick) moves the
+  stop, once the price is 3% in our favour, to 3% behind the price, never below break-even (entry + 2x(taker fee +
+  extra slippage)); only in our favour, in steps >= 0.2% of the price, as `stop_set` ledger events (`why: trail`). A hit
+  with the stop past the entry closes with reason `trail_stop` ("🔒 trailing stop"). Every wallet using PositionManager
+  (main, HL side wallets, mirror, Invo) has it; the FOMO book does not (its own 30% stop).
+- The Invo trader-size wallet now applies the leader pause rules (`SideWallet(pause_leaders=True)`: copy drawdown >
+  `leader_pause_dd_pct` of equity/max_leaders, or `leader_pause_losses` in a row); a pause queues `("invo_drop", ...)`
+  and `Bot.invo_drop` unfollows it in every Invo wallet at once (found live: lazylegendx lost 15.93$ in 10 trades and
+  stayed followed because only the daily search could drop it).
+
 ## Daily picks, report-only searches (owner request 2026-10-09)
 - `selection.auto_follow` and `sol.auto_follow` = false (default): `select()` (HL) never joins or swaps for rank, only
   drops paused / no-longer-eligible leaders; `sol/hysteresis.select` likewise (every bad one leaves; owner picks kept);

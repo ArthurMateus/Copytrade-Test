@@ -92,6 +92,45 @@ def test_stop_closes_position(rig):
     assert t["pnl"] == pytest.approx(-3.0, rel=0.1)   # about the 1% planned risk
 
 
+def test_trailing_stop_locks_in_profit_and_only_moves_our_way(rig):
+    """risk.trail_after_pct / trail_pct (3% / 3%): once the price is 3% up, the stop follows 3% behind the best price,
+    never below break-even, never back down; a hit then closes at a profit ("trail_stop")."""
+    rig.leader_trades(LEADER, rig.fill(LEADER, "BTC", 1, "B"))
+    p = rig.st.positions["BTC"]
+    entry, stop0 = p.entry_px, p.stop_px
+    rig.price("BTC", entry * 1.02)                  # +2%: not yet
+    rig.pm.check_stops()
+    assert p.stop_px == stop0
+    rig.price("BTC", entry * 1.03)                  # +3%: the stop jumps to break-even (3% behind would be below it)
+    rig.pm.check_stops()
+    assert entry < p.stop_px < entry * 1.002
+    rig.price("BTC", entry * 1.10)                  # +10%: 3% behind the best price
+    rig.pm.check_stops()
+    assert p.stop_px == pytest.approx(entry * 1.10 * 0.97)
+    best_stop = p.stop_px
+    rig.price("BTC", entry * 1.08)                  # it pulls back: the stop stays
+    rig.pm.check_stops()
+    assert p.stop_px == best_stop
+    assert Ledger(rig.path).replay().positions["BTC"].stop_px == best_stop      # durable (a ledger event)
+    rig.price("BTC", best_stop * 0.999)
+    rig.pm.check_stops()
+    assert "BTC" not in rig.st.positions
+    t = rig.st.closed[-1]
+    assert t["reason"] == "trail_stop" and t["pnl"] > 0
+
+
+def test_trailing_stop_on_a_short(rig):
+    rig.leader_trades(LEADER, rig.fill(LEADER, "BTC", 1, "A"))
+    p = rig.st.positions["BTC"]
+    entry = p.entry_px
+    rig.price("BTC", entry * 0.90)
+    rig.pm.check_stops()
+    assert p.stop_px == pytest.approx(entry * 0.90 * 1.03)
+    rig.price("BTC", p.stop_px * 1.001)
+    rig.pm.check_stops()
+    assert rig.st.closed[-1]["reason"] == "trail_stop" and rig.st.closed[-1]["pnl"] > 0
+
+
 def test_exits_work_when_everything_is_stale_and_book_is_down(rig):
     rig.leader_trades(LEADER, rig.fill(LEADER, "ETH", 10, "B"))
     rig.healthy = False

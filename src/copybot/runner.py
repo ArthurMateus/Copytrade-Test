@@ -110,7 +110,7 @@ class Bot:
             w = SideWallet(cfg, cfg.invo.limits_pct, self.data, side_broker, self.health, self.mids, self.assets,
                            alts_ok=lambda leader: True, score_of=self.score_of, name="invo_calls",
                            label="invo calls (posted trades)", sizer=self.invo_size, own_leaders=True,
-                           notify=self.on_invo_notify, cap=self.invo_cap)
+                           notify=self.on_invo_notify, cap=self.invo_cap, pause_leaders=True)
             # a call is first seen up to poll_s after it was posted: entries may be that old (still fail closed)
             w.cfg.risk.max_entry_age_s = cfg.invo.max_call_age_s + cfg.invo.poll_s
             self.invo = w
@@ -464,6 +464,8 @@ class Bot:
         """The Invo wallet's position manager: every close (the trader's, or our stop) finalizes the copy's card."""
         if kind == "closed":
             self.invo_final(kw["trade"], self._invo_close_why)
+        elif kind == "leader_paused":
+            self.q.put(("invo_drop", kw["leader"], kw["reason"]))     # after the close that triggered it
 
     def invo_final(self, t: dict, why: str | None = None) -> None:
         """An Invo copy closed (the trader's close, or our stop): its live card becomes the final summary."""
@@ -653,6 +655,8 @@ class Bot:
             except Exception:
                 log.exception("invo_error", kind=kind)
                 self.alert("Invo calls wallet error (logged); the other wallets are not affected", key="invo_err")
+        elif kind == "invo_drop":
+            self.invo_drop(item[1], item[2])
         elif kind == "invo_review":
             self.on_invo_review(*item[1:])
         elif kind == "invo_unknown":
@@ -764,6 +768,21 @@ class Bot:
         if self.invo_search_pending:
             self.invo_search_pending = False
             self.invo_repick(n_cands)
+
+    def invo_drop(self, leader: str, why: str) -> None:
+        """The Invo wallet's copies of this trader hit the leader pause rules (copy drawdown or losing streak, as for
+        wallets): drop it at once. Not a blacklist: /invofollow brings it back."""
+        w = self.invo
+        if w is None or leader not in w.st.followed:
+            return
+        name = leader[len(INVO):]
+        held = sum(1 for p in w.st.positions.values() if p.leader == leader)
+        w.rec({"ev": "unfollow", "leader": leader, "reason": f"paused: {why}"})
+        self.sync_invo_extras()
+        self.invo_watch.forget(name)
+        self.ui.send(f"➖ 🧾 <b>Dropped</b> @{tgfmt.esc(name)} · copying it lost too much ({tgfmt.esc(why)})"
+                     + (f" · {held} open copy still managed" if held else "")
+                     + f" · /invofollow {tgfmt.esc(name)} brings it back")
 
     def invo_repick(self, n_cands: int) -> None:
         """/invosearch finished: follow the best `invo.max_traders` that pass every rule, drop followed ones outside

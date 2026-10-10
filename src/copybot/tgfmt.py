@@ -115,7 +115,8 @@ def _trade_rows(p: Position, mark: float | None, now_ms: float) -> list:
         ("Entry → now", f"{fpx(p.entry_px)} → {fpx(mark) if mark else '-'}"),
         ("Value", f"{fusd(value, sign=False)} · your margin {fusd(value / max(p.leverage, 1), sign=False)} "
                   f"({p.leverage:g}x)"),
-        ("Stop-loss", f"{fpx(p.stop_px)}" + (f" · {to_stop:.1f}% away" if to_stop is not None else "")
+        ("Stop-loss" + (" 🔒 trailing" if (p.stop_px - p.entry_px) * p.side > 0 else ""),
+         f"{fpx(p.stop_px)}" + (f" · {to_stop:.1f}% away" if to_stop is not None else "")
          + f" · {fusd(loss_if_stopped(p))} if hit"),
         ("Take profit", exit_by),
     ]
@@ -137,6 +138,7 @@ def trade_card(p: Position, mark: float | None, now_ms: float) -> str:
 
 
 REASONS = {"leader_close": "the trader closed", "leader_flip": "the trader reversed", "stop": "🛑 stop-loss hit",
+           "trail_stop": "🔒 trailing stop (profit locked)",
            "leader_reduce": "the trader reduced", "reconcile_leader_flat": "the trader closed (caught by check)",
            "flatten": "/flatten", "leader_reopened": "stale copy", "reconcile_leader_reduced": "check",
            "conflict_better_leader": "⚔️ a better trader took the other side", "backer_close": "🤝 backer closed",

@@ -232,6 +232,29 @@ def test_our_stop_closes_an_invo_copy_and_its_card_becomes_the_summary(invo_env,
         stop_bot(bot, th)
 
 
+def test_a_trader_whose_copies_lose_too_much_is_dropped_at_once(invo_env, monkeypatch):
+    """The wallet leader pause rules (copy drawdown > 10% of equity / 7, or 5 losses in a row) also apply to Invo
+    traders: the first breach drops the trader from every Invo wallet; /invofollow brings it back."""
+    hl, tg, data, cdir, f, tok = invo_env
+    pid = f.add_user("lazy")[0]
+    bot, th = start_with_invo((hl, tg, data, cdir), tok, monkeypatch)
+    try:
+        tg.say("/invofollow lazy")
+        assert wait_for(lambda: bot.invo_watch.known.get("lazy") is not None, timeout=10)
+        f.open_call(pid, "SOL", long=True, leverage=5, size=0.25, entry=150.0)     # capped at 200$
+        assert wait_for(lambda: "SOL" in bot.invo.st.positions, timeout=10)
+        time.sleep(1.2)                                           # side wallets reuse an order book for 1 s
+        hl.mids["SOL"] = 140.0                                    # our stop: about -13$ > 10% of 300$/7
+        assert wait_for(lambda: "invo:lazy" not in bot.invo.st.followed, timeout=10)
+        assert wait_for(lambda: all("invo:lazy" not in w.st.followed for w in bot.invo_extra))
+        text = lambda: " ".join(m["text"] for m in tg.sent + tg.edits)
+        assert wait_for(lambda: "copying it lost too much" in text() and "/invofollow lazy brings it back" in text())
+        tg.say("/invofollow lazy")
+        assert wait_for(lambda: "invo:lazy" in bot.invo.st.followed and "invo:lazy" not in bot.invo.st.paused_leaders)
+    finally:
+        stop_bot(bot, th)
+
+
 def test_committed_size_comes_from_entrySize_not_the_price_dependent_positionSize():
     pump, eth = invo.parse_calls(fixture("invo_investments_open.json"))
     assert pump.entry_size == pytest.approx(0.04998597660369806) and pump.size == pytest.approx(0.0324751614)

@@ -25,6 +25,10 @@ class Risk:
     daily_loss_pct: float = 5.0
     weekly_loss_pct: float = 10.0
     max_leverage: float = 10.0
+    # trailing stop (owner request 2026-10-10): once the price is trail_after_pct in our favour, the stop follows it
+    # trail_pct behind the best price seen, never below break-even (entry + round-trip fees). 0 = off
+    trail_after_pct: float = 3.0
+    trail_pct: float = 3.0
     liq_buffer_mult: float = 3.0          # liquidation distance >= this x stop distance
     max_leaders: int = 7
     max_positions: int = 10
@@ -273,6 +277,8 @@ CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
     ("risk", "daily_loss_pct"): (0.1, 5.0),
     ("risk", "weekly_loss_pct"): (0.1, 10.0),
     ("risk", "max_leverage"): (1, 10),
+    ("risk", "trail_after_pct"): (0.0, 50.0),
+    ("risk", "trail_pct"): (0.2, 20.0),
     ("risk", "liq_buffer_mult"): (3.0, 100.0),
     ("risk", "max_leaders"): (0, 7),
     ("risk", "max_positions"): (0, 10),
