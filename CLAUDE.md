@@ -88,7 +88,7 @@ instances on the same wallet.
   never reaches the main wallet. /pause, /resume and /flatten act on every wallet.
 - Lag = exchange-clock time of our paper fill minus the leader's fill time.
 - Mirror side wallet (owner request 2026-10-09): `mirror_x10` in `data/wallets/`, sized by `Bot.mirror_size` =
-  leader's new position notional / its perp account value (leverage included) x `risk.mirror_mult` (10) x our
+  leader's new position notional / (its perp account value + spot stablecoins, since 2026-10-10) (leverage included) x `risk.mirror_mult` (10) x our
   equity, lifted to `min_notional_usd` (so small bets are not skipped). Limits = a `mirror_limits_pct` (5%) side
   wallet's (they clamp big bets). Account values of followed leaders: `sync_worker` every 5 min (BULK); unknown value
   -> the fixed 1% risk size (log `mirror_size_fallback`). Adds/reduces follow `k` like every wallet. Shown in
@@ -195,6 +195,13 @@ instances on the same wallet.
 - The bot must use its OWN Invo account (rotation: a browser and the bot on one login log each other out). The owner
   gets the refresh token with a DevTools console snippet (README) that decrypts `FlutterSecureStorage.REFRESH_TOKEN`
   (AES-GCM, key in `localStorage.FlutterSecureStorage`) and copies it; `tools/invo_check.py` verifies it.
+
+## Account value = perp + spot stablecoins (bug found live 2026-10-10)
+- `/hyperadd` scored with the PERP account value only while the daily search used the leaderboard value, so the same
+  wallet passed the search (3% drop) and failed /hyperadd (max_drawdown>30%): 0x6d73... had 1,481$ in perps and
+  50,626$ USDC in spot (spot USDC backs perps; its `hold` is margin). Now `Scorer.handle_adds` uses
+  `Info.account().value + Info.spot_usd()` (`hl.parse_spot_usd`, fixture `spot_clearinghouse_state.json`), never below
+  the screened leaderboard value; the mirror wallet's leader values add spot stablecoins too.
 
 ## Trailing stop and Invo trader drops (owner request 2026-10-10)
 - `risk.trail_after_pct` / `trail_pct` (3 / 3): `PositionManager.trail` (called from `check_stops` every tick) moves the

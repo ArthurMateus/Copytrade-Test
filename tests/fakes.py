@@ -65,6 +65,7 @@ class FakeHL:
         self.positions: dict[str, dict[str, float]] = {}     # user -> {coin: szi}
         self.fills: dict[str, list[dict]] = {}               # user -> raw fills (any order)
         self.candles: dict[str, list[dict]] = {}             # coin -> raw candles
+        self.spot_usdc: dict[str, float] = {}                # user -> USDC in its spot wallet
         self.leaderboard = fixture("leaderboard_sample.json")
         self.requests: list[dict] = []
         self.fail_429 = 0
@@ -142,6 +143,13 @@ class FakeHL:
             if self.book_fail:
                 return 500, None
             return 200, make_book(body["coin"], self.mids[body["coin"]])
+        if t == "spotClearinghouseState":
+            sp = fixture("spot_clearinghouse_state.json")
+            if body["user"].lower() not in self.spot_usdc:
+                return 200, {"balances": []}
+            sp["balances"] = [b | {"total": str(self.spot_usdc[body["user"].lower()])} if b["coin"] == "USDC" else b
+                              for b in sp["balances"] if b["coin"] in ("USDC", "HYPE")]
+            return 200, sp
         if t == "clearinghouseState":
             ch = fixture("clearinghouse_state.json")
             tmpl = ch["assetPositions"][0]

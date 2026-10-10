@@ -5,7 +5,7 @@ import pytest
 
 from copybot import config, hl
 from copybot.selection import HOUR, Scorer, select
-from tests.fakes import FakeHL
+from tests.fakes import FakeHL, fixture
 from tests.gen import trader
 
 CFG = config.load("config", env={})
@@ -334,6 +334,25 @@ def test_hyperadd_checks_one_wallet_now_and_reports_the_result(scorer_env):
     assert not (score or {}).get("eligible")
     _, _, screened, score, _, _ = added["0x" + "77" * 20]                # no trades at all
     assert screened is not None and not screened["ok"] and score is None
+
+
+def test_spot_stablecoins_are_part_of_the_account_and_hyperadd_agrees_with_the_daily_search(scorer_env):
+    """Found live 2026-10-10: /hyperadd scored on the perp account only (1,481$) while the wallet held 50,626$ USDC in
+    spot (backing its perps), so a 3% drop looked like 30%+. Now: perp + spot stablecoins, never below the leaderboard
+    value the daily search used."""
+    sp = fixture("spot_clearinghouse_state.json")
+    assert hl.parse_spot_usd(sp) == pytest.approx(50626.55143655)          # USDC only: HYPE/UBTC/UETH are not cash
+    fake, cfg, info, tmp, good, bad = scorer_env
+    out = queue.Queue()
+    sc = Scorer(cfg, info, out, tmp / "cache")
+    perp = info.account(good[0]).value
+    fake.spot_usdc[good[0].lower()] = 50_000.0
+    sc.add_q.put(good[0])
+    sc.screened[bad[0]] = {"ok": True, "account_value": 1e9, "ts": sc.now(), "v": 99}     # its leaderboard value
+    sc.add_q.put(bad[0])
+    sc.handle_adds()
+    assert sc.screened[good[0]]["account_value"] == pytest.approx(perp + 50_000.0)
+    assert sc.screened[bad[0]]["account_value"] == 1e9
 
 
 def test_report_only_mode_never_joins_or_swaps_but_bad_leaders_still_leave():

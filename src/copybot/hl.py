@@ -150,6 +150,16 @@ class Account:
     positions: tuple = ()        # OpenPos, non-zero only
 
 
+STABLES = ("USDC", "USDT", "USDT0", "USDH", "USDE")
+
+
+def parse_spot_usd(obj: dict) -> float:
+    """spotClearinghouseState -> the stablecoins in the spot wallet (USD). On Hyperliquid spot USDC also backs perp
+    positions (its `hold` part is margin), so it is part of what a trader trades with (found 2026-10-10: a wallet with
+    1,481$ in perps and 50,626$ USDC in spot looked like it had lost 30% when only the perp value was counted)."""
+    return sum(float(b.get("total") or 0) for b in (obj or {}).get("balances", []) if b.get("coin") in STABLES)
+
+
 def parse_account(obj: dict) -> Account:
     """clearinghouseState -> perp account value and open positions with their unrealized pnl."""
     ps = tuple(OpenPos(p["coin"], float(p["szi"]), float(p.get("positionValue") or 0),
@@ -337,6 +347,10 @@ class Info:
     def account(self, user: str, timeout: float = 20.0) -> Account:
         """A leader's live account for scoring (BULK: never competes with exits)."""
         return parse_account(self.post({"type": "clearinghouseState", "user": user}, BULK, timeout))
+
+    def spot_usd(self, user: str, timeout: float = 20.0) -> float:
+        """Stablecoins in the user's spot wallet (BULK)."""
+        return parse_spot_usd(self.post({"type": "spotClearinghouseState", "user": user}, BULK, timeout))
 
     def meta(self, cls: str = CRITICAL, timeout: float = 5.0) -> dict[str, Asset]:
         return parse_meta(self.post({"type": "metaAndAssetCtxs"}, cls, timeout))

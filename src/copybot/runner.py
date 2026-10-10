@@ -92,7 +92,7 @@ class Bot:
         self.sides = [SideWallet(cfg, r, self.data, side_broker, self.health, self.mids, self.assets,
                                  alts_ok=self.gate.alts_ok, score_of=self.score_of)
                       for r in cfg.risk.side_wallets_risk_pct]
-        self.leader_value: dict[str, float] = {}   # followed leader -> perp account value (refreshed every 5 min)
+        self.leader_value: dict[str, float] = {}   # followed leader -> perp value + spot stablecoins (every 5 min)
         if cfg.risk.mirror_wallet:
             m = cfg.risk.mirror_mult
             self.sides.append(SideWallet(cfg, cfg.risk.mirror_limits_pct, self.data, side_broker, self.health,
@@ -518,7 +518,8 @@ class Bot:
                     last_values = time.time()
                     for leader in sorted(self.st.followed):        # BULK class: never competes with exits
                         try:
-                            self.leader_value[leader] = self.info.account(leader, timeout=10).value
+                            self.leader_value[leader] = (self.info.account(leader, timeout=10).value
+                                                         + self.info.spot_usd(leader, timeout=10))
                         except Exception as e:
                             log.warn("leader_value_failed", leader=leader, err=f"{type(e).__name__}"[:60])
             except Exception as e:

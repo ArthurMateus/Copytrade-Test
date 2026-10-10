@@ -1,0 +1,65 @@
+{
+ "balances": [
+  {
+   "coin": "USDC",
+   "token": 0,
+   "total": "50626.55143655",
+   "hold": "6824.873941",
+   "entryNtl": "0.0"
+  },
+  {
+   "coin": "HYPE",
+   "token": 150,
+   "total": "0.17021168",
+   "hold": "0.0",
+   "entryNtl": "9.47722185"
+  },
+  {
+   "coin": "UBTC",
+   "token": 197,
+   "total": "0.5997840005",
+   "hold": "0.0",
+   "entryNtl": "47797.2"
+  },
+  {
+   "coin": "UETH",
+   "token": 221,
+   "total": "8.000144338",
+   "hold": "0.0",
+   "entryNtl": "14932.74704366"
+  },
+  {
+   "coin": "USDE",
+   "token": 235,
+   "total": "0.0",
+   "hold": "0.0",
+   "entryNtl": "0.0"
+  },
+  {
+   "coin": "USDT0",
+   "token": 268,
+   "total": "0.0",
+   "hold": "0.0",
+   "entryNtl": "0.0"
+  },
+  {
+   "coin": "USDH",
+   "token": 360,
+   "total": "0.0",
+   "hold": "0.0",
+   "entryNtl": "0.0"
+  },
+  {
+   "coin": "+107580",
+   "total": "0.0",
+   "hold": "0.0",
+   "entryNtl": "0.0"
+  }
+ ],
+ "tokenToAvailableAfterMaintenance": [
+  [
+   0,
+   "44536.83058555"
+  ]
+ ]
+}

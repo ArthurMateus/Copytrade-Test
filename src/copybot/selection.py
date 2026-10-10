@@ -193,11 +193,15 @@ class Scorer:
                 a = self.add_q.get_nowait()
             except queue.Empty:
                 return
+            # the money it trades with: perp account + spot stablecoins (spot USDC backs perps on Hyperliquid), and
+            # never less than the leaderboard value the daily search scored it with (so both checks agree)
+            prev = float((self.screened.get(a) or {}).get("account_value") or 0.0)
             try:
-                av = self.info.account(a).value
+                av = self.info.account(a).value + self.info.spot_usd(a)
             except Exception as e:
                 log.warn("add_account_failed", addr=a, err=str(e))
                 av = 0.0
+            av = max(av, prev)
             self.screened.pop(a, None)
             self.screen_and_score(a, av)
             log.info("added_checked", addr=a, screened=a in self.screened, scored=a in self.scores)
