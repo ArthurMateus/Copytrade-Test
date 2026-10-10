@@ -224,7 +224,7 @@ instances on the same wallet.
 - **FOMO daily picks by a scheduled Claude task (owner request 2026-10-10, owner dropped Helius).** Scheduled task
   `fomo-daily-picks` (13:00 local, on the owner's Claude PC, ~/.claude/scheduled-tasks) uses Claude in
   Chrome (owner's Chrome, signed in to fomo.family; the task must NEVER sign in itself: it stops and asks):
-  `tools/fomo_collect.js` (in the tab: leaderboards 24h/7d/30d -> last 100 swaps of the best 150 -> USDC/USDT legs ->
+  `tools/fomo_collect.js` (in the tab: leaderboards 24h/7d/30d -> last 100 swaps of every board trader (up to 400) -> USDC/USDT legs ->
   loose pre-screen) -> `fomoSend()` navigates the tab to `tools/fomo_receive.py` on 127.0.0.1:8765 with the data in the
   #fragment (the extension truncates results ~1000 chars and blocks base64; fomo.family's CSP blocks fetch/iframe to
   localhost; popups are blocked) -> `tools/fomo_picks.py score` (copybot.sol.scoring.full_score, config/sol.toml

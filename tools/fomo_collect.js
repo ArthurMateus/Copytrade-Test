@@ -9,7 +9,7 @@
 // call fomoSend(): the tab navigates to the local receiver with the data in the #fragment and it is saved to disk.
 window.__fomoProgress = { phase: "starting", checked: 0 };
 window.__fomoRun = (async () => {
-  const MAX = 150;                     // traders whose swaps are read
+  const MAX = 400;                     // traders whose swaps are read (the three boards hold ~350 together)
   const GAP_MS = 700;                  // spacing between requests (be gentle with FOMO)
   const H = { "app-language": "en", "x-supported-chains": "1399811149" };
   const SOLNET = 1399811149;

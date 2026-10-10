@@ -2,7 +2,7 @@
 
 Steps (the daily Claude task runs them; see tools/fomo_collect.js for step 1):
   1. in a signed-in fomo.family tab, tools/fomo_collect.js reads the 24h/7d/30d leaderboards and the last 100 swaps
-     of the best 150 traders, and keeps the ones not clearly failing; each chunk is saved as
+     of every leaderboard trader (up to 400), and keeps the ones not clearly failing; each chunk is saved as
      reports/fomo/<day>/chunk_<n>.json
   2. uv run python tools/fomo_picks.py score  [day]  -> copybot.sol.scoring.full_score with config/sol.toml, unchanged
   3. uv run python tools/fomo_picks.py wallets [day] -> each pick's real Solana wallet (free public Solana endpoint)
