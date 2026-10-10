@@ -197,6 +197,30 @@ instances on the same wallet.
   gets the refresh token with a DevTools console snippet (README) that decrypts `FlutterSecureStorage.REFRESH_TOKEN`
   (AES-GCM, key in `localStorage.FlutterSecureStorage`) and copies it; `tools/invo_check.py` verifies it.
 
+## Daily picks, report-only searches (owner request 2026-10-09)
+- `selection.auto_follow` and `sol.auto_follow` = false (default): `select()` (HL) never joins or swaps for rank, only
+  drops paused / no-longer-eligible leaders; `sol/hysteresis.select` likewise (every bad one leaves; owner picks kept);
+  `SolBot.on_review` re-picks only after `/fomosearch`. `/hypersearch` and `/fomosearch` still re-pick on request.
+  Tests that cover the automatic flow set auto_follow = true (`tests/test_selection.CFG`, `test_sol_e2e.Env(auto=)`).
+- No blacklist: the drop cooldown only limits automatic joins; `/hyperadd` / `/fomoadd` of a paused leader that passes
+  writes a `follow` event (clears the pause; side wallets lift it in `sync_leaders`/`sync`).
+- `copybot/picks.py`: `Book`/`Entry`, `render` (🆕/✅/❌ vs the previous DAILY report, follow command in `<code>`),
+  `Store` = `data/picks.json` (UI memory, not ledger state). `Bot.tick` sends it once a day after `picks.hour` (13, local
+  via `telegram.utc_offset_hours`) and >= 3 min after a start (`picks.due`); `/picks` sends it without saving.
+  Builders: `Bot.hyper_book`, `SolBot.picks_book(n, prev)`, `Bot.invo_book`.
+- Invo search `copybot/invo_scorer.py` (`InvoScorer` thread, cache `data/cache/invo/scores.json`): candidates =
+  followed + `usernames()` of `/trending/get_portfolios_pl` (filter trending/month/all_time, `{"filter", "params":
+  {page,size}}`) and `/trending/get_users` (`{page,size}`) - request bodies recorded 2026-10-09, ANSWERS NOT RECORDED
+  (the parser walks any JSON for `username`; log `invo_discovered traders=N`: 0 means the shape changed); closed calls
+  via `get_investments isOpen:false` paged by 50. `calls_to_fills`: each call = its own pseudo-coin `"ETH|n"` (two
+  synthetic fills, size = exposure x BASE 10,000 / entry), candles = the coin's 1h candles sliced to the call
+  (`Scorer.candles`, now locked), open calls = `Account` positions at live mids -> `scoring.full_score` with the HL
+  `ScoreParams` (coins=None) + Invo gates (`min_hl_share`, `min_hold_min`, `max_idle_days`). `("invo_review", n,
+  scores, fails)`: a followed trader failing `invo.drop_after_fails` (2) searches in a row is unfollowed. The client is
+  shared with the watcher (`_auth_lock`: one token refresh at a time, rotation-safe).
+- Claude still does browser deep dives (FOMO handles -> wallets) only when asked in a session; the daily work is the
+  bot's (it has the keys, the caches and the exact scoring), not a scheduled Claude task.
+
 ## Command families and resets (2026-10-08)
 - Hyperliquid: `/hyper<x>`; FOMO book: `/fomo<x>` (`tg.ALIASES`/`canon` turn every name into one canonical name
   before `Bot.command`; `/fomo*` goes to `SolBot.command`). Discord lists only `/hyper*`, `/fomo*`, `/help`, `/restart`.

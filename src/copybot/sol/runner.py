@@ -16,7 +16,7 @@ import time
 import shutil
 from pathlib import Path
 
-from copybot import log, tgfmt
+from copybot import log, picks, tgfmt
 from copybot.tgfmt import esc, fusd
 from copybot.config import Config
 from copybot.ledger import Ledger, now_ms
@@ -390,7 +390,7 @@ class SolBot:
         self.scores = scores
         searched, self.search_pending = self.search_pending, False
         plan = None
-        if (searched or not self.st.followed) and ranking and self.auth_ok:
+        if (searched or (not self.st.followed and self.c.auto_follow)) and ranking and self.auth_ok:
             plan = rebalance(self.st.sel, ranking, self.st.followed, set(self.st.paused_leaders), self.st.dropped,
                              now_ms(), self.c, keep=self.st.picked)
             self.apply_plan(plan, scores)
@@ -416,10 +416,12 @@ class SolBot:
                          f"{score.get('trades', 0)} trades in {self.c.history_days} days · "
                          f"{score.get('win_rate', 0) * 100:.0f}% win · PF {score.get('profit_factor', 0):.2f} · "
                          f"{fusd(score.get('pnl', 0))}. Not followed; it is re-checked at every search.")
+        elif a in self.st.paused_leaders:          # no blacklist: the owner's re-add lifts the pause
+            self.rec({"ev": "follow", "leader": a, "rank": self.ranks.get(a)})
+            self.ui.send(f"▶️ 🪙 /fomoadd {who} passes ({score.get('score', 0) * 100:.0f} pts): its pause is lifted, "
+                         "copying again.")
         elif a in self.st.followed:
             self.ui.send(f"✅ 🪙 /fomoadd {who} passes ({score.get('score', 0) * 100:.0f} pts) and is already followed.")
-        elif a in self.st.paused_leaders:
-            self.ui.send(f"⏸️ 🪙 /fomoadd {who} passes but is paused after a bad streak of ours. Not followed.")
         elif len(self.st.followed) >= self.c.max_leaders:
             self.ui.send(f"✅ 🪙 /fomoadd {who} passes ({score.get('score', 0) * 100:.0f} pts), but you already follow "
                          f"{len(self.st.followed)}. It competes at the next search (/fomosearch).")
@@ -451,6 +453,28 @@ class SolBot:
                          ]))
         self.rec({"ev": "sel", "state": plan.state})
         self.scorer.focus = set(self.st.followed)
+
+    def picks_book(self, n: int, prev: dict | None = None) -> picks.Book:
+        """The FOMO part of the daily picks (read by the main loop: only whole-replaced values are used). `prev`:
+        the previous report's FOMO part (to say why a wallet left the list)."""
+        sc, ranks = self.scores, self.ranks
+        rank = [a for a, _ in sorted(ranks.items(), key=lambda x: x[1]) if sc.get(a, {}).get("eligible")][:n]
+        es = [picks.Entry(a, fmt.who(a, self.handle_of(a)), sc[a].get("score", 0) * 100, (
+            f"{sc[a].get('win_rate', 0) * 100:.0f}% win · PF {min(sc[a].get('profit_factor', 0), 99):.1f} · "
+            f"{sc[a].get('trades', 0)} trades · {sc[a].get('copy_edge_pct', 0):+.1f}% per trade after costs · "
+            f"median hold {sc[a].get('median_hold_s', 0) / 60:.0f} min"), f"/fomoadd {a}", a in self.st.followed)
+            for a in rank]
+        gone = {}
+        for a in (prev or {}).get("ids", []):
+            s = sc.get(a)
+            if s and not s.get("eligible"):
+                gone[a] = "fails: " + ", ".join(fmt.reject_text(r) for r in s.get("reasons", [])[:3])
+            elif a in ranks:
+                gone[a] = f"still passes, now #{ranks[a]}"
+        n_el = sum(1 for s in sc.values() if s.get("eligible"))
+        status = (f"search: {fmt.search_line(self.scorer.progress, 0)} · {len(sc)} wallets scored · {n_el} pass"
+                  + ("" if self.scorer.auto_search else " · no daily search without HELIUS_API_KEY"))
+        return picks.Book("fomo", "🪙 FOMO", es, status, gone)
 
     # ---- notifications from the trader ----------------------------------------------------------------------
     def on_notify(self, kind: str, **kw) -> None:

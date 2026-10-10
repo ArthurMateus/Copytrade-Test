@@ -36,10 +36,10 @@ FOMO_COMMANDS = ("/fomo", "/fomotrades", "/fomotraders", "/fomowallet", "/fomopo
                  "/fomoadd", "/fomofollow", "/fomounfollow", "/fomowallets")
 INVO_COMMANDS = ("/invo", "/invotrades", "/invotraders", "/invowallets", "/invofollow", "/invounfollow")
 COMMANDS = ("/status", "/trades", "/traders", "/wallets", "/positions", "/leaders", "/progress", "/search", "/pause",
-            "/resume", "/flatten", "/reset", "/restart", "/help", "/add") + tuple(ALIASES) + FOMO_COMMANDS \
+            "/resume", "/flatten", "/reset", "/restart", "/help", "/add", "/picks") + tuple(ALIASES) + FOMO_COMMANDS \
     + INVO_COMMANDS
 # what Discord shows in its slash-command list (the short Hyperliquid originals stay Telegram-only)
-SLASH_COMMANDS = ("/help", "/restart") + HYPER_COMMANDS + FOMO_COMMANDS + INVO_COMMANDS
+SLASH_COMMANDS = ("/help", "/restart", "/picks") + HYPER_COMMANDS + FOMO_COMMANDS + INVO_COMMANDS
 PIN_COMMANDS = ("/flatten", "/reset", "/fomoflatten", "/fomoreset")
 WALLET_COMMANDS = ("/add", "/fomoadd", "/fomofollow", "/fomounfollow", "/invofollow", "/invounfollow")       # take a wallet address as their argument
 ONCE = ("/reset", "/restart", "/flatten", "/fomoflatten", "/fomoreset")   # never acted on twice after a restart
@@ -304,6 +304,8 @@ HELP = ("🤖 <b>Copybot (paper)</b>\n\n"
         "/hyperpause · /hyperresume – new entries (exits always run)\n"
         "/hyperflatten &lt;PIN&gt; – close everything and pause\n"
         "/hypersearch – look for new traders now and re-pick the best 7\n"
+        "/picks – the best traders of each book under the strict rules (also sent daily at 13h), with the follow "
+        "commands\n"
         "/hyperadd 0x… – check one wallet with the strict rules, follow it if it passes\n"
         "/invo · /invotrades · /invotraders · /invowallets – the Invo wallets (live cards)\n"
         "/invofollow &lt;user&gt; · /invounfollow &lt;user&gt; – copy Invo traders' posted calls (paper)\n"

@@ -1,0 +1,4 @@
+# The daily picks report: the best traders of each book (Hyperliquid, FOMO, Invo) that pass every rule, compared
+# with the previous day's report, each with the command that follows it. /picks sends it at any time.
+hour = 13.0               # local time (telegram.utc_offset_hours) of the daily report  [0, 23.99]
+top_n = 7                 # traders shown per book (fewer when fewer pass)               [1, 20]

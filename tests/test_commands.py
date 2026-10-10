@@ -14,7 +14,7 @@ from copybot.tg import ALIASES, COMMANDS, FOMO_COMMANDS, HYPER_COMMANDS, ONCE, P
 PIN = "2468"
 A, B = "LeaderAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1", "LeaderBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB2"
 HL_HANDLED = {"/status", "/trades", "/traders", "/wallets", "/positions", "/leaders", "/progress", "/search", "/pause",
-              "/resume", "/flatten", "/reset", "/restart", "/help", "/add", "/invo", "/invotrades", "/invotraders", "/invowallets", "/invofollow", "/invounfollow"}
+              "/resume", "/flatten", "/reset", "/restart", "/help", "/add", "/invo", "/invotrades", "/invotraders", "/invowallets", "/invofollow", "/invounfollow", "/picks"}
 FOMO_HANDLED = set(FOMO_COMMANDS)
 
 

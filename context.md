@@ -16,6 +16,13 @@ decisions) and README.md first. ~298 tests pass (`uv run pytest`, ~3 min). Every
   Working on the owner's PC since 2026-10-09 (`tools/invo_check.py` OK) after one fix: the token refresh is
   GET /v1_0/auth/refresh_token (POST answers 405). `/invofollow <user>`, `/invounfollow <user>`, `/invo`.
 
+## Daily picks (2026-10-10)
+- The bot no longer follows by itself (`auto_follow = false`): it sends the best 7 per book at 13:00 local
+  (`/picks` any time) with the follow commands; the owner follows. Invo has its own daily search with the HL scoring
+  (`copybot/invo_scorer.py`). Bad traders still leave automatically; re-adding works (no blacklist). See CLAUDE.md.
+- The Invo ranking ANSWER shape was never recorded (only the request bodies): if `invo_discovered traders=0` shows in
+  the log, record one answer (DevTools on app.invoapp.com/discover) and fix `invo.usernames` / add a fixture.
+
 ## How Claude helps pick traders (only when the owner asks in a session; never on a schedule)
 - FOMO: owner signs in to fomo.family in the browser pane; read the 7d/30d ranking and each candidate's last 100
   swaps in the signed-in tab (FOMO caps at 100), vet (win rate, PF, best-trade share, pace, USDC share), then find

@@ -5,6 +5,8 @@ evolve on their own.
   drop  when rank >  drop_rank (or not eligible) for `confirm_cycles` cycles AND followed >= min_follow_hours,
         or when the leader is paused (bad streak)
   at most ONE drop (with its replacement) per cycle; a dropped leader cannot rejoin during the cooldown.
+With `sol.auto_follow` = false (the default since 2026-10-09) nobody joins and nobody is dropped for rank: only paused
+wallets and wallets no longer passing the rules (for `confirm_cycles`) leave. The owner follows from the daily picks.
 """
 from __future__ import annotations
 
@@ -27,6 +29,7 @@ def select(sel: dict, ranking: list[str], followed: dict[str, int], paused: set[
            now_ms: int, c: Sol, keep=frozenset()) -> Plan:
     """`keep`: owner picks (/fomofollow), never dropped for their rank (only when paused after a bad streak)."""
     streaks = dict(sel.get("streaks", {}))
+    auto = c.auto_follow
     rank = {a: i + 1 for i, a in enumerate(ranking)}
     new: dict[str, dict] = {}
     for a in set(streaks) | set(followed) | set(ranking[: c.drop_rank + 5]):
@@ -40,10 +43,16 @@ def select(sel: dict, ranking: list[str], followed: dict[str, int], paused: set[
     for a, since in followed.items():
         if a in paused:
             cands.append((0, -rank.get(a, 10**6), a, "paused after a bad streak"))
+        elif not auto:
+            if a not in keep and a not in rank and new.get(a, {}).get("drop", 0) >= c.confirm_cycles:
+                cands.append((0, 0, a, f"no longer passes the rules for {c.confirm_cycles} cycles"))
         elif (a not in keep and new.get(a, {}).get("drop", 0) >= c.confirm_cycles
               and now_ms - since >= c.min_follow_hours * HOUR):
             cands.append((1, -rank.get(a, 10**6), a, f"rank > {c.drop_rank} for {c.confirm_cycles} cycles"))
     cands.sort()
+    if not auto:                      # report-only: every bad leader leaves, nobody joins
+        return Plan([], [(a, why) for _, _, a, why in cands],
+                    {"streaks": new, "cycles": int(sel.get("cycles", 0)) + 1, "at": now_ms})
     cooldown = c.dropped_cooldown_days * DAY
     joinable = [a for a in ranking if a not in followed and new.get(a, {}).get("join", 0) >= c.confirm_cycles
                 and now_ms - dropped.get(a, -10**15) >= cooldown]

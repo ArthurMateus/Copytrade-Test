@@ -10,4 +10,17 @@ size_mult = 1.0           # our exposure = their size x leverage x this, of our 
 max_risk_pct = 2.0        # one copy never risks more than this % of our 300$ at our 3% stop (2% = 200$ max) [0.1, 20]
 limits_pct = 5.0          # the wallet's risk limits = a side wallet at this risk level              [0.5, 20]
 max_traders = 7           #                                                                         [0, 20]
-risk_wallets_pct = [1.0, 2.0, 5.0, 10.0, 20.0]   # fixed-risk Invo wallets next to the trader-size one (/invowallets)
+risk_wallets_pct = [1.0, 2.0, 5.0, 10.0, 20.0]
+# The daily Invo search: Invo's Discover rankings -> each trader's closed calls -> the SAME scoring as Hyperliquid
+# wallets (win rate, profit factor, no single trade > 30% of profit, drawdowns, score >= 70 ...), shown in the
+# daily picks (13h, /picks). It only reports: you follow with /invofollow.
+search = true
+review_hours = 24.0       # one search per this many hours                                          [1, 168]
+discover_pages = 3        # pages of 20 read from each Discover ranking                             [0, 20]
+max_candidates = 150      # traders scored per search (followed ones are always re-checked)        [0, 1000]
+history_days = 180        # closed calls this old count                                             [30, 180]
+max_calls = 600           # closed calls read per trader at most                                    [50, 5000]
+min_hl_share = 0.5        # at least this share of its calls on coins Hyperliquid lists             [0, 1]
+min_hold_min = 15.0       # median call at least this long (shorter cannot be copied)               [0, 1440]
+max_idle_days = 14.0      # its newest call at most this old                                        [1, 90]
+drop_after_fails = 2      # a followed trader failing the rules this many searches in a row leaves  [1, 10]   # fixed-risk Invo wallets next to the trader-size one (/invowallets)

@@ -41,6 +41,7 @@ DESCRIPTIONS = {
     "/hypersearch": "Hyperliquid: look for new traders now and re-pick the best 7",
     "/hyperreset": "Hyperliquid: every wallet back to the start, no open trades, traders kept (needs the PIN)",
     "/restart": "Restart the bot",
+    "/picks": "Daily picks: the best traders of each book under the strict rules, with the follow commands",
     "/help": "List the commands",
     "/fomo": "FOMO/Solana book: equity, P&L and health (live)",
     "/fomotrades": "FOMO: open trades at live prices and P&L vs the start (live)",

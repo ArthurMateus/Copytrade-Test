@@ -1,4 +1,6 @@
 # Leader selection and hysteresis.
+auto_follow = false           # false: the search only REPORTS the best wallets (daily picks at 13h, /picks); you
+                              # follow them with /hyperadd. Bad leaders still leave by themselves. true = the old way.
 rescore_minutes = 60.0        # one selection cycle                          [0.05, 1440]
 min_scored_to_start = 12      # start following once this many candidates are fully scored
 join_rank = 7                 # join when rank <= this (the top 7) ...      [1, 8]

@@ -67,9 +67,19 @@ time in one process, each with its own family of commands:
 | `/hyperflatten <PIN>` | `/fomoflatten <PIN>` | close everything of that book and pause it |
 | `/hyperreset <PIN>` | `/fomoreset <PIN>` | that book back to the start ($300, no history, traders kept, old history archived; refused while a trade is open) |
 
-Plus `/help` and `/restart`. The short Hyperliquid names (`/status`, `/trades`, `/reset`, ...) still work on Telegram.
+Plus `/picks`, `/help` and `/restart`. The short Hyperliquid names (`/status`, `/trades`, `/reset`, ...) still work on Telegram.
 Each open trade gets one message, which is edited until it becomes the final ✅/❌ summary. A reset restarts the
 process, so run the bot in the restart loop below. `/hyperreset` never touches FOMO and `/fomoreset` never touches Hyperliquid.
+
+**Daily picks (since 2026-10-10): the bot reports, you follow.** The searches no longer follow anyone by themselves
+(`auto_follow = false` in `config/selection.toml` and `config/sol.toml`). Every day at 13:00 (your time,
+`config/picks.toml`) the bot sends one message per book (Hyperliquid, FOMO, Invo) with the best 7 traders that pass
+every rule (fewer when fewer pass), each with the command that follows it (`/hyperadd 0x…`, `/fomoadd …`,
+`/invofollow …`, tap it to copy), compared with the day before: 🆕 new, ✅ still in, ❌ left (and why). `/picks` sends the
+same report at any time. Bad traders still leave by themselves: paused after a bad streak of copies, or no longer
+passing the rules (Hyperliquid/FOMO: 2 hourly checks; Invo: 2 daily searches). That is not a blacklist: adding one again
+(`/hyperadd`, `/fomoadd`, `/invofollow`) works at once, and lifts its pause if it passes. `/hypersearch` and
+`/fomosearch` still re-pick the best 7 at once when YOU ask for it.
 
 **Is the trader losing right now?** Besides the long history, a Hyperliquid wallet is only eligible if it is not in a bad
 stretch: at most 3% of its account lost in 7 days (open losses count), 1.5% in 24 hours, no more than 4 losing round
@@ -183,6 +193,16 @@ FIXED risk of 1%, 2%, 5%, 10% and 20% of their own $300 per trade (our 3% stop: 
 **Use a SEPARATE Invo account for the bot.** The bot logs in with a refresh token; every renewal replaces it, so the
 bot and a browser sharing one login keep logging each other out, and if Invo objects to automated reading only that
 account is affected.
+
+**The daily Invo search.** Invo traders are scored with the SAME rules and points as Hyperliquid wallets: each of
+their closed calls of the last 180 days becomes one trade (their size x leverage, what it made), open calls count at
+live prices, and `scoring.full_score` applies win rate >= 45%, profit factor >= 2, no single trade above 30% of the
+profit, drawdowns, this week / today, losing streak, recent win rate, edge after our costs (our 3% stop checked on 1h
+candles) and score >= 70. Invo-only rules on top: most calls on coins Hyperliquid lists, calls not shorter than 15
+minutes (median), a call in the last 14 days. Candidates come from Invo's Discover rankings (trending, this month,
+all time, trending users) plus the traders you follow. It reads with the bot's own Invo login, about one request a
+second, once a day (`config/invo.toml`: `search`, `max_candidates`, ...). The very first search starts when the bot
+starts and its result is posted as soon as it ends.
 
 ### Setup (once)
 1. In Chrome, open an **Incognito window** (Ctrl+Shift+N), go to https://app.invoapp.com and sign in with the bot's

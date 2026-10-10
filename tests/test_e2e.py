@@ -441,3 +441,23 @@ def test_mirror_wallet_sizes_copies_by_the_leaders_share_of_its_account(env):
         assert wait_for(lambda: any("mirror x10 (their % of account)" in m["text"] for m in tg.sent + tg.edits))
     finally:
         stop_bot(bot, th)
+
+
+def test_rankings_only_report_and_picks_lists_them_with_the_follow_command(env):
+    """selection.auto_follow = false (default): a new ranking follows nobody; /picks shows the best with /hyperadd."""
+    hl, tg, data, cdir = env
+    bot, th = start_bot(env)
+    try:
+        scores = {a: {"eligible": True, "score": 90 - i, "trades": 100, "win_rate": 0.7, "profit_factor": 3,
+                      "max_dd": 0.1} for i, a in enumerate(TOP)}
+        bot.q.put(("ranking", TOP, len(TOP), scores))
+        assert wait_for(lambda: bot.ranking == TOP)
+        time.sleep(0.5)
+        assert set(bot.st.followed) == {LEADER}                 # nobody joined (LEADER not ranked: 1 bad cycle only)
+        tg.say("/picks")
+        assert wait_for(lambda: any("Daily picks · 🔷 Hyperliquid" in m["text"] for m in tg.sent))
+        msg = next(m["text"] for m in tg.sent if "Daily picks · 🔷 Hyperliquid" in m["text"])
+        assert f"<code>/hyperadd {TOP[0]}</code>" in msg and f"/hyperadd {TOP[7]}" not in msg     # the best 7
+        assert "70% win" in msg
+    finally:
+        stop_bot(bot, th)

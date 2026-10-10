@@ -118,7 +118,8 @@ def invo_env(env, tmp_path):
     f = FakeInvo()
     tok = tmp_path / "invo.token"
     tok.write_text("REFRESH0", encoding="utf-8")
-    (cdir / "invo.toml").write_text(f'api_base = "{f.url}"\npoll_s = 1.0\n', encoding="utf-8")
+    # the daily Invo search has its own tests (test_invo_search.py): off here so it does not share the fake's login
+    (cdir / "invo.toml").write_text(f'api_base = "{f.url}"\npoll_s = 1.0\nsearch = false\n', encoding="utf-8")
     yield hl, tg, data, cdir, f, tok
     f.close()
 

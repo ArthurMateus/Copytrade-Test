@@ -15,6 +15,9 @@ API (recorded from the web app 2026-10-09, tests/fixtures/invo_*.json), all POST
                                          -> {"investmentsTicker": [{"id", "ticker", "directionLong", "leverage",
                                              "entryPrice", "priceTarget", "stopLoss", "positionSize", "isOpen",
                                              "createdAt", "closedAt", "closingPrice", "reasonClosed", ...}]}
+  /v1_0/trending/get_portfolios_pl       {"filter": "trending"|"month"|"all_time", "params": {"page", "size"}}
+  /v1_0/trending/get_users               {"page", "size"}       (the Discover rankings; the daily Invo search reads
+                                         only the usernames in them: `usernames`)
 Auth (from the app's code): requests carry "Authorization: Bearer <access token>"; GET /v1_0/auth/refresh_token with
 "Authorization: Bearer <refresh token>" answers {"accessToken", "refreshToken", "success", "error"}. Every refresh
 hands out a NEW refresh token (written back to INVO_TOKEN_FILE), which is why the bot needs its own account: two
@@ -110,6 +113,25 @@ def parse_user(body: dict) -> tuple[str, str] | None:
     return (u["id"], u.get("username", "")) if u.get("id") else None
 
 
+def usernames(body) -> list[str]:
+    """Every username in a ranking answer, in order, once (portfolios carry their trader as `owner`, user lists carry
+    users). Read structurally so a wrapper key we have not recorded yet does not lose the list."""
+    out: list[str] = []
+
+    def walk(x):
+        if isinstance(x, dict):
+            u = x.get("username")
+            if isinstance(u, str) and u and u.lower() not in out:
+                out.append(u.lower())
+            for v in x.values():
+                walk(v)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v)
+    walk(body)
+    return out
+
+
 def parse_portfolios(body: dict) -> list[Portfolio]:
     out = []
     for p in (body or {}).get("portfolios") or []:
@@ -147,6 +169,7 @@ class InvoClient:
         self.base, self.token_file = base.rstrip("/"), token_file
         self.min_interval, self.timeout = min_interval_s, timeout_s
         self._lock = threading.Lock()
+        self._auth_lock = threading.Lock()     # the watcher and the search share one login: one refresh at a time
         self._last = 0.0
         self._access = ""
 
@@ -193,22 +216,26 @@ class InvoClient:
     # ---- requests ------------------------------------------------------------------------------------
     def post(self, path: str, body: dict) -> dict:
         for attempt in range(2):
-            if not self._access:
-                self.refresh()
+            with self._auth_lock:
+                if not self._access:
+                    self.refresh()
+            used = self._access
             with self._lock:
                 wait = self._last + self.min_interval - time.monotonic()
                 if wait > 0:
                     time.sleep(wait)
                 self._last = time.monotonic()
             req = urllib.request.Request(self.base + path, json.dumps(body).encode(),
-                                         {"Authorization": "Bearer " + self._access,
+                                         {"Authorization": "Bearer " + used,
                                           "Content-Type": "application/json", "User-Agent": "copybot-paper/1"})
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as r:
                     return json.loads(r.read())
             except urllib.error.HTTPError as e:
                 if e.code == 401 and attempt == 0:
-                    self._access = ""                   # expired: refresh once and retry
+                    with self._auth_lock:               # expired: refresh once and retry (unless another thread
+                        if self._access == used:        # already did)
+                            self._access = ""
                     continue
                 if e.code in (401, 403):
                     raise InvoAuthError(f"invo refused the login (http {e.code})") from None
@@ -227,6 +254,18 @@ class InvoClient:
     def open_calls(self, portfolio_id: str) -> list[Call]:
         return parse_calls(self.post("/investments/get_investments",
                                      {"portfolioId": portfolio_id, "isOpen": True, "params": {"page": 1, "size": 50}}))
+
+    def closed_calls(self, portfolio_id: str, page: int, size: int = 50) -> list[Call]:
+        return parse_calls(self.post("/investments/get_investments",
+                                     {"portfolioId": portfolio_id, "isOpen": False,
+                                      "params": {"page": page, "size": size}}))
+
+    def ranking(self, flt: str, page: int, size: int = 20) -> list[str]:
+        """Usernames on one page of a Discover portfolio ranking ("trending", "month", "all_time")."""
+        return usernames(self.post("/trending/get_portfolios_pl", {"filter": flt, "params": {"page": page, "size": size}}))
+
+    def trending_users(self, page: int, size: int = 20) -> list[str]:
+        return usernames(self.post("/trending/get_users", {"page": page, "size": size}))
 
 
 class Watcher:

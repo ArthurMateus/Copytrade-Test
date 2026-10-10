@@ -9,6 +9,7 @@ from tests.fakes import FakeHL
 from tests.gen import trader
 
 CFG = config.load("config", env={})
+CFG.selection.auto_follow = True          # most tests here cover the automatic mode (off by default since 2026-10-09)
 NOW = 1_800_000_000_000
 
 
@@ -333,3 +334,23 @@ def test_hyperadd_checks_one_wallet_now_and_reports_the_result(scorer_env):
     assert not (score or {}).get("eligible")
     _, _, screened, score, _, _ = added["0x" + "77" * 20]                # no trades at all
     assert screened is not None and not screened["ok"] and score is None
+
+
+def test_report_only_mode_never_joins_or_swaps_but_bad_leaders_still_leave():
+    """selection.auto_follow = false (the default): the ranking only feeds the daily picks. Nobody joins, nobody is
+    swapped out for rank; paused leaders and leaders no longer eligible (2 cycles) still leave."""
+    import copy
+    cfg = copy.deepcopy(CFG)
+    cfg.selection.auto_follow = False
+    R = [f"0x{i:040x}" for i in range(1, 30)]
+    followed = {R[20]: NOW - 100 * HOUR, R[25]: NOW - 100 * HOUR, R[26]: NOW - HOUR}
+    sel = {}
+    for k in range(3):
+        ranking = R[:22]                     # R[20] eligible but rank 21 (> drop_rank): kept; R[25] not eligible
+        p = select(sel, ranking, followed, {R[26]}, {}, NOW + k * HOUR, cfg)
+        sel = p.state
+        assert p.joins == []
+        for a, _ in p.drops:
+            followed.pop(a)
+    assert set(followed) == {R[20]}          # R[26] paused: left at once; R[25] no longer eligible: left after 2 cycles
+    assert not config.load("config", env={}).selection.auto_follow

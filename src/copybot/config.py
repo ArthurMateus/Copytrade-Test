@@ -58,6 +58,9 @@ class Broker:
 
 @dataclass
 class Selection:
+    # False (owner request 2026-10-09): the search only REPORTS the best wallets (daily picks, /picks); the owner
+    # follows them with /hyperadd. Bad leaders still leave by themselves (paused, or no longer passing the rules).
+    auto_follow: bool = False
     rescore_minutes: float = 60.0
     min_scored_to_start: int = 12
     join_rank: int = 8
@@ -110,6 +113,7 @@ class Discord:
 class Sol:
     """Solana memecoin copy-trading of FOMO traders, found and followed on-chain (sol/chain.py). PAPER ONLY."""
     enabled: bool = True
+    auto_follow: bool = False             # False: searches only report (daily picks); the owner follows (/fomoadd)
     # history + discovery: slow background work on the free public endpoint (no key, no credits)
     rpc_url: str = "https://api.mainnet-beta.solana.com"
     rpc_interval_s: float = 0.3           # the public endpoint allows about 4 getTransaction per second
@@ -199,6 +203,18 @@ class Invo:
     # fixed-risk Invo wallets next to the trader-size one (owner request 2026-10-09): each copy risks this % of the
     # wallet's own 300$ at our 3% stop, whatever the trader's size
     risk_wallets_pct: list = field(default_factory=lambda: [1.0, 2.0, 5.0, 10.0, 20.0])
+    # the daily Invo search (copybot/invo_scorer.py): Invo's Discover rankings -> each trader's closed calls ->
+    # the SAME scoring as Hyperliquid wallets (scoring.full_score) plus Invo gates; results in the daily picks
+    search: bool = True
+    review_hours: float = 24.0            # one search per this many hours
+    discover_pages: int = 3               # pages of 20 read from each Discover ranking (trending, month, all time)
+    max_candidates: int = 150             # traders scored per search (followed ones always)
+    history_days: int = 180               # closed calls this old count
+    max_calls: int = 600                  # closed calls read per trader at most
+    min_hl_share: float = 0.5             # at least this share of its calls must be on coins Hyperliquid lists
+    min_hold_min: float = 15.0            # median call duration at least this (shorter cannot be copied by polling)
+    max_idle_days: float = 14.0           # its newest call is at most this old
+    drop_after_fails: int = 2             # a followed trader failing the rules this many searches in a row is dropped
 
 
 @dataclass
@@ -218,6 +234,14 @@ class Runtime:
 
 
 @dataclass
+class Picks:
+    """The daily picks report (owner request 2026-10-09): the best wallets of each book under the strict rules,
+    compared with the previous day's report. /picks sends it at any time."""
+    hour: float = 13.0                    # local time (telegram.utc_offset_hours) of the daily report
+    top_n: int = 7
+
+
+@dataclass
 class Config:
     risk: Risk = field(default_factory=Risk)
     broker: Broker = field(default_factory=Broker)
@@ -227,6 +251,7 @@ class Config:
     runtime: Runtime = field(default_factory=Runtime)
     sol: Sol = field(default_factory=Sol)
     invo: Invo = field(default_factory=Invo)
+    picks: Picks = field(default_factory=Picks)
     # secrets (env only, never logged)
     tg_token: str = field(default="", repr=False)
     tg_chat_id: str = field(default="", repr=False)
@@ -238,7 +263,7 @@ class Config:
     invo_token_file: str = field(default="", repr=False)     # INVO_TOKEN_FILE: the bot's Invo login (optional)
 
 
-SECTIONS = ("risk", "broker", "selection", "telegram", "discord", "runtime", "sol", "invo")
+SECTIONS = ("risk", "broker", "selection", "telegram", "discord", "runtime", "sol", "invo", "picks")
 
 # (section, key) -> (min, max). The documented hard ceilings; a config outside them refuses to start.
 CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
@@ -322,6 +347,17 @@ CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
     ("invo", "size_mult"): (0.1, 10.0),
     ("invo", "limits_pct"): (0.5, 20.0),
     ("invo", "max_risk_pct"): (0.1, 20.0),
+    ("invo", "review_hours"): (1.0, 168.0),
+    ("invo", "discover_pages"): (0, 20),
+    ("invo", "max_candidates"): (0, 1000),
+    ("invo", "history_days"): (30, 180),
+    ("invo", "max_calls"): (50, 5000),
+    ("invo", "min_hl_share"): (0.0, 1.0),
+    ("invo", "min_hold_min"): (0.0, 1440.0),
+    ("invo", "max_idle_days"): (1.0, 90.0),
+    ("invo", "drop_after_fails"): (1, 10),
+    ("picks", "hour"): (0.0, 23.99),
+    ("picks", "top_n"): (1, 20),
     ("invo", "max_traders"): (0, 20),
     ("sol", "max_candidates"): (1, 1000),
     ("sol", "discover_pages"): (1, 500),

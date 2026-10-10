@@ -61,6 +61,9 @@ class SideWallet:
         for a, why in main.paused_leaders.items():
             if a in self.st.followed and a not in self.st.paused_leaders:
                 self.rec({"ev": "leader_pause", "leader": a, "reason": why})
+        for a in list(self.st.paused_leaders):     # the owner lifted a pause (re-added it): lift it here too
+            if a in main.followed and a not in main.paused_leaders:
+                self.rec({"ev": "follow", "leader": a, "ts": main.followed[a]})
 
     def max_drop_pct(self, mids: dict) -> float:
         return max_drop_pct(self.st, mids)

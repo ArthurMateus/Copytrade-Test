@@ -19,10 +19,11 @@ import time
 import traceback
 from pathlib import Path
 
-from copybot import config, hl, log, tgfmt
+from copybot import config, hl, log, picks, tgfmt
 from copybot.broker import PaperBroker
 from copybot.detector import Detector, Move
 from copybot.invo import PREFIX as INVO, InvoClient, Watcher as InvoWatcher
+from copybot.invo_scorer import InvoScorer, reason_text as invo_reason
 from copybot.feed import Clock, Feed
 from copybot.ledger import Ledger, now_ms
 from copybot.positions import PositionManager
@@ -135,6 +136,17 @@ class Bot:
         if cfg.sol.enabled:
             self.sol = SolBot(cfg, self.ui, self.alert, restart=lambda: setattr(self, "restart_at", time.time() + 3))
         self.scorer = Scorer(cfg, self.info, self.q, self.data / "cache")
+        # the daily Invo search: the same scoring as the wallets, on the Invo traders' calls (copybot/invo_scorer.py)
+        self.invo_search: InvoScorer | None = None
+        self.invo_scores: dict = {}
+        if self.invo is not None and cfg.invo.search:
+            self.invo_search = InvoScorer(cfg, self.invo_watch.client, self.scorer.params, self.invo_coin,
+                                          self.scorer.candles, self.mids,
+                                          lambda: {a[len(INVO):] for a in self.invo.st.followed}, self.q,
+                                          self.data / "cache", self.stop)
+            self.invo_scores = dict(self.invo_search.scores)
+        self.picks = picks.Store(self.data / "picks.json")
+        self.started_s = time.time()     # the daily report waits a few minutes after a start (rankings load first)
         self.ranks: dict[str, int] = {}
         self.ranking: list[str] = []
         self.scores: dict = {}
@@ -255,6 +267,8 @@ class Bot:
         if self.invo_watch:
             self.sync_invo_extras()
             self.invo_watch.start()
+        if self.invo_search:
+            self.invo_search.start()
         self.scorer.focus = set(self.st.followed)
         self.scorer.start()
 
@@ -538,7 +552,13 @@ class Bot:
                 break
             self.handle(item)
             self.mids.update(self.feed.mids()[0])
-        # 3. calendar marks for the loss limits, funding
+        # 3. the daily picks report (picks.hour, local time), calendar marks for the loss limits, funding
+        if time.time() - self.started_s > 180 and                 picks.due(self.picks, time.time(), self.cfg.telegram.utc_offset_hours, self.cfg.picks.hour):
+            try:
+                self.send_picks(daily=True)
+            except Exception:
+                log.exception("picks_failed")
+                self.picks.data["sent_day"] = picks.local_day(time.time(), self.cfg.telegram.utc_offset_hours)
         now = now_ms()
         eq = self.st.equity(self.mids)
         for kind, key in (("day", day_key(now)), ("week", week_key(now))):
@@ -619,6 +639,8 @@ class Bot:
             except Exception:
                 log.exception("invo_error", kind=kind)
                 self.alert("Invo calls wallet error (logged); the other wallets are not affected", key="invo_err")
+        elif kind == "invo_review":
+            self.on_invo_review(*item[1:])
         elif kind == "invo_unknown":
             self.ui.send(f"⚠️ 🧾 No Invo user called @{tgfmt.esc(item[1])}: /invounfollow {tgfmt.esc(item[1])} and "
                          "check the name (as in app.invoapp.com/&lt;username&gt;).")
@@ -636,6 +658,95 @@ class Bot:
                 self.ui.send(tgfmt.progress_text(self.st, self.mids, self.mids.get("BTC"), now_ms()))
         elif kind == "alert":
             self.alert(item[1])
+
+    # ---- daily picks (copybot/picks.py) ----------------------------------------------------------------
+    def hyper_book(self, n: int) -> picks.Book:
+        sc = self.scores or self.scorer.scores
+        rank = [a for a in self.ranking if sc.get(a, {}).get("eligible")][:n]
+        es = []
+        for a in rank:
+            s = sc[a]
+            es.append(picks.Entry(a, tgfmt.short(a), s.get("score", 0), (
+                f"{s.get('win_rate', 0) * 100:.0f}% win · PF {min(s.get('profit_factor', 0), 99):.1f} · "
+                f"{s.get('trades', 0)} trades · biggest drop {s.get('max_dd', 0) * 100:.0f}% · "
+                + ("all perps" if s.get("diversified") else "main coins")), f"/hyperadd {a}", a in self.st.followed))
+        gone = {}
+        for a in (self.picks.prev("hyper") or {}).get("ids", []):
+            s = sc.get(a)
+            if s and not s.get("eligible"):
+                gone[a] = "fails: " + ", ".join(r.replace("_", " ") for r in s.get("reasons", [])[:3])
+            elif a in self.ranks:
+                gone[a] = f"still passes, now #{self.ranks[a]}"
+        n_el = sum(1 for s in sc.values() if s.get("eligible"))
+        status = f"{len(sc)} wallets fully scored · {n_el} pass every rule"
+        if self.st.followed:
+            status += f" · you follow {len(self.st.followed)}"
+        return picks.Book("hyper", "🔷 Hyperliquid", es, status, gone)
+
+    def invo_book(self, n: int) -> picks.Book:
+        sc = self.invo_scores
+        rank = [k for _, k in sorted((-v.get("score", 0), k) for k, v in sc.items() if v.get("eligible"))][:n]
+        followed = {a[len(INVO):] for a in self.invo.st.followed} if self.invo else set()
+        es = [picks.Entry(k, "@" + k, sc[k]["score"], (
+            f"{sc[k].get('win_rate', 0) * 100:.0f}% win · PF {min(sc[k].get('profit_factor', 0), 99):.1f} · "
+            f"{sc[k].get('trades', 0)} calls · typical bet {sc[k].get('exposure', 0) * 100:.0f}% of their "
+            f"portfolio (leverage included) · median hold {sc[k].get('median_hold_min', 0) / 60:.1f} h"),
+            f"/invofollow {k}", k in followed) for k in rank]
+        gone = {}
+        for k in (self.picks.prev("invo") or {}).get("ids", []):
+            s = sc.get(k)
+            if s and not s.get("eligible"):
+                gone[k] = "fails: " + ", ".join(invo_reason(r) for r in s.get("reasons", [])[:3])
+        n_el = sum(1 for s in sc.values() if s.get("eligible"))
+        pr = self.invo_search.progress if self.invo_search else {}
+        if pr.get("phase") == "scoring":
+            status = f"search running: {pr['done']}/{pr['todo']} traders checked"
+        elif pr.get("phase") == "discovering":
+            status = "search running: reading Invo's rankings"
+        else:
+            status = f"{len(sc)} traders checked · {n_el} pass every rule"
+        return picks.Book("invo", "🧾 Invo", es, status, gone)
+
+    def send_picks(self, daily: bool) -> None:
+        """The picks report, one message per book. Daily: it becomes the baseline the next report compares with."""
+        n = self.cfg.picks.top_n
+        books = [self.hyper_book(n)]
+        if self.sol:
+            books.append(self.sol.picks_book(n, self.picks.prev("fomo")))
+        if self.invo is not None:
+            books.append(self.invo_book(n) if self.invo_search else
+                         picks.Book("invo", "🧾 Invo", [], "the Invo search is off (invo.search = false)"))
+        day = picks.local_day(time.time(), self.cfg.telegram.utc_offset_hours)
+        for b in books:
+            self.ui.send(picks.render(b, self.picks.prev(b.key), day, n))
+        if daily:
+            self.picks.save_day(day, books)
+        log.info("picks_sent", daily=daily, **{b.key: len(b.entries) for b in books})
+
+    def on_invo_review(self, n_cands: int, scores: dict, fails: dict) -> None:
+        """An Invo search ended: followed traders failing the rules `drop_after_fails` searches in a row leave
+        (not a blacklist: /invofollow brings one back)."""
+        first = not self.invo_scores
+        self.invo_scores = scores
+        w = self.invo
+        if w is None:
+            return
+        if first:      # the very first Invo search: show its result now instead of at the next daily report
+            day = picks.local_day(time.time(), self.cfg.telegram.utc_offset_hours)
+            self.ui.send(picks.render(self.invo_book(self.cfg.picks.top_n), self.picks.prev("invo"), day,
+                                      self.cfg.picks.top_n))
+        for leader in list(w.st.followed):
+            name = leader[len(INVO):]
+            if fails.get(name, 0) >= self.cfg.invo.drop_after_fails:
+                why = ", ".join(invo_reason(r) for r in (scores.get(name) or {}).get("reasons", [])[:3])
+                held = sum(1 for p in w.st.positions.values() if p.leader == leader)
+                w.rec({"ev": "unfollow", "leader": leader,
+                       "reason": f"fails the rules {fails[name]} searches in a row"})
+                self.sync_invo_extras()
+                self.invo_watch.forget(name)
+                self.ui.send(f"➖ 🧾 <b>Dropped</b> @{tgfmt.esc(name)} · fails the rules {fails[name]} searches in a "
+                             f"row ({tgfmt.esc(why)})" + (f" · {held} open copy still managed" if held else "")
+                             + f" · /invofollow {tgfmt.esc(name)} brings it back")
 
     # ---- selection ----------------------------------------------------------------------------------
     def on_ranking(self, ranking: list[str], n_scored: int, scores: dict) -> None:
@@ -676,10 +787,13 @@ class Bot:
         elif not score or not score.get("eligible"):
             why = ", ".join((score or {}).get("reasons") or ["not scored"])
             self.ui.send(f"❌ /hyperadd {who} fails the strict rules: {tgfmt.esc(why)}. Not followed.")
+        elif a in self.st.paused_leaders:          # no blacklist: the owner's re-add lifts the pause
+            self.rec({"ev": "follow", "leader": a, "rank": self.ranks.get(a)})
+            self.sync_sides()
+            self.ui.send(f"▶️ /hyperadd {who} passes ({score.get('score', 0):.0f}/100): its pause is lifted, copying "
+                         "again.")
         elif a in self.st.followed:
             self.ui.send(f"✅ /hyperadd {who} passes ({score.get('score', 0):.0f}/100) and is already followed.")
-        elif a in self.st.paused_leaders:
-            self.ui.send(f"⏸️ /hyperadd {who} passes but is paused after a bad streak of ours. Not followed.")
         elif len(self.st.followed) >= self.cfg.risk.max_leaders:
             self.ui.send(f"✅ /hyperadd {who} passes ({score.get('score', 0):.0f}/100), but you already follow "
                          f"{len(self.st.followed)}. It is in the ranking now: /hypersearch re-picks the best.")
@@ -859,6 +973,8 @@ class Bot:
             self.scorer.add_q.put(a.lower())
             self.ui.send(f"🔎 Checking <code>{tgfmt.short(a.lower())}</code> with the strict rules now (about a "
                          "minute); I will follow it if it passes and a slot is free.")
+        elif c.name == "/picks":
+            self.send_picks(daily=False)
         elif c.name == "/restart":
             self.ui.send("🔄 <b>Restarting</b>… back in about 15 seconds.")
             self.restart_at = time.time() + 3

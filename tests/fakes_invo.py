@@ -31,6 +31,8 @@ class FakeInvo:
         self.portfolios: dict[str, list[str]] = {}
         self.calls: dict[str, list[dict]] = {}
         self.updated: dict[str, int] = {}               # portfolio id -> last edit (ms): its updatedAt
+        self.closed: dict[str, list[dict]] = {}          # portfolio id -> [raw closed calls], newest first
+        self.ranked: list[str] = []                      # usernames on the Discover rankings
         self.requests: list[tuple[str, dict]] = []
         self.valid_refresh = refresh_token
         self.valid_access = ""
@@ -113,11 +115,28 @@ class FakeInvo:
                 out.append(p)
             return {"portfolios": out}
         if path == "/investments/get_investments":
+            pg = body.get("params") or {}
+            page, size = int(pg.get("page", 1)), int(pg.get("size", 50))
             with self.lock:
-                calls = copy.deepcopy(self.calls.get(body["portfolioId"], [])) if body.get("isOpen") else []
+                if body.get("isOpen"):
+                    calls = copy.deepcopy(self.calls.get(body["portfolioId"], []))
+                else:
+                    calls = copy.deepcopy(self.closed.get(body["portfolioId"], [])[(page - 1) * size: page * size])
             r = copy.deepcopy(fixture("invo_investments_open.json"))
             r["investmentsTicker"] = calls
             return r
+        if path in ("/trending/get_portfolios_pl", "/trending/get_users"):
+            # rankings: real portfolio objects (as get_users_portfolios returns them), each with its trader as owner
+            pg = body.get("params") or body
+            page, size = int(pg.get("page", 1)), int(pg.get("size", 20))
+            names = self.ranked[(page - 1) * size: page * size]
+            tmpl = fixture("invo_users_portfolios.json")["portfolios"][0]
+            out = []
+            for n in names:
+                q = copy.deepcopy(tmpl)
+                q["owner"]["username"] = n
+                out.append(q)
+            return {"portfolios": out} if path.endswith("portfolios_pl") else {"users": [q["owner"] for q in out]}
         return {"success": False}
 
     def add_user(self, name: str, n_portfolios: int = 1) -> list[str]:
@@ -142,6 +161,19 @@ class FakeInvo:
         with self.lock:
             self.calls.setdefault(pid, []).append(c)
         return cid
+
+    def add_closed(self, pid: str, ticker: str, long: bool, leverage: float, size: float, entry: float, close: float,
+                   created_ms: int, closed_ms: int) -> None:
+        """A closed call in the recorded shape (tests/fixtures/invo_investments_closed.json)."""
+        c = copy.deepcopy(fixture("invo_investments_closed.json")["investmentsTicker"][0])
+        c.update(id=f"closed-{next(self._n)}", ticker=ticker, name=ticker, directionLong=long, leverage=leverage,
+                 positionSize=size, entrySize=size * 100, entryPrice=entry, closingPrice=close, isOpen=False,
+                 createdAt=iso(created_ms), closedAt=iso(closed_ms))
+        c["portfolio"]["id"] = pid
+        with self.lock:
+            lst = self.closed.setdefault(pid, [])
+            lst.append(c)
+            lst.sort(key=lambda x: x["createdAt"], reverse=True)
 
     def resize_call(self, pid: str, cid: str, size: float) -> None:
         """The trader adds to (size up) or trims (size down) an open call: Invo changes its committed entrySize,

@@ -32,7 +32,7 @@ def history_swaps(sol: FakeSolana, now_ms: int, wallet=GOOD, n=90, days=60, fomo
 
 
 class Env:
-    def __init__(self, tmp_path: Path, key=KEY, discord=True, poll_s=60.0, history=True, extra=""):
+    def __init__(self, tmp_path: Path, key=KEY, discord=True, poll_s=60.0, history=True, extra="", auto=True):
         self.hl, self.tg, self.sol, self.dex = FakeHL(), FakeTelegram(), FakeSolana(), FakeDex()
         self.dc = FakeDiscord() if discord else None
         self.data = tmp_path / "data"
@@ -43,6 +43,7 @@ class Env:
             f'public_ws_url = "{self.sol.ws_url}"\ndex_url = "{self.dex.url}"\nrpc_interval_s = 0.0\n'
             f'live_rpc_interval_s = 0.0\npoll_leader_s = {poll_s}\nprice_poll_s = 0.2\nmin_scored_to_start = 1\n'
             'max_candidates = 10\ndiscover_pages = 1\ndiscover_per_page = 200\n'
+            + f'auto_follow = {str(auto).lower()}\n'      # most tests cover the copy flow after an automatic pick
             + (extra or 'rescore_minutes = 0.03\n'), encoding="utf-8")
         if self.dc:
             (cdir / "discord.toml").write_text(

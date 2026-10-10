@@ -7,6 +7,8 @@ Hysteresis (all per selection cycle):
   drop  an eligible leader at rank > drop_rank for `confirm_cycles` cycles, followed >= min_follow_hours,
         only when joins are allowed: ONE such swap per cycle
   a dropped leader cannot rejoin during the cooldown.
+With `selection.auto_follow` = false (the default since 2026-10-09) nobody joins and nobody is swapped for rank:
+only the bad leaders leave (paused, or no longer eligible). The owner follows from the daily picks (/hyperadd).
 """
 from __future__ import annotations
 
@@ -63,7 +65,7 @@ def select(sel: dict, ranking: list[str], followed: dict[str, int], paused: set[
                 and now_ms - dropped.get(a, -10**15) >= cooldown]
     joins: list[str] = []
     # the followed set only grows once per `change_cooldown_hours` (counted from the newest leader)
-    if now_ms - max(followed.values(), default=-10**15) >= s.change_cooldown_hours * HOUR:
+    if s.auto_follow and now_ms - max(followed.values(), default=-10**15) >= s.change_cooldown_hours * HOUR:
         slots = cfg.risk.max_leaders - (len(followed) - len(drops))
         joins = joinable[:max(0, slots)]
         rest = joinable[len(joins):]
@@ -153,6 +155,7 @@ class Scorer:
         self.search_req = threading.Event()   # /search: run a review now, then publish ("searched", ...)
         self.add_q: queue.Queue = queue.Queue()   # /hyperadd: wallets the owner wants checked now
         self.focus: set[str] = set()   # followed leaders: always rescored (set by the trading loop)
+        self._candles_lock = threading.Lock()   # the Invo search reads candles too (one writer per cache file)
         self.our_notional = cfg.risk.start_equity * cfg.risk.risk_per_trade_pct / cfg.risk.stop_pct
 
     # ---- thread ---------------------------------------------------------------------------------
@@ -287,6 +290,10 @@ class Scorer:
         return fills
 
     def candles(self, coin: str, start: int, end: int) -> list[hl.Candle]:
+        with self._candles_lock:
+            return self._candles(coin, start, end)
+
+    def _candles(self, coin: str, start: int, end: int) -> list[hl.Candle]:
         out: list[hl.Candle] = []
         chunk = 30 * DAY
         for s, e in hl.chunk_ranges(start, end, chunk):
