@@ -30,6 +30,7 @@ VERBS = ("status", "trades", "traders", "wallets", "progress", "search", "add", 
 HYPER_COMMANDS = tuple(f"/hyper{v}" for v in VERBS)
 FOMO_COMMANDS = tuple(f"/fomo{v}" for v in VERBS)
 INVO_COMMANDS = tuple(f"/invo{v}" for v in VERBS)
+INVO_EXTRA = ("/invoblock", "/invounblock")       # Invo only: block one portfolio of a followed trader
 ALIASES = {f"/hyper{v}": f"/{v}" for v in VERBS}
 ALIASES.update({"/fomostatus": "/fomo", "/invostatus": "/invo",
                 # older names
@@ -37,13 +38,13 @@ ALIASES.update({"/fomostatus": "/fomo", "/invostatus": "/invo",
                 "/positions": "/trades", "/leaders": "/traders",
                 "/fomowallet": "/fomo", "/fomopositions": "/fomotrades", "/fomoleaders": "/fomotraders"})
 COMMANDS = tuple(dict.fromkeys(("/help", "/restart", "/picks", "/fomo", "/invo") + tuple(f"/{v}" for v in VERBS)
-                               + tuple(ALIASES) + FOMO_COMMANDS + INVO_COMMANDS))
+                               + tuple(ALIASES) + FOMO_COMMANDS + INVO_COMMANDS + INVO_EXTRA))
 # what Discord shows in its slash-command list
-SLASH_COMMANDS = ("/help", "/restart", "/picks") + HYPER_COMMANDS + FOMO_COMMANDS + INVO_COMMANDS
+SLASH_COMMANDS = ("/help", "/restart", "/picks") + HYPER_COMMANDS + FOMO_COMMANDS + INVO_COMMANDS + INVO_EXTRA
 PIN_COMMANDS = ("/flatten", "/reset", "/fomoflatten", "/fomoreset", "/invoflatten", "/invoreset")
 # take a wallet address (or Invo username) as their argument
 WALLET_COMMANDS = ("/add", "/follow", "/unfollow", "/fomoadd", "/fomofollow", "/fomounfollow", "/invoadd",
-                   "/invofollow", "/invounfollow")
+                   "/invofollow", "/invounfollow", "/invoblock", "/invounblock")
 
 
 def canon(name: str) -> str:

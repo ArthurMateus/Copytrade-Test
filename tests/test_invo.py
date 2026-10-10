@@ -160,7 +160,7 @@ def test_bot_copies_an_invo_call_and_closes_it_when_the_trader_does(invo_env, mo
         for cmd, needle in (("/invo", "Invo calls"), ("/invotrades", "Invo trades"), ("/invotraders", "Invo traders")):
             dc.say(cmd)
             assert wait_for(lambda: needle in text()), cmd
-        assert "@nicush" in text() and "Invo: " in text()                        # Invo's own record on the card
+        assert "@nicush" in text() and "✅ $100-$1000" in text() and "86% win" in text()   # its portfolios, copied
         n_edits = len(dc.edits)
         hl.mids["ETH"] = 3015.0                                                     # the price moves: cards are edited
         assert wait_for(lambda: len(dc.edits) > n_edits, timeout=10)
@@ -348,5 +348,42 @@ def test_each_book_controls_only_its_own_wallets(invo_env, monkeypatch):
         assert (arch / "wallets" / "invo_calls" / "ledger.jsonl").exists()
         assert (data / "wallets" / "risk_20pct" / "ledger.jsonl").exists()              # Hyperliquid untouched
         assert (data / "ledger.jsonl").exists()
+    finally:
+        stop_bot(bot, th)
+
+
+def test_weak_portfolios_are_skipped_and_the_owner_can_block_one(invo_env, monkeypatch):
+    """Owner request 2026-10-10: calls are only copied from a trader's good portfolios (win rate >= 80%, return >= 10%,
+    20+ closed calls); /invoblock blocks one by hand, /invounblock undoes it."""
+    hl, dc, data, cdir, f, tok = invo_env
+    good, weak = f.add_user("nicush", n_portfolios=2)
+    f.port_meta[good] = {"title": "Kitchen", "winRate": 88.0, "closedPositions": 929, "plSnapshot": 140.0}
+    f.port_meta[weak] = {"title": "Probably nothing", "winRate": 77.0, "closedPositions": 39, "plSnapshot": 12.0}
+    bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
+    text = lambda: " ".join(m["text"] for m in dc.sent + dc.edits)
+    try:
+        dc.say("/invofollow nicush")
+        assert wait_for(lambda: bot.invo_watch.known.get("nicush") is not None, timeout=10)
+        f.open_call(weak, "SOL", long=True, leverage=5, size=0.05, entry=150.0)          # weak portfolio: skipped
+        f.open_call(good, "ETH", long=True, leverage=5, size=0.05, entry=3000.0)         # good one: copied
+        assert wait_for(lambda: "ETH" in bot.invo.st.positions, timeout=10)
+        time.sleep(2.5)
+        assert "SOL" not in bot.invo.st.positions
+        dc.say("/invotraders")
+        assert wait_for(lambda: "🚫 Probably nothing" in text() and "skipped: win rate 77% &lt; 80%" in text()
+                        and "✅ Kitchen" in text() and "+140%" in text())
+        dc.say("/invoblock nicush kit")                                                    # by the start of its name
+        assert wait_for(lambda: good in bot.invo.st.blocked.get("invo:nicush", {}))
+        assert wait_for(lambda: "Blocked" in text() and "Kitchen" in text())
+        f.open_call(good, "BTC", long=True, leverage=5, size=0.05, entry=100_000.0)
+        time.sleep(2.5)
+        assert "BTC" not in bot.invo.st.positions                                        # blocked: not copied
+        cid = f.calls[good][0]["id"]
+        f.close_call(good, cid)                                                           # but exits still follow
+        assert wait_for(lambda: "ETH" not in bot.invo.st.positions, timeout=10)
+        dc.say("/invounblock nicush Kitchen")
+        assert wait_for(lambda: not bot.invo.st.blocked.get("invo:nicush"))
+        dc.say("/invoblock nicush nothing-like-this")
+        assert wait_for(lambda: "Its portfolios: Kitchen, Probably nothing" in text())
     finally:
         stop_bot(bot, th)

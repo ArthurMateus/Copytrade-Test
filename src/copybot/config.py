@@ -205,6 +205,12 @@ class Invo:
     risk_wallets_pct: list = field(default_factory=lambda: [1.0, 2.0, 5.0, 10.0, 20.0])
     # the daily Invo search (copybot/invo_scorer.py): Invo's Discover rankings -> each trader's closed calls ->
     # the SAME scoring as Hyperliquid wallets (scoring.full_score) plus Invo gates; results in the daily picks
+    # portfolio filter (owner request 2026-10-10): a followed trader's calls are only copied from its portfolios with
+    # at least this win rate, this % return (Invo's plSnapshot) and this many closed calls; /invoblock adds manual
+    # blocks. Also applied to the search's scoring (a trader is judged on the portfolios we would copy)
+    min_portfolio_win_rate: float = 0.80
+    min_portfolio_pnl_pct: float = 10.0
+    min_portfolio_calls: int = 20
     search: bool = True
     review_hours: float = 24.0            # one search per this many hours
     discover_pages: int = 3               # pages of 20 read from each Discover ranking (trending, month, all time)
@@ -346,6 +352,9 @@ CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
     ("invo", "limits_pct"): (0.5, 20.0),
     ("invo", "max_risk_pct"): (0.1, 20.0),
     ("invo", "review_hours"): (1.0, 168.0),
+    ("invo", "min_portfolio_win_rate"): (0.0, 1.0),
+    ("invo", "min_portfolio_pnl_pct"): (-100.0, 100000.0),
+    ("invo", "min_portfolio_calls"): (0, 10000),
     ("invo", "discover_pages"): (0, 20),
     ("invo", "max_candidates"): (0, 1000),
     ("invo", "history_days"): (30, 180),

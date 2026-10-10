@@ -45,7 +45,9 @@ VERB_TEXT = {
     "reset": "this book back to the start, no open trades, traders kept (needs the PIN)",
 }
 DESCRIPTIONS = {f"/{b}{v}": f"{n}: {t}" for b, n in BOOK_NAMES.items() for v, t in VERB_TEXT.items()}
-DESCRIPTIONS.update({"/help": "List the commands", "/restart": "Restart the bot",
+DESCRIPTIONS.update({"/invoblock": "Invo: stop copying one portfolio of a trader (user, then the portfolio name)",
+                     "/invounblock": "Invo: copy a blocked portfolio again (user, then the portfolio name)",
+                     "/help": "List the commands", "/restart": "Restart the bot",
                      "/picks": "Daily picks: the best traders of each book under the strict rules, with the follow "
                                "commands"})
 
@@ -227,8 +229,8 @@ class DiscordUI(ChatUI):
             if canon(c) in PIN_COMMANDS:
                 cmd["options"] = [{"type": 3, "name": "pin", "description": "Your COPYBOT_PIN", "required": True}]
             elif canon(c) in WALLET_COMMANDS:
-                cmd["options"] = [{"type": 3, "name": "wallet", "description": "Wallet address or Invo username",
-                                   "required": True}]
+                cmd["options"] = [{"type": 3, "name": "wallet", "required": True,
+                                   "description": "Wallet address or Invo username (block: username, then portfolio)"}]
             cmds.append(cmd)
         self.api.call("PUT", f"/applications/{app_id}/guilds/{guild}/commands", cmds)
         self.registered = True

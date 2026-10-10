@@ -9,7 +9,7 @@ from copybot import config, cardfmt
 from copybot.ledger import Ledger, Position, State, now_ms
 from copybot.sol import fmt
 from copybot.sol.runner import SolBot
-from copybot.chat import (ALIASES, COMMANDS, FOMO_COMMANDS, HYPER_COMMANDS, INVO_COMMANDS, PIN_COMMANDS,
+from copybot.chat import (ALIASES, COMMANDS, FOMO_COMMANDS, HYPER_COMMANDS, INVO_COMMANDS, INVO_EXTRA, PIN_COMMANDS,
                           SLASH_COMMANDS, VERBS, WALLET_COMMANDS, Command, canon)
 
 PIN = "2468"
@@ -17,7 +17,7 @@ A, B = "LeaderAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1", "LeaderBBBBBBBBBBBBBBBB
 # the canonical names each handler answers (Bot.command for Hyperliquid and Invo, SolBot.command for FOMO)
 HL_HANDLED = {f"/{v}" for v in VERBS} | {"/restart", "/help", "/picks"}
 FOMO_HANDLED = {"/fomo"} | (set(FOMO_COMMANDS) - {"/fomostatus"})
-INVO_HANDLED = {"/invo"} | (set(INVO_COMMANDS) - {"/invostatus"})
+INVO_HANDLED = {"/invo"} | (set(INVO_COMMANDS) - {"/invostatus"}) | set(INVO_EXTRA)
 
 
 # ---- names ------------------------------------------------------------------------------------------------------
@@ -37,7 +37,8 @@ def test_the_three_books_have_the_same_commands():
         assert [c[len(book) + 1:] for c in cmds] == list(VERBS), book
     assert VERBS == ("status", "trades", "traders", "wallets", "progress", "search", "add", "follow", "unfollow",
                      "pause", "resume", "flatten", "reset")
-    assert set(SLASH_COMMANDS) == {"/help", "/restart", "/picks"} | set(HYPER_COMMANDS + FOMO_COMMANDS + INVO_COMMANDS)
+    assert set(SLASH_COMMANDS) == ({"/help", "/restart", "/picks"} | set(HYPER_COMMANDS + FOMO_COMMANDS + INVO_COMMANDS)
+                                   | {"/invoblock", "/invounblock"})                  # Invo only: portfolio blocks
     assert len(SLASH_COMMANDS) < 100 and len(set(SLASH_COMMANDS)) == len(SLASH_COMMANDS)
     assert all(len(c) - 1 <= 32 and c[1:].islower() for c in SLASH_COMMANDS)          # Discord's name rules
     for b in ("hyper", "fomo", "invo"):                                                # same options everywhere

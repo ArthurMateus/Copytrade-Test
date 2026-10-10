@@ -12,6 +12,11 @@ max_risk_pct = 2.0        # one copy never risks more than this % of our 300$ at
 limits_pct = 5.0          # the wallet's risk limits = a side wallet at this risk level              [0.5, 20]
 max_traders = 7           #                                                                         [0, 20]
 risk_wallets_pct = [1.0, 2.0, 5.0, 10.0, 20.0]
+# Portfolio filter: a trader's calls are only copied from its portfolios with at least this win rate, this % return
+# (Invo's P&L of the portfolio) and this many closed calls. /invoblock <user> <portfolio> blocks one by hand.
+min_portfolio_win_rate = 0.80   # 0.80 = 80%                                                          [0, 1]
+min_portfolio_pnl_pct = 10.0    # the portfolio's total return on Invo, %                              [-100, 100000]
+min_portfolio_calls = 20        # fewer closed calls: too new to judge, skipped                         [0, 10000]
 # The daily Invo search: Invo's Discover rankings -> each trader's closed calls -> the SAME scoring as Hyperliquid
 # wallets (win rate, profit factor, no single trade > 30% of profit, drawdowns, score >= 70 ...), shown in the
 # daily picks (13h, /picks). It only reports: you follow with /invofollow.

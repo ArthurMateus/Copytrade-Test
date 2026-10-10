@@ -76,6 +76,7 @@ class State:
     positions: dict[str, Position] = field(default_factory=dict)   # coin -> position (one net position per coin)
     followed: dict[str, int] = field(default_factory=dict)         # leader -> followed since (ms)
     paused_leaders: dict[str, str] = field(default_factory=dict)   # leader -> reason (no new entries)
+    blocked: dict = field(default_factory=dict)  # Invo: leader -> {portfolio id: title} the owner blocked (/invoblock)
     picked: set = field(default_factory=set)      # FOMO: wallets the owner picked (/fomofollow): never re-ranked away
     dropped: dict[str, int] = field(default_factory=dict)          # leader -> dropped at (ms), for cooldown
     leader_stats: dict[str, LeaderStats] = field(default_factory=dict)
@@ -321,6 +322,14 @@ class State:
 
     def _ev_card_drop(self, ev):
         self.cards.pop(ev["key"], None)
+
+    def _ev_invo_block(self, ev):
+        self.blocked.setdefault(ev["leader"], {})[ev["portfolio"]] = ev.get("title", "")
+
+    def _ev_invo_unblock(self, ev):
+        self.blocked.get(ev["leader"], {}).pop(ev["portfolio"], None)
+        if not self.blocked.get(ev["leader"]):
+            self.blocked.pop(ev["leader"], None)
 
     def _ev_ack(self, ev):
         """The owner acknowledged the uncertainties raised so far (/resume)."""

@@ -124,7 +124,7 @@ class Bot:
             self.invo_watch = InvoWatcher(InvoClient(cfg.invo.api_base, cfg.invo_token_file,
                                                      min_interval_s=cfg.invo.request_gap_s), self.q,
                                           lambda: {a[len(INVO):] for a in w.st.followed}, cfg.invo.poll_s,
-                                          cfg.invo.max_call_age_s, self.stop)
+                                          cfg.invo.max_call_age_s, self.stop, skip=self.invo_skip)
         elif cfg.invo.enabled:
             log.info("invo_off", why="INVO_TOKEN_FILE not set")
         self.det = Detector()
@@ -143,7 +143,7 @@ class Bot:
             self.invo_search = InvoScorer(cfg, self.invo_watch.client, self.scorer.params, self.invo_coin,
                                           self.scorer.candles, self.mids,
                                           lambda: {a[len(INVO):] for a in self.invo.st.followed}, self.q,
-                                          self.data / "cache", self.stop)
+                                          self.data / "cache", self.stop, skip=self.invo_skip)
             self.invo_scores = dict(self.invo_search.scores)
         self.picks = picks.Store(self.data / "picks.json")
         self.invo_search_pending = False   # /invosearch: re-pick the Invo traders when the search ends
@@ -299,13 +299,32 @@ class Bot:
         return notional / px
 
     def invo_record_rows(self) -> dict:
-        """Invo's own numbers for each followed trader (from the watcher's last read)."""
+        """Invo's own numbers for each followed trader's portfolios (from the watcher's last read), and whether its
+        calls are copied (✅) or skipped (🚫 and why)."""
         out = {}
         for name, ports in (self.invo_watch.stats if self.invo_watch else {}).items():
-            rows = [(f"Invo: {p.title.strip()[:24] or 'portfolio'}",
-                     f"{p.win_rate:.0f}% win · {p.closed} calls · {p.open_count} open") for p in ports[:3]]
+            rows = []
+            for p in ports[:6]:
+                why = self.invo_skip(name, p)
+                rows.append((f"{'🚫' if why else '✅'} {p.title.strip()[:24] or 'portfolio'}",
+                             f"{p.win_rate:.0f}% win · {p.pnl_pct:+,.0f}% · {p.closed} calls · {p.open_count} open"
+                             + (f" · skipped: {why}" if why else "")))
             out[INVO + name] = rows
         return out
+
+    def invo_skip(self, name: str, p) -> str | None:
+        """Why calls in this portfolio of `name` are not copied (None = they are): blocked by the owner, or below
+        the portfolio floors (invo.min_portfolio_win_rate / min_portfolio_pnl_pct / min_portfolio_calls)."""
+        c = self.cfg.invo
+        if self.invo is not None and p.id in self.invo.st.blocked.get(INVO + name.lower(), {}):
+            return "blocked by you"
+        if p.closed < c.min_portfolio_calls:
+            return f"only {p.closed} closed calls"
+        if p.win_rate < c.min_portfolio_win_rate * 100:
+            return f"win rate {p.win_rate:.0f}% < {c.min_portfolio_win_rate * 100:.0f}%"
+        if p.pnl_pct < c.min_portfolio_pnl_pct:
+            return f"return {p.pnl_pct:+.0f}% < {c.min_portfolio_pnl_pct:+.0f}%"
+        return None
 
     def invo_command(self, c) -> None:
         w = self.invo
@@ -366,6 +385,8 @@ class Bot:
             self.live_cards.add(key)
             self.last_body.pop(key, None)
             return self.ui.set_card(key, self.render_card(key, self.health(), now_ms()), new=True)
+        if c.name in ("/invoblock", "/invounblock"):
+            return self.invo_block(c)
         name = c.arg.strip().lstrip("@")
         if not re.fullmatch(r"[A-Za-z0-9_.]{2,40}", name):
             return self.ui.send(f"Usage: {c.name} &lt;Invo username&gt; (as in app.invoapp.com/&lt;username&gt;)")
@@ -395,6 +416,38 @@ class Bot:
         self.sync_invo_extras()
         self.ui.send(f"➕ 🧾 <b>Following</b> @{cardfmt.esc(name)} on Invo · calls they open from now on are copied in "
                      "every Invo wallet (/invowallets compares them). Calls already open are not copied.")
+
+    def invo_block(self, c) -> None:
+        """/invoblock <user> <portfolio>: stop copying that portfolio of a followed trader (its open copies still follow
+        the trader's exits); /invounblock undoes it. The portfolio is matched by the start of its name."""
+        w = self.invo
+        user, _, title = c.arg.strip().lstrip("@").partition(" ")
+        user, title = user.lower(), title.strip().lower()
+        leader = INVO + user
+        if not user or not title:
+            return self.ui.send(f"Usage: {c.name} &lt;Invo username&gt; &lt;portfolio name&gt;, e.g. {c.name} nicush "
+                                "Probably nothing")
+        if leader not in w.st.followed:
+            return self.ui.send(f"🧾 @{cardfmt.esc(user)} is not followed.")
+        ports = (self.invo_watch.stats if self.invo_watch else {}).get(user) or []
+        hit = [p for p in ports if p.title.strip().lower() == title] or \
+              [p for p in ports if p.title.strip().lower().startswith(title)]
+        if len(hit) != 1:
+            names = ", ".join(p.title.strip() for p in ports) or "(not read yet: try again in a few seconds)"
+            return self.ui.send(f"🧾 @{cardfmt.esc(user)} has {'no' if not hit else 'several'} portfolio(s) matching "
+                                f"“{cardfmt.esc(title)}”. Its portfolios: {cardfmt.esc(names)}")
+        p = hit[0]
+        if c.name == "/invoblock":
+            w.rec({"ev": "invo_block", "leader": leader, "portfolio": p.id, "title": p.title.strip()})
+            return self.ui.send(f"🚫 🧾 <b>Blocked</b> @{cardfmt.esc(user)} · {cardfmt.esc(p.title.strip())}: its new "
+                                "calls are not copied (open copies still follow the trader's exits). /invounblock "
+                                "undoes it.")
+        if p.id not in w.st.blocked.get(leader, {}):
+            return self.ui.send(f"🧾 {cardfmt.esc(p.title.strip())} of @{cardfmt.esc(user)} is not blocked.")
+        w.rec({"ev": "invo_unblock", "leader": leader, "portfolio": p.id})
+        why = self.invo_skip(user, p)
+        self.ui.send(f"✅ 🧾 <b>Unblocked</b> @{cardfmt.esc(user)} · {cardfmt.esc(p.title.strip())}"
+                     + (f" · still skipped by the portfolio rules: {cardfmt.esc(why)}" if why else ""))
 
     def invo_size(self, m, px: float, equity: float) -> float:
         """Invo calls wallet: the trader's exposure (portfolio share x leverage) x invo.size_mult of our equity,

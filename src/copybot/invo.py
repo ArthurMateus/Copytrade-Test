@@ -62,6 +62,7 @@ class Portfolio:
     win_rate: float         # percent, Invo's own number
     closed: int
     updated_ms: int = 0     # changes when the trader edits a call (add, trim, target...)
+    pnl_pct: float = 0.0    # plSnapshot: the portfolio's % return (a $100 portfolio now worth $130 shows 28-30)
 
 
 @dataclass(frozen=True)
@@ -138,7 +139,8 @@ def parse_portfolios(body: dict) -> list[Portfolio]:
         ot = p.get("openTrades") or {}
         out.append(Portfolio(p["id"], p.get("title", ""), bool(p.get("active")), p.get("type") or "",
                              int(ot.get("count") or 0), tuple(ot.get("assets") or ()), float(p.get("winRate") or 0),
-                             int(p.get("closedPositions") or 0), _ms(p.get("updatedAt")) or 0))
+                             int(p.get("closedPositions") or 0), _ms(p.get("updatedAt")) or 0,
+                             float(p.get("plSnapshot") or 0)))
     return out
 
 
@@ -277,7 +279,9 @@ class Watcher:
     trader per poll; open calls are only read for portfolios whose open-trade list changed."""
 
     def __init__(self, client: InvoClient, out, traders, poll_s: float, max_age_s: float, stop: threading.Event,
-                 now=lambda: int(time.time() * 1000)):
+                 now=lambda: int(time.time() * 1000), skip=lambda name, portfolio: None):
+        """`skip(username, Portfolio) -> reason or None`: new calls in a portfolio with a reason are not copied
+        (owner request 2026-10-10: weak portfolios of a good trader, or ones the owner blocked)."""
         self.client, self.out, self.traders, self.poll_s, self.max_age_s = client, out, traders, poll_s, max_age_s
         self.stop, self.now = stop, now
         self.uids: dict[str, str] = {}
@@ -288,6 +292,8 @@ class Watcher:
         self.last_ok = 0.0
         self.unknown: set[str] = set()
         self.stats: dict[str, list[Portfolio]] = {}       # username -> its active portfolios (for /invotraders)
+        self.skip = skip
+        self.ports: dict[str, Portfolio] = {}              # portfolio id -> its last read
 
     def start(self) -> None:
         threading.Thread(target=self.run, name="invo", daemon=True).start()
@@ -325,6 +331,7 @@ class Watcher:
         ports = self.client.portfolios(uid)
         self.stats[name] = [p for p in ports if p.active]
         for p in ports:
+            self.ports[p.id] = p
             if not p.active:
                 continue
             sig = (p.open_count, tuple(sorted(p.open_assets)), p.updated_ms)     # an edit changes updated_ms
@@ -342,7 +349,11 @@ class Watcher:
         for cid, c in now_open.items():
             if cid not in before:
                 age_s = (self.now() - c.created_ms) / 1000
-                if age_s <= self.max_age_s:
+                port = self.ports.get(c.portfolio_id)
+                why = self.skip(name, port) if port is not None else None
+                if why:
+                    log.info("invo_call_skipped", trader=name, ticker=c.ticker, portfolio=port.title[:30], why=why)
+                elif age_s <= self.max_age_s:
                     self.out.put(("invo_open", name, c))
                 else:
                     log.info("invo_call_too_old", trader=name, ticker=c.ticker, age_s=round(age_s))

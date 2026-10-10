@@ -33,6 +33,7 @@ class FakeInvo:
         self.updated: dict[str, int] = {}               # portfolio id -> last edit (ms): its updatedAt
         self.closed: dict[str, list[dict]] = {}          # portfolio id -> [raw closed calls], newest first
         self.ranked: list[str] = []                      # usernames on the Discover rankings
+        self.port_meta: dict[str, dict] = {}             # portfolio id -> fields overriding the recorded template
         self.requests: list[tuple[str, dict]] = []
         self.valid_refresh = refresh_token
         self.valid_access = ""
@@ -112,6 +113,7 @@ class FakeInvo:
                          openTrades={"count": len(open_calls), "assets": [c["ticker"] for c in open_calls]})
                 if pid in self.updated:
                     p["updatedAt"] = iso(self.updated[pid])
+                p.update(self.port_meta.get(pid, {}))
                 out.append(p)
             return {"portfolios": out}
         if path == "/investments/get_investments":

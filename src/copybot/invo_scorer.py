@@ -40,7 +40,8 @@ FILTERS = ("trending", "month", "all_time")
 REQ_GAP_S = 1.0          # extra spacing of the search's own requests (the watcher's polls go first)
 
 REASON_TEXT = {"not_on_hyperliquid": "most calls are on coins Hyperliquid does not list",
-               "too_fast": "calls too short to copy", "inactive": "no new call lately", "no_calls": "no closed calls"}
+               "too_fast": "calls too short to copy", "inactive": "no new call lately",
+               "no_calls": "no closed calls in a portfolio good enough to copy"}
 
 
 def key_coin(key: str) -> str:
@@ -137,11 +138,12 @@ class InvoScorer:
 
     def __init__(self, cfg, client, params: scoring.ScoreParams, coin_of, candles_of, mids: dict, followed,
                  out: queue.Queue, cache_dir: str | os.PathLike, stop: threading.Event,
-                 now=lambda: int(time.time() * 1000)):
+                 now=lambda: int(time.time() * 1000), skip=lambda name, portfolio: None):
+        """`skip(name, Portfolio)`: portfolios whose calls would not be copied are not scored either."""
         self.cfg, self.c, self.client = cfg, cfg.invo, client
         self.params = replace(params, coins=None)      # every Hyperliquid perp (the Invo wallets copy alts too)
         self.coin_of, self.candles_of, self.mids, self.followed = coin_of, candles_of, mids, followed
-        self.out, self.stop, self.now = out, stop, now
+        self.out, self.stop, self.now, self.skip = out, stop, now, skip
         self.dir = Path(cache_dir) / "invo"
         self.dir.mkdir(parents=True, exist_ok=True)
         st = self._load()
@@ -290,7 +292,7 @@ class InvoScorer:
         opened: list[Call] = []
         for p in self.client.portfolios(u[0]):
             self._gap()
-            if not p.active:
+            if not p.active or self.skip(name, p):
                 continue
             if p.open_count:
                 opened += [c for c in self.client.open_calls(p.id) if c.is_open]
