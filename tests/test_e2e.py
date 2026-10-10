@@ -368,7 +368,7 @@ def test_reset_needs_no_open_trades_and_the_pin_then_starts_fresh(env):
         assert bot.st.closed and bot.st.realized != 0
         since = bot.st.followed[LEADER]
         dc.say("/reset 0000")
-        assert wait_for(lambda: any("Wrong or missing PIN. Usage: /reset" in m["text"] for m in dc.sent))
+        assert wait_for(lambda: any("Wrong or missing PIN. Usage: /hyperreset" in m["text"] for m in dc.sent))
         dc.say(f"/reset {PIN}")
         assert wait_for(lambda: any("Reset done" in m["text"] for m in dc.sent))
         assert wait_for(lambda: bot.stop.is_set(), timeout=8)              # restarts itself

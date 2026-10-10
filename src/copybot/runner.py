@@ -231,7 +231,7 @@ class Bot:
         if problems:
             self.ui.send("⚠️ <b>Restart with uncertainty</b> · ⏸️ entries paused, exits and stops keep running\n"
                          + "\n".join(f"• {cardfmt.esc(x)}" for x in problems[:10])
-                         + "\nCheck, then /resume.")
+                         + "\nCheck, then /hyperresume.")
 
         def boot_side(w):
             if not w.st.genesis_ms:
@@ -241,7 +241,7 @@ class Bot:
             if side_problems:
                 self.ui.send(f"⚠️ <b>Side wallet {cardfmt.esc(w.label)} restarted with uncertainty</b> · ⏸️ its entries "
                              f"paused\n" + "\n".join(f"• {cardfmt.esc(x)}" for x in side_problems[:5])
-                             + "\n/resume resumes every wallet.")
+                             + "\n/hyperresume resumes every wallet.")
             if self.st.entries_paused and not w.st.entries_paused:
                 w.rec({"ev": "pause", "reason": self.st.pause_reason or "main wallet paused"})
             log.info("side_wallet", wallet=w.name, equity=round(w.st.equity(), 2), positions=len(w.st.positions),
@@ -1005,7 +1005,7 @@ class Bot:
         elif c.name == "/pause":
             self.rec({"ev": "pause", "reason": "/pause"})
             self.on_sides("pause", lambda w: w.rec({"ev": "pause", "reason": "/pause"}))
-            self.ui.send("⏸️ <b>Entries paused.</b> Exits and stops keep running. /resume to continue.")
+            self.ui.send("⏸️ <b>Entries paused.</b> Exits and stops keep running. /hyperresume to continue.")
         elif c.name == "/resume":
             if self.st.uncertain:
                 self.rec({"ev": "ack", "items": list(self.st.uncertain)})
@@ -1044,13 +1044,13 @@ class Bot:
         elif c.name == "/reset":
             if not self.ui.check_pin(c.arg):
                 log.warn("reset_bad_pin")
-                self.ui.send("⛔ Wrong or missing PIN. Usage: /reset &lt;PIN&gt;")
+                self.ui.send("⛔ Wrong or missing PIN. Usage: /hyperreset &lt;PIN&gt;")
                 return
             wallets = [self.st, *(w.st for w in self.sides)]
             n_open = sum(len(st.positions) for st in wallets)
             if n_open:
                 self.ui.send(f"⛔ <b>Reset refused</b>: {n_open} open trade(s). Wait for them to close, or "
-                             f"/flatten &lt;PIN&gt; first.")
+                             f"/hyperflatten &lt;PIN&gt; first.")
                 return
             where = self.reset_wallets()
             self.ui.send(f"♻️ <b>Reset done</b> · every wallet is back to "
@@ -1060,7 +1060,7 @@ class Bot:
         elif c.name == "/flatten":
             if not self.ui.check_pin(c.arg):
                 log.warn("flatten_bad_pin")
-                self.ui.send("⛔ Wrong or missing PIN. Usage: /flatten &lt;PIN&gt;")
+                self.ui.send("⛔ Wrong or missing PIN. Usage: /hyperflatten &lt;PIN&gt;")
                 return
             n = len(self.st.positions)
             self.rec({"ev": "pause", "reason": "/flatten"})
@@ -1071,7 +1071,7 @@ class Bot:
                 w.pm.flatten("flatten")
             self.on_sides("flatten", flatten)
             self.ui.send(f"🛑 <b>Flattened</b> {n} position(s) (and every side wallet). ⏸️ Entries paused · "
-                         f"/resume to continue.")
+                         f"/hyperresume to continue.")
 
     def reset_wallets(self) -> str:
         """/reset: archive every ledger and start fresh ones that keep the followed leaders (with their 'since'),

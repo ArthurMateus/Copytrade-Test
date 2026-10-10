@@ -300,7 +300,7 @@ def test_rebalance_follows_the_best_seven_now():
     from copybot.selection import rebalance
     followed = {R[0]: NOW - HOUR, R[8]: NOW - HOUR, R[20]: NOW - 48 * HOUR}   # R[20] is no longer eligible
     p = rebalance(R[:10], followed, set(), {}, NOW, CFG)
-    assert p.joins == R[1:7] and dict(p.drops) == {R[8]: "replaced by a better trader (/search)",
+    assert p.joins == R[1:7] and dict(p.drops) == {R[8]: "replaced by a better trader (/hypersearch)",
                                                    R[20]: "no longer passes the rules"}
     # fewer than 7 eligible: nobody eligible is dropped, free slots fill
     p = rebalance(R[:3], {R[2]: NOW}, set(), {}, NOW, CFG)

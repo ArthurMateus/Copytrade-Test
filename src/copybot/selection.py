@@ -87,7 +87,7 @@ def rebalance(ranking: list[str], followed: dict[str, int], paused: set[str], dr
               and (a in followed or now_ms - dropped.get(a, -10**15) >= cooldown)][: cfg.risk.max_leaders]
     rank = set(ranking)
     drops = [(a, "paused after a bad streak" if a in paused else
-              ("replaced by a better trader (/search)" if a in rank else "no longer passes the rules"))
+              ("replaced by a better trader (/hypersearch)" if a in rank else "no longer passes the rules"))
              for a in followed if a not in target]
     joins = [a for a in target if a not in followed]
     return Plan(joins, drops, {})

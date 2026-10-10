@@ -84,6 +84,20 @@ def test_position_without_valid_stop_is_uncertain(tmp_path):
     assert any("no valid stop" in u for u in st.uncertain)
 
 
+def test_a_trailed_stop_past_the_entry_is_valid_after_a_restart(tmp_path):
+    """The trailing stop moves a long's stop above its entry (a short's below): that is a valid stop, not a broken
+    one (found live 2026-10-10: it paused every Invo wallet at the restart)."""
+    lg = Ledger(tmp_path / "l.jsonl")
+    lg.append({"ev": "open", "pos": _pos(entry=100, stop=97), "fee": 0})
+    pid = _pos()["pos_id"]
+    lg.append({"ev": "stop_set", "coin": "BTC", "pos_id": pid, "stop_px": 103.0, "why": "trail"})
+    lg.append({"ev": "open", "pos": _pos(coin="ETH", side=-1, entry=100, stop=103, pid="p2"), "fee": 0})
+    lg.append({"ev": "stop_set", "coin": "ETH", "pos_id": "p2", "stop_px": 96.0, "why": "trail"})
+    lg.close()
+    st = Ledger(tmp_path / "l.jsonl").replay()
+    assert st.positions["BTC"].stop_px == 103.0 and st.positions["ETH"].stop_px == 96.0 and not st.uncertain
+
+
 def test_event_for_unknown_position_is_uncertain(tmp_path):
     lg = Ledger(tmp_path / "l.jsonl")
     lg.append({"ev": "close", "coin": "BTC", "pos_id": "nope", "px": 1, "fee": 0})

@@ -369,8 +369,9 @@ class Ledger:
         for iid, iev in st.open_intents.items():
             st.uncertain.append(f"order intent {iid} ({iev.get('action')} {iev.get('coin')}) has no recorded result")
         for p in st.positions.values():
-            bad = p.stop_px <= 0 or (p.side > 0 and p.stop_px >= p.entry_px) or (p.side < 0 and p.stop_px <= p.entry_px)
-            if bad:
+            # a stop on the winning side of the entry is fine: the trailing stop moves it there to lock in profit
+            # (2026-10-10: a trailed PONS stop above its entry was flagged at restart and paused the Invo wallets)
+            if not (0 < p.stop_px < p.entry_px * 10):
                 st.uncertain.append(f"position {p.coin} has no valid stop (stop={p.stop_px} entry={p.entry_px})")
         self._seq = st.seq
         return st

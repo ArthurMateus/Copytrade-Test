@@ -140,7 +140,7 @@ def trade_card(p: Position, mark: float | None, now_ms: float) -> str:
 REASONS = {"leader_close": "the trader closed", "leader_flip": "the trader reversed", "stop": "🛑 stop-loss hit",
            "trail_stop": "🔒 trailing stop (profit locked)",
            "leader_reduce": "the trader reduced", "reconcile_leader_flat": "the trader closed (caught by check)",
-           "flatten": "/flatten", "leader_reopened": "stale copy", "reconcile_leader_reduced": "check",
+           "flatten": "/hyperflatten", "leader_reopened": "stale copy", "reconcile_leader_reduced": "check",
            "conflict_better_leader": "⚔️ a better trader took the other side", "backer_close": "🤝 backer closed",
            "backer_flip": "🤝 backer reversed", "reconcile_backer_flat": "🤝 backer closed (caught by check)"}
 
