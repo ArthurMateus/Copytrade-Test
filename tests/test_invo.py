@@ -10,7 +10,7 @@ import pytest
 from copybot import config, invo, log
 from tests.fakes import fixture
 from tests.fakes_invo import FakeInvo
-from tests.test_e2e import LEADER, env, start_bot, stop_bot, wait_for  # noqa: F401 (env is a fixture)
+from tests.test_e2e import LEADER, PIN, env, start_bot, stop_bot, wait_for  # noqa: F401 (env is a fixture)
 
 
 # ---- parsers ------------------------------------------------------------------------------------------
@@ -307,5 +307,46 @@ def test_bot_mirrors_the_traders_add_and_partial_close(invo_env, monkeypatch):
         assert wait_for(lambda: "resized by the trader 6.0% → 3.0%" in text())
         f.close_call(pid, cid)
         assert wait_for(lambda: "ETH" not in bot.invo.st.positions, timeout=10)
+    finally:
+        stop_bot(bot, th)
+
+
+def test_each_book_controls_only_its_own_wallets(invo_env, monkeypatch):
+    """Owner request 2026-10-10: /invopause, /invoresume, /invoflatten, /invoreset act on the Invo wallets only, and the
+    /hyper ones no longer touch them."""
+    hl, dc, data, cdir, f, tok = invo_env
+    pid = f.add_user("akira")[0]
+    bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
+    text = lambda: " ".join(m["text"] for m in dc.sent + dc.edits)
+    try:
+        dc.say("/hyperpause")
+        assert wait_for(lambda: bot.st.entries_paused)
+        assert not any(w.st.entries_paused for w in bot.invo_wallets())          # Hyperliquid only
+        dc.say("/hyperresume")
+        assert wait_for(lambda: not bot.st.entries_paused)
+        dc.say("/invopause")
+        assert wait_for(lambda: all(w.st.entries_paused for w in bot.invo_wallets()))
+        assert not bot.st.entries_paused and not any(w.st.entries_paused for w in bot.sides if not w.own_leaders)
+        dc.say("/invoresume")
+        assert wait_for(lambda: not any(w.st.entries_paused for w in bot.invo_wallets()))
+        dc.say("/invofollow akira")
+        assert wait_for(lambda: bot.invo_watch.known.get("akira") is not None, timeout=10)
+        f.open_call(pid, "ETH", long=True, leverage=5, size=0.05, entry=3000.0)
+        assert wait_for(lambda: "ETH" in bot.invo.st.positions, timeout=10)
+        dc.say("/invoreset 0000")
+        assert wait_for(lambda: "Wrong or missing PIN. Usage: /invoreset" in text())
+        dc.say(f"/invoreset {PIN}")
+        assert wait_for(lambda: "Invo reset refused" in text())
+        dc.say(f"/invoflatten {PIN}")
+        assert wait_for(lambda: not any(w.st.positions for w in bot.invo_wallets()), timeout=10)
+        assert wait_for(lambda: "Invo flattened" in text())
+        dc.say("/invoprogress")
+        assert wait_for(lambda: "🧾" in text() and "Progress" in text())
+        dc.say(f"/invoreset {PIN}")
+        assert wait_for(lambda: "Invo reset done" in text() and bot.restart_at > 0)
+        arch = next((data / "archive").glob("invo-reset-*"))
+        assert (arch / "wallets" / "invo_calls" / "ledger.jsonl").exists()
+        assert (data / "wallets" / "risk_20pct" / "ledger.jsonl").exists()              # Hyperliquid untouched
+        assert (data / "ledger.jsonl").exists()
     finally:
         stop_bot(bot, th)

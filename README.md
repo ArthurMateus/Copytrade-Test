@@ -48,29 +48,29 @@ Run the tests: `uv run pytest` (about 2 minutes; this includes real-process kill
 | Commands, outbox and in-place edited cards; Discord transport; card rendering | `chat.py`, `discord.py`, `cardfmt.py` |
 | Threads and the trading loop | `runner.py` |
 
-Commands (Discord slash commands). The bot has two books that run at the same
-time in one process, each with its own family of commands:
+Commands (Discord slash commands). Three books run at the same time in one process (Hyperliquid, FOMO / Solana and
+Invo calls), and every book has the SAME 13 commands (owner request 2026-10-10): put the book in front of the verb,
+e.g. `/hypertrades`, `/fomoadd <wallet>`, `/invofollow <user>`. Each book's commands act on that book only.
 
-| Hyperliquid | FOMO (Solana) | What it does |
-|---|---|---|
-| `/hyperstatus` | `/fomo` | wallet, P&L, health (live card) |
-| `/hypertrades` | `/fomotrades` | open trades at live prices and P&L against the $300 start (live) |
-| `/hypertraders` | `/fomotraders` | followed traders: score, copied trades, wins/losses, money made (live) |
-| `/hyperwallet` | `/fomowallet` | Hyperliquid: the same copies at 1/2/5/10/20% risk, plus the **mirror x10** wallet (each copy sized as the trader's position / its account value x 10 of our 300$, at least 10$, capped like the 5% wallet), compared. FOMO: cash, invested, fees, loss limits |
-| | `/fomowallets` | FOMO: the same trades at 1% (main) and 2/5/10/20% risk per trade (side wallets), compared (live) |
-| `/hyperpositions` | `/fomopositions` | short list of open trades |
-| `/hyperleaders` | `/fomoleaders` | followed wallets, one line each (live) |
-| `/hyperprogress` | `/fomoprogress` | success metrics (Hyperliquid also shows longs and shorts separately) |
-| `/hypersearch` | `/fomosearch` | look for new traders now |
-| | `/fomofollow <wallet>`, `/fomounfollow <wallet>` | follow a wallet YOU picked (no scoring; kept through re-ranking and restarts, still paused by its own bad copy results), or stop following it. Without `HELIUS_API_KEY` there is no automatic daily search: picks are the way to choose FOMO traders, and copying runs on the free public endpoint |
-| `/hyperadd 0x…` | `/fomoadd <wallet>` | check ONE wallet you found with the same strict rules now; followed at once if it passes and fewer than 7 are followed, else the bot says which rules failed. A FOMO wallet added this way is re-checked at every later search |
-| `/hyperpause`, `/hyperresume` | `/fomopause`, `/fomoresume` | stop / allow new entries (exits always run) |
-| `/hyperflatten <PIN>` | `/fomoflatten <PIN>` | close everything of that book and pause it |
-| `/hyperreset <PIN>` | `/fomoreset <PIN>` | that book back to the start ($300, no history, traders kept, old history archived; refused while a trade is open) |
+| Verb | `/hyper…` · `/fomo…` · `/invo…` |
+|---|---|
+| `status` | the book at a glance: wallet, P&L, health (FOMO: also cash, fees, loss limits) (live card) |
+| `trades` | open trades at live prices and P&L against the $300 start (live) |
+| `traders` | followed traders: score, copied trades, wins/losses, money made (FOMO: also the search progress) (live) |
+| `wallets` | the same trades at other risk levels, compared (Hyperliquid also the **mirror x10** wallet; Invo the trader-size wallet next to 1/2/5/10/20%) (live) |
+| `progress` | success metrics (longs and shorts separately) |
+| `search` | look for traders now and follow the best 7 (the daily search only reports: see daily picks) |
+| `add <wallet or user>` | check ONE trader with the strict rules now; followed at once if it passes and a slot is free, else the bot says which rules failed |
+| `follow <wallet or user>` | follow a trader YOU picked, without the rules (kept through re-ranking and restarts, still paused by its own bad copy results) |
+| `unfollow <wallet or user>` | stop following it (its open copies exit normally) |
+| `pause`, `resume` | stop / allow new copies in that book (exits and stops always run) |
+| `flatten <PIN>` | close every trade of that book and pause it |
+| `reset <PIN>` | that book back to the start ($300, no history, traders kept, old history archived; refused while a trade is open) |
 
-Plus `/picks`, `/help` and `/restart`. 
+Plus `/picks`, `/help` and `/restart`. Older names (`/hyperwallet`, `/hyperpositions`, `/hyperleaders`, `/fomowallet`,
+`/fomoleaders` ...) still work as aliases but are no longer listed.
 Each open trade gets one message, which is edited until it becomes the final ✅/❌ summary. A reset restarts the
-process, so run the bot in the restart loop below. `/hyperreset` never touches FOMO and `/fomoreset` never touches Hyperliquid.
+process, so run the bot in the restart loop below. `/hyperreset`, `/fomoreset` and `/invoreset` each touch only their own book.
 
 **Daily picks (since 2026-10-10): the bot reports, you follow.** The searches no longer follow anyone by themselves
 (`auto_follow = false` in `config/selection.toml` and `config/sol.toml`). Every day at 13:00 (your time,

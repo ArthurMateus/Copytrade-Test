@@ -151,6 +151,7 @@ class InvoScorer:
         self.last = int(st.get("last", 0)) if self.scores else 0     # rules changed (or first start): search now
         self.progress: dict = {"phase": "idle", "todo": 0, "done": 0}
         self.req = threading.Event()
+        self.add_q: queue.Queue = queue.Queue()    # /invoadd: traders the owner wants checked now
 
     def _load(self) -> dict:
         try:
@@ -178,6 +179,7 @@ class InvoScorer:
     def run(self) -> None:
         while not self.stop.is_set():
             try:
+                self.handle_adds()
                 if self.req.is_set() or self.now() - self.last >= self.c.review_hours * HOUR:
                     self.req.clear()
                     self.review()
@@ -190,6 +192,25 @@ class InvoScorer:
                 self.progress = {"phase": "idle", "todo": 0, "done": 0}
                 self.stop.wait(600)
             self.stop.wait(30)
+
+    def handle_adds(self) -> None:
+        """/invoadd: score each requested trader now and publish ("invo_added", name, score or None)."""
+        while not self.stop.is_set():
+            try:
+                name = self.add_q.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                s = self.score(name)
+            except InvoAuthError:
+                raise
+            except Exception as e:
+                log.warn("invo_add_failed", trader=name, err=f"{type(e).__name__}: {e}"[:160])
+                s = None
+            if s is not None:
+                self.scores[name] = s
+                self._save()
+            self.out.put(("invo_added", name, s))
 
     def _gap(self) -> None:
         self.stop.wait(REQ_GAP_S)
@@ -233,6 +254,7 @@ class InvoScorer:
         for i, name in enumerate(cands):
             if self.stop.is_set():
                 return
+            self.handle_adds()                  # an owner request does not wait for the whole search
             try:
                 s = self.score(name)
             except InvoAuthError:

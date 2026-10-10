@@ -147,13 +147,13 @@ def test_commands_from_discord(env):
     assert wait_for(lambda: GOOD in bot.sol.st.followed, timeout=40)
     assert wait_for(lambda: env.dc.connected() and env.dc.commands is not None, timeout=10)
     names = {c["name"] for c in env.dc.commands}
-    assert {"fomo", "fomoleaders", "fomoflatten", "fomoreset", "hyperwallet", "hyperreset"} <= names                      # registered as slash commands
+    assert {"fomostatus", "fomotraders", "fomoflatten", "fomoreset", "hyperwallets", "hyperreset"} <= names                      # registered as slash commands
     assert any(c["name"] == "fomoflatten" and c.get("options") for c in env.dc.commands)    # which needs the PIN
     env.tg.say("/fomo")
-    env.dc.interact("fomoleaders")
+    env.dc.interact("fomotraders")
     env.dc.interact("fomopause", user="999")                                  # a stranger: refused
     assert wait_for(lambda: "FOMO (paper)" in env.tg_text(), timeout=10)
-    assert wait_for(lambda: "FOMO leaders" in env.dc_text(), timeout=10)
+    assert wait_for(lambda: "FOMO traders" in env.dc_text(), timeout=10)
     assert not bot.sol.st.entries_paused
     env.dc.interact("fomopause")
     assert wait_for(lambda: bot.sol.st.entries_paused, timeout=10)
@@ -238,10 +238,10 @@ def test_fomo_commands_end_to_end_including_the_reset_and_a_restart_after_it(env
     env.sol.swap(GOOD, "buy", MINT, 5_000_000, 50_000.0)
     assert wait_for(lambda: MINT in bot.sol.st.positions, timeout=20)
     env.tg.say("/fomotrades")
-    env.tg.say("/fomowallet")
+    env.tg.say("/fomostatus")
     env.tg.say("/fomotraders")
     env.dc.interact("fomotrades")
-    assert wait_for(lambda: "FOMO trades" in env.tg_text() and "FOMO wallet" in env.tg_text()
+    assert wait_for(lambda: "FOMO trades" in env.tg_text() and "Cash:" in env.tg_text()
                     and "FOMO traders" in env.tg_text(), timeout=15)
     assert wait_for(lambda: "FOMO trades" in env.dc_text() and "MEME" in env.dc_text(), timeout=15)
     # a reset is refused while a trade is open, and without the PIN
@@ -271,10 +271,10 @@ def test_hyper_commands_work_and_reset_only_hyperliquid(env):
     assert wait_for(lambda: GOOD in bot.sol.st.followed, timeout=40)
     sol_before = (env.data / "sol" / "ledger.jsonl").read_bytes()[:200]
     for cmd, needle in [("/hyperstatus", "Status"), ("/hypertrades", "Trades"), ("/hypertraders", "Traders"),
-                        ("/hyperwallet", "Wallets"), ("/hyperprogress", "Longs"), ("/hyperpositions", "No open trades")]:
+                        ("/hyperwallets", "Wallets"), ("/hyperprogress", "Longs"), ("/hyperpositions", "No open trades")]:
         env.tg.say(cmd)
         assert wait_for(lambda: needle in env.tg_text(), timeout=15), cmd
-    env.dc.interact("hyperwallet")
+    env.dc.interact("hyperwallets")
     assert wait_for(lambda: "Wallets" in env.dc_text(), timeout=15)
     env.tg.say("/hyperpause")
     assert wait_for(lambda: bot.st.entries_paused, timeout=10)

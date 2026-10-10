@@ -373,3 +373,22 @@ def test_report_only_mode_never_joins_or_swaps_but_bad_leaders_still_leave():
             followed.pop(a)
     assert set(followed) == {R[20]}          # R[26] paused: left at once; R[25] no longer eligible: left after 2 cycles
     assert not config.load("config", env={}).selection.auto_follow
+
+
+def test_owner_picks_are_never_dropped_for_rank_or_rules_only_when_paused():
+    """/hyperfollow: a wallet the owner picked stays followed through the hourly cycle and /hypersearch, even when it
+    is not in the ranking; a bad copy streak (pause) still drops it."""
+    from copybot.selection import rebalance
+    import copy
+    cfg = copy.deepcopy(CFG)
+    cfg.selection.auto_follow = False
+    pick = "0x" + "9" * 40
+    followed, sel = {pick: NOW - 100 * HOUR}, {}
+    for k in range(4):
+        p = select(sel, R[:10], followed, set(), {}, NOW + k * HOUR, cfg, keep={pick})
+        sel = p.state
+        assert not p.drops
+    p = rebalance(R[:10], followed, set(), {}, NOW, cfg, keep={pick})
+    assert not p.drops and pick not in p.joins and len(p.joins) == cfg.risk.max_leaders - 1
+    p = select(sel, R[:10], followed, {pick}, {}, NOW + 9 * HOUR, cfg, keep={pick})
+    assert p.drops == [(pick, "paused after a bad streak")]

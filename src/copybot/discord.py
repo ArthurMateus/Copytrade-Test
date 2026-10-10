@@ -28,47 +28,26 @@ from copybot.chat import COMMANDS, PIN_COMMANDS, SLASH_COMMANDS, WALLET_COMMANDS
 GREEN, RED, ORANGE, BLURPLE = 0x2ECC71, 0xE74C3C, 0xF39C12, 0x5865F2
 MAX_EMBED = 4096
 
-DESCRIPTIONS = {
-    "/hyperstatus": "Hyperliquid: wallet, P&L and health (live)",
-    "/hypertrades": "Hyperliquid: open trades at live prices and P&L vs the start (live)",
-    "/hypertraders": "Hyperliquid: followed traders and what copying them made (live)",
-    "/hyperwallet": "Hyperliquid: the same copies at 1/2/5/10/20% risk, compared (live)",
-    "/hyperpositions": "Hyperliquid: short list of open trades",
-    "/hyperleaders": "Hyperliquid: followed traders, one line each (live)",
-    "/hyperprogress": "Hyperliquid: success metrics, long vs short",
-    "/hyperpause": "Hyperliquid: pause new copies (exits and stops keep running)",
-    "/hyperresume": "Hyperliquid: resume new copies",
-    "/hyperflatten": "Hyperliquid: close EVERYTHING in every wallet and pause (needs the PIN)",
-    "/hypersearch": "Hyperliquid: look for new traders now and re-pick the best 7",
-    "/hyperreset": "Hyperliquid: every wallet back to the start, no open trades, traders kept (needs the PIN)",
-    "/restart": "Restart the bot",
-    "/picks": "Daily picks: the best traders of each book under the strict rules, with the follow commands",
-    "/help": "List the commands",
-    "/fomo": "FOMO/Solana book: equity, P&L and health (live)",
-    "/fomotrades": "FOMO: open trades at live prices and P&L vs the start (live)",
-    "/fomotraders": "FOMO: followed traders and what copying them made (live)",
-    "/fomowallet": "FOMO: the paper wallet: cash, invested, realized, unrealized (live)",
-    "/fomowallets": "FOMO: the same trades at 1/2/5/10/20% risk per trade, compared (live)",
-    "/fomopositions": "FOMO: short list of open trades",
-    "/fomoleaders": "FOMO: followed traders, one line each (live)",
-    "/fomoprogress": "FOMO: success metrics",
-    "/fomopause": "FOMO: pause new copies (exits and stops keep running)",
-    "/fomoresume": "FOMO: resume new copies",
-    "/fomoflatten": "FOMO: close every position and pause (needs the PIN)",
-    "/fomosearch": "FOMO: find and rank FOMO traders on-chain now, follow the best",
-    "/fomoadd": "FOMO: check a Solana wallet with the strict rules, follow it if it passes",
-    "/fomofollow": "FOMO: follow a wallet you picked (no scoring), copy its trades",
-    "/fomounfollow": "FOMO: stop following a wallet (open copies still exit normally)",
-    "/hyperadd": "Hyperliquid: check a wallet with the strict rules, follow it if it passes",
-    "/invo": "Invo calls wallet: followed Invo traders, open copies and results (live)",
-    "/invotrades": "Invo calls wallet: open copies at live prices (live)",
-    "/invotraders": "Invo calls wallet: what copying each Invo trader made (live)",
-    "/invowallets": "Invo: the same calls at trader size and at 1/2/5/10/20% risk, compared (live)",
-    "/invofollow": "Invo: copy the calls a trader posts from now on (paper)",
-    "/invounfollow": "Invo: stop copying a trader (open copies still exit normally)",
-    "/invosearch": "Invo: search Invo traders now with the strict rules and follow the best 7",
-    "/fomoreset": "FOMO: the wallet back to the start, no open trades, traders kept (needs the PIN)",
+BOOK_NAMES = {"hyper": "Hyperliquid", "fomo": "FOMO", "invo": "Invo"}
+VERB_TEXT = {
+    "status": "the book at a glance (live)",
+    "trades": "open trades at live prices, P&L vs the start (live)",
+    "traders": "followed traders and what copying them made (live)",
+    "wallets": "the same trades at other risk levels, compared (live)",
+    "progress": "success metrics",
+    "search": "look for traders now and follow the best 7",
+    "add": "check a trader with the strict rules, follow it if it passes",
+    "follow": "follow a trader you picked, without the rules",
+    "unfollow": "stop following a trader (open copies still exit normally)",
+    "pause": "pause new copies (exits and stops keep running)",
+    "resume": "resume new copies",
+    "flatten": "close every trade of this book and pause it (needs the PIN)",
+    "reset": "this book back to the start, no open trades, traders kept (needs the PIN)",
 }
+DESCRIPTIONS = {f"/{b}{v}": f"{n}: {t}" for b, n in BOOK_NAMES.items() for v, t in VERB_TEXT.items()}
+DESCRIPTIONS.update({"/help": "List the commands", "/restart": "Restart the bot",
+                     "/picks": "Daily picks: the best traders of each book under the strict rules, with the follow "
+                               "commands"})
 
 _TAG = re.compile(r"(</?(?:b|i|code|pre)>)")
 _MD = re.compile(r"([\\*_~`|])")
@@ -274,7 +253,7 @@ class DiscordUI(ChatUI):
         name = canon(name)
         opts = {o["name"]: o.get("value", "") for o in (d.get("data") or {}).get("options") or []}
         log.info("discord_command", cmd=name)     # never the argument (may be the PIN)
-        self._reply(d, f"👍 {name}" + (" (results in the channel)" if name not in ("/pause", "/resume", "/restart", "/fomopause", "/fomoresume")
+        self._reply(d, f"👍 {name}" + (" (results in the channel)" if name not in ("/pause", "/resume", "/restart", "/fomopause", "/fomoresume", "/invopause", "/invoresume")
                                         else ""))
         self.on_command(Command(name, str(opts.get("pin") or opts.get("wallet") or "").strip()))
 

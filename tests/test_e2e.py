@@ -376,7 +376,7 @@ def test_reset_needs_no_open_trades_and_the_pin_then_starts_fresh(env):
         arch = next((data / "archive").glob("reset-*"))
         old = Ledger(arch / "ledger.jsonl").replay()
         assert old.closed and old.realized != 0                             # nothing deleted
-        assert (arch / "wallets" / "risk_20pct" / "ledger.jsonl").exists() and not (data / "wallets").exists()
+        assert (arch / "wallets" / "risk_20pct" / "ledger.jsonl").exists() and not (data / "wallets" / "risk_20pct").exists()
         new = Ledger(data / "ledger.jsonl").replay()
         assert new.equity() == 300 and not new.closed and not new.positions and not new.uncertain
         assert new.followed == {LEADER: since}                             # traders kept, with their 'since'
@@ -459,5 +459,27 @@ def test_rankings_only_report_and_picks_lists_them_with_the_follow_command(env):
         msg = next(m["text"] for m in dc.sent if "Daily picks · 🔷 Hyperliquid" in m["text"])
         assert f"<code>/hyperadd {TOP[0]}</code>" in msg and f"/hyperadd {TOP[7]}" not in msg     # the best 7
         assert "70% win" in msg
+    finally:
+        stop_bot(bot, th)
+
+
+def test_hyperfollow_and_hyperunfollow(env):
+    """A wallet you picked, followed without the strict rules: kept through ranking cycles, dropped on request."""
+    hl, dc, data, cdir = env
+    bot, th = start_bot(env)
+    pick = "0x" + "ab" * 20
+    try:
+        dc.say("/hyperfollow nonsense")
+        assert wait_for(lambda: any("Usage: /hyperfollow" in m["text"] for m in dc.sent))
+        dc.say(f"/hyperfollow {pick}")
+        assert wait_for(lambda: pick in bot.st.followed and pick in bot.st.picked)
+        assert wait_for(lambda: all(pick in w.st.followed for w in bot.sides if not w.own_leaders))
+        assert wait_for(lambda: any("your pick, without the strict rules" in m["text"] for m in dc.sent))
+        bot.q.put(("ranking", TOP, len(TOP), {a: {"eligible": True, "score": 80} for a in TOP}))
+        time.sleep(0.5)
+        assert pick in bot.st.followed                       # not ranked, still followed: your pick
+        dc.say(f"/hyperunfollow {pick}")
+        assert wait_for(lambda: pick not in bot.st.followed)
+        assert wait_for(lambda: all(pick not in w.st.followed for w in bot.sides))
     finally:
         stop_bot(bot, th)

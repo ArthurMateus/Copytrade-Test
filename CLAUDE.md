@@ -196,6 +196,18 @@ instances on the same wallet.
   gets the refresh token with a DevTools console snippet (README) that decrypts `FlutterSecureStorage.REFRESH_TOKEN`
   (AES-GCM, key in `localStorage.FlutterSecureStorage`) and copies it; `tools/invo_check.py` verifies it.
 
+## One command set for every book (owner request 2026-10-10)
+- `chat.VERBS` (status, trades, traders, wallets, progress, search, add, follow, unfollow, pause, resume, flatten,
+  reset) x `chat.BOOKS` (hyper, fomo, invo) = the 39 slash commands (+ /help /restart /picks). Canonical names: HL the
+  short ones (/status ...), FOMO /fomo + /fomo<verb>, Invo /invo + /invo<verb>; old names are ALIASES (hidden).
+  Removed as commands: positions, leaders, /fomowallet (its money rows are in /fomostatus), bare /fomo and /invo.
+- Each book's controls act on its own wallets only: `Bot.on_sides` skips own_leaders wallets for pause/resume/flatten
+  too; `/hyperreset` archives only the main + HL side wallet dirs (Invo dirs stay); `/invopause` `/invoresume`
+  `/invoflatten` `/invoreset` (`Bot.invo_reset`, archive `data/archive/invo-reset-<stamp>/`) act on `invo_wallets()`.
+- New: `/hyperfollow` / `/hyperunfollow` (`Bot.hyper_follow`: follow event `picked: true`; `select`/`rebalance` take
+  `keep=st.picked`, a pick is only dropped when paused), `/invoadd` (`InvoScorer.add_q` -> `("invo_added", name,
+  score)` -> `Bot.on_invo_added`), `/invoprogress`.
+
 ## Invo copy speed (owner request 2026-10-10)
 - `invo.poll_s` 30 -> 5 and `invo.request_gap_s` = 0.5 (the client's spacing, was a fixed 1 s): a new call is seen
   within ~3.5 s (7 traders) + 5 s instead of up to ~40 s (a STRK copy was 26 s late). Invo has no push channel we can

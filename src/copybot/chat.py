@@ -20,29 +20,30 @@ from dataclasses import dataclass, field
 from copybot import log
 from copybot.config import Config
 
-# Three books. Hyperliquid commands are /hyper<x> (the short originals /status, /trades, ... are kept as aliases),
-# the Solana/FOMO book's are /fomo<x>, Invo's /invo<x>. `canon` turns every name into one canonical name.
-ALIASES = {"/hyperstatus": "/status", "/hypertrades": "/trades", "/hypertraders": "/traders",
-           "/hyperwallet": "/wallets", "/hyperwallets": "/wallets", "/hyperpositions": "/positions",
-           "/hyperleaders": "/leaders", "/hyperprogress": "/progress", "/hypersearch": "/search",
-           "/hyperpause": "/pause", "/hyperresume": "/resume", "/hyperflatten": "/flatten", "/hyperreset": "/reset",
-           "/hyperadd": "/add",
-           "/fomostatus": "/fomo"}
-HYPER_COMMANDS = ("/hyperstatus", "/hypertrades", "/hypertraders", "/hyperwallet", "/hyperpositions",
-                  "/hyperleaders", "/hyperprogress", "/hypersearch", "/hyperpause", "/hyperresume", "/hyperflatten",
-                  "/hyperreset", "/hyperadd")
-FOMO_COMMANDS = ("/fomo", "/fomotrades", "/fomotraders", "/fomowallet", "/fomopositions", "/fomoleaders",
-                 "/fomoprogress", "/fomosearch", "/fomopause", "/fomoresume", "/fomoflatten", "/fomoreset",
-                 "/fomoadd", "/fomofollow", "/fomounfollow", "/fomowallets")
-INVO_COMMANDS = ("/invo", "/invotrades", "/invotraders", "/invowallets", "/invofollow", "/invounfollow", "/invosearch")
-COMMANDS = ("/status", "/trades", "/traders", "/wallets", "/positions", "/leaders", "/progress", "/search", "/pause",
-            "/resume", "/flatten", "/reset", "/restart", "/help", "/add", "/picks") + tuple(ALIASES) + FOMO_COMMANDS \
-    + INVO_COMMANDS
+# Three books with the SAME 13 commands each (owner request 2026-10-10): /<book><verb> for book in hyper, fomo, invo and
+# verb in VERBS. `canon` turns every name into the one canonical name a book's handler uses: Hyperliquid's are the
+# short originals (/status, /trades ...), FOMO's and Invo's keep their prefix (/fomo = /fomostatus, /invo = /invostatus).
+# Older names (/hyperpositions, /fomoleaders, /fomowallet ...) are kept as aliases of the new ones.
+BOOKS = ("hyper", "fomo", "invo")
+VERBS = ("status", "trades", "traders", "wallets", "progress", "search", "add", "follow", "unfollow", "pause", "resume",
+         "flatten", "reset")
+HYPER_COMMANDS = tuple(f"/hyper{v}" for v in VERBS)
+FOMO_COMMANDS = tuple(f"/fomo{v}" for v in VERBS)
+INVO_COMMANDS = tuple(f"/invo{v}" for v in VERBS)
+ALIASES = {f"/hyper{v}": f"/{v}" for v in VERBS}
+ALIASES.update({"/fomostatus": "/fomo", "/invostatus": "/invo",
+                # older names
+                "/hyperwallet": "/wallets", "/hyperpositions": "/trades", "/hyperleaders": "/traders",
+                "/positions": "/trades", "/leaders": "/traders",
+                "/fomowallet": "/fomo", "/fomopositions": "/fomotrades", "/fomoleaders": "/fomotraders"})
+COMMANDS = tuple(dict.fromkeys(("/help", "/restart", "/picks", "/fomo", "/invo") + tuple(f"/{v}" for v in VERBS)
+                               + tuple(ALIASES) + FOMO_COMMANDS + INVO_COMMANDS))
 # what Discord shows in its slash-command list
 SLASH_COMMANDS = ("/help", "/restart", "/picks") + HYPER_COMMANDS + FOMO_COMMANDS + INVO_COMMANDS
-PIN_COMMANDS = ("/flatten", "/reset", "/fomoflatten", "/fomoreset")
-WALLET_COMMANDS = ("/add", "/fomoadd", "/fomofollow", "/fomounfollow", "/invofollow", "/invounfollow")   # take a wallet
-                                                                                     # address or username argument
+PIN_COMMANDS = ("/flatten", "/reset", "/fomoflatten", "/fomoreset", "/invoflatten", "/invoreset")
+# take a wallet address (or Invo username) as their argument
+WALLET_COMMANDS = ("/add", "/follow", "/unfollow", "/fomoadd", "/fomofollow", "/fomounfollow", "/invoadd",
+                   "/invofollow", "/invounfollow")
 
 
 def canon(name: str) -> str:
@@ -217,23 +218,18 @@ class ChatUI:
         self.on_card_id(c.key, None)
 
 
-HELP = ("🤖 <b>Copybot (paper)</b>\n\n"
-        "⚡ <b>Hyperliquid</b>\n"
-        "/hyperstatus – wallet, P&amp;L, health (live)\n"
-        "/hypertrades – open trades at live prices + P&amp;L vs the start (live)\n"
-        "/hypertraders – followed traders and what copying them earned (live)\n"
-        "/hyperwallet – the same copies at 1/2/5/10/20% risk, compared (live)\n"
-        "/hyperpositions – open positions (short list)\n"
-        "/hyperleaders – followed wallets (live)\n"
-        "/hyperprogress – success metrics, long vs short\n"
-        "/hyperpause · /hyperresume – new entries (exits always run)\n"
-        "/hyperflatten &lt;PIN&gt; – close everything and pause\n"
-        "/hypersearch – look for new traders now and re-pick the best 7\n"
-        "/picks – the best traders of each book under the strict rules (also sent daily at 13h), with the follow "
-        "commands\n"
-        "/hyperadd 0x… – check one wallet with the strict rules, follow it if it passes\n"
-        "/invo · /invotrades · /invotraders · /invowallets – the Invo wallets (live cards)\n"
-        "/invofollow &lt;user&gt; · /invounfollow &lt;user&gt; – copy Invo traders' posted calls (paper)\n"
-        "/invosearch – search Invo traders now with the strict rules and follow the best 7\n"
-        "/hyperreset &lt;PIN&gt; – every Hyperliquid wallet back to the start (no open trades), traders kept\n\n"
-        "/restart – restart the bot")
+HELP = ("🤖 <b>Copybot (paper)</b> · three books, the same commands in each\n"
+        "Put the book in front: <b>/hyper</b>… (Hyperliquid) · <b>/fomo</b>… (FOMO / Solana) · <b>/invo</b>… (Invo calls)\n\n"
+        "status – the book at a glance (live)\n"
+        "trades – open trades at live prices, P&amp;L vs the start (live)\n"
+        "traders – followed traders and what copying them made (live)\n"
+        "wallets – the same trades at other risk levels, compared (live)\n"
+        "progress – success metrics\n"
+        "search – look for traders now and follow the best 7\n"
+        "add &lt;wallet or user&gt; – check it with the strict rules, follow it if it passes\n"
+        "follow &lt;wallet or user&gt; – follow it without the rules (your pick) · unfollow &lt;…&gt;\n"
+        "pause · resume – new copies in that book (exits and stops always run)\n"
+        "flatten &lt;PIN&gt; – close every trade of that book and pause it\n"
+        "reset &lt;PIN&gt; – that book back to the start (no open trades), traders kept\n\n"
+        "Examples: /hypertrades · /fomoadd &lt;wallet&gt; · /invofollow &lt;user&gt;\n"
+        "/picks – the best traders of each book (also daily at 13h) · /restart – restart the bot")

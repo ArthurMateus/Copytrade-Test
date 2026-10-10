@@ -338,7 +338,7 @@ class SolBot:
         elif kind == "sol_found":
             traders, n_cands, n_todo = item[1:]
             self.ui.send(f"🔎 🪙 <b>FOMO search</b> · {traders} FOMO traders seen in the last minutes of FOMO trades · "
-                         f"scoring the {n_cands} biggest ({n_todo} need fresh data). Progress: /fomoleaders")
+                         f"scoring the {n_cands} biggest ({n_todo} need fresh data). Progress: /fomotraders")
         elif kind == "sol_review":
             self.on_review(*item[1:])
         elif kind == "sol_added":
@@ -504,11 +504,13 @@ class SolBot:
     def render(self, key: str, h, marks: dict, now: float) -> str:
         handles = {a: self.handle_of(a) for a in (*self.st.followed, *(p.leader for p in self.st.positions.values()))}
         if key == "sol:status":
-            return fmt.status_card(self.st, marks, h, now, self.auth_ok, self.scorer.progress)
+            return fmt.status_card(self.st, marks, h, now, self.auth_ok, self.scorer.progress, cfg=self.c)
         if key == "sol:trades":
             return fmt.trades_card(self.st, marks, now, handles)
         if key == "sol:traders":
-            return fmt.traders_card(self.st, marks, self.ranks, self.scores, handles, now)
+            body = fmt.traders_card(self.st, marks, self.ranks, self.scores, handles, now)
+            head, _, last = body.rpartition("\n")            # the search line goes above "updated ..."
+            return f"{head}\n🔎 Search: {esc(fmt.search_line(self.scorer.progress, 0))}\n{last}" if head else body
         if key == "sol:wallet":
             return fmt.wallet_card(self.st, marks, self.c, now)
         if key == "sol:wallets":
@@ -529,7 +531,7 @@ class SolBot:
 
     # ---- commands -----------------------------------------------------------------------------------------------
     LIVE = {"/fomo": "sol:status", "/fomotrades": "sol:trades", "/fomotraders": "sol:traders",
-            "/fomowallet": "sol:wallet", "/fomoleaders": "sol:leaders", "/fomowallets": "sol:wallets"}
+            "/fomowallets": "sol:wallets"}
 
     def command(self, c) -> None:
         now, marks = now_ms(), self.prices.marks()
@@ -538,8 +540,6 @@ class SolBot:
             self.live_cards.add(key)
             self.last_body.pop(key, None)
             self.ui.set_card(key, self.render(key, self.health(), marks, now), new=True)
-        elif c.name == "/fomopositions":
-            self.ui.send(fmt.positions_text(self.st, marks))
         elif c.name == "/fomoprogress":
             self.ui.send(fmt.progress_text(self.st, marks, now))
         elif c.name == "/fomosearch":
@@ -550,7 +550,7 @@ class SolBot:
                 return
             self.scorer.search_req.set()
             self.ui.send("🔎 🪙 Looking for active FOMO traders on-chain and scoring them now; I will follow the best "
-                         f"{self.c.max_leaders} when it ends. Progress: /fomoleaders")
+                         f"{self.c.max_leaders} when it ends. Progress: /fomotraders")
         elif c.name == "/fomoadd":
             a = c.arg.strip()
             if not re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", a) or a == self.c.fomo_fee_payer:
@@ -582,7 +582,7 @@ class SolBot:
                 return
             if len(self.st.followed) >= self.c.max_leaders:
                 self.ui.send(f"⛔ 🪙 Already following {len(self.st.followed)} (the maximum). "
-                             "/fomounfollow one first (/fomoleaders lists them).")
+                             "/fomounfollow one first (/fomotraders lists them).")
                 return
             now = now_ms()
             self.rec({"ev": "follow", "leader": a, "picked": True})

@@ -37,7 +37,8 @@ class Plan:
 
 
 def select(sel: dict, ranking: list[str], followed: dict[str, int], paused: set[str], dropped: dict[str, int],
-           now_ms: int, cfg: Config) -> Plan:
+           now_ms: int, cfg: Config, keep=frozenset()) -> Plan:
+    """`keep`: owner picks (/hyperfollow), never dropped for rank or rules, only when paused after a bad streak."""
     s = cfg.selection
     streaks = dict(sel.get("streaks", {}))
     rank = {a: i + 1 for i, a in enumerate(ranking)}
@@ -55,6 +56,8 @@ def select(sel: dict, ranking: list[str], followed: dict[str, int], paused: set[
         d = new.get(a, {}).get("drop", 0)
         if a in paused:
             drops.append((a, "paused after a bad streak"))
+        elif a in keep:
+            continue
         elif a not in rank and d >= s.confirm_cycles:
             drops.append((a, f"no longer passes the rules for {s.confirm_cycles} cycles"))
         elif d >= s.confirm_cycles and now_ms - since >= s.min_follow_hours * HOUR:
@@ -78,13 +81,15 @@ def select(sel: dict, ranking: list[str], followed: dict[str, int], paused: set[
 
 
 def rebalance(ranking: list[str], followed: dict[str, int], paused: set[str], dropped: dict[str, int],
-              now_ms: int, cfg: Config) -> Plan:
+              now_ms: int, cfg: Config, keep=frozenset()) -> Plan:
     """/search (owner request): follow the best `max_leaders` of the ranking right now, without the daily window
     or the confirmation cycles. Followed leaders outside them are dropped (their open copies keep being managed
     until they close; no new copies). Paused leaders and leaders in their drop cooldown are not picked."""
     cooldown = cfg.selection.dropped_cooldown_days * DAY
-    target = [a for a in ranking if a not in paused
-              and (a in followed or now_ms - dropped.get(a, -10**15) >= cooldown)][: cfg.risk.max_leaders]
+    keepers = [a for a in followed if a in keep and a not in paused]          # owner picks keep their slot
+    target = keepers + [a for a in ranking if a not in paused and a not in keepers
+                        and (a in followed or now_ms - dropped.get(a, -10**15) >= cooldown)][
+        : max(0, cfg.risk.max_leaders - len(keepers))]
     rank = set(ranking)
     drops = [(a, "paused after a bad streak" if a in paused else
               ("replaced by a better trader (/hypersearch)" if a in rank else "no longer passes the rules"))

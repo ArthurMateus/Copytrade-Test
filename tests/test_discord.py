@@ -52,8 +52,9 @@ def test_slash_commands_registered_and_only_the_owner_commands(dc):
     fake, ui, cmds, _ = dc
     assert wait_for(lambda: fake.commands is not None and fake.connected())
     names = {c["name"] for c in fake.commands}
-    assert {"hyperstatus", "hypertrades", "hypertraders", "hyperwallet", "hyperflatten", "hyperpause", "hyperresume",
-            "hyperreset", "fomo", "fomotrades", "fomotraders", "fomowallet", "fomoreset", "help"} <= names
+    assert {"hyperstatus", "hypertrades", "hypertraders", "hyperwallets", "hyperflatten", "hyperpause", "hyperresume",
+            "hyperreset", "fomostatus", "fomotrades", "fomotraders", "fomowallets", "fomoreset", "invostatus",
+            "invoreset", "help"} <= names
     assert "status" not in names and "flatten" not in names            # Discord lists the clear /hyper* and /fomo* names
     flat = next(c for c in fake.commands if c["name"] == "hyperflatten")
     assert flat["options"][0]["name"] == "pin" and flat["options"][0]["required"]

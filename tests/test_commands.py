@@ -1,5 +1,5 @@
-"""Command families (/hyper* for Hyperliquid, /fomo* for the Solana book), the long/short breakdown, the FOMO cards
-and the two resets. The real SolBot and real ledgers; only the chat is a recorder."""
+"""Command families (the same 13 verbs for /hyper*, /fomo* and /invo*), the long/short breakdown, the FOMO cards
+and the resets. The real SolBot and real ledgers; only the chat is a recorder."""
 import time
 from dataclasses import asdict
 
@@ -9,34 +9,40 @@ from copybot import config, cardfmt
 from copybot.ledger import Ledger, Position, State, now_ms
 from copybot.sol import fmt
 from copybot.sol.runner import SolBot
-from copybot.chat import ALIASES, COMMANDS, FOMO_COMMANDS, HYPER_COMMANDS, PIN_COMMANDS, SLASH_COMMANDS, Command, canon
+from copybot.chat import (ALIASES, COMMANDS, FOMO_COMMANDS, HYPER_COMMANDS, INVO_COMMANDS, PIN_COMMANDS,
+                          SLASH_COMMANDS, VERBS, WALLET_COMMANDS, Command, canon)
 
 PIN = "2468"
 A, B = "LeaderAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1", "LeaderBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB2"
-HL_HANDLED = {"/status", "/trades", "/traders", "/wallets", "/positions", "/leaders", "/progress", "/search", "/pause",
-              "/resume", "/flatten", "/reset", "/restart", "/help", "/add", "/invo", "/invotrades", "/invotraders", "/invowallets", "/invofollow", "/invounfollow", "/picks", "/invosearch"}
-FOMO_HANDLED = set(FOMO_COMMANDS)
+# the canonical names each handler answers (Bot.command for Hyperliquid and Invo, SolBot.command for FOMO)
+HL_HANDLED = {f"/{v}" for v in VERBS} | {"/restart", "/help", "/picks"}
+FOMO_HANDLED = {"/fomo"} | (set(FOMO_COMMANDS) - {"/fomostatus"})
+INVO_HANDLED = {"/invo"} | (set(INVO_COMMANDS) - {"/invostatus"})
 
 
 # ---- names ------------------------------------------------------------------------------------------------------
 def test_every_command_name_resolves_to_something_the_bot_handles():
     for name in COMMANDS:
-        assert canon(name) in HL_HANDLED | FOMO_HANDLED, name
+        assert canon(name) in HL_HANDLED | FOMO_HANDLED | INVO_HANDLED, name
     for a, target in ALIASES.items():
         assert a in COMMANDS and target in COMMANDS and a != target
-    assert canon("/hyperwallet") == canon("/hyperwallets") == "/wallets"
-    assert canon("/hyperreset") == "/reset" and canon("/fomostatus") == "/fomo" and canon("/fomo") == "/fomo"
+    assert canon("/hyperwallet") == canon("/hyperwallets") == "/wallets"                 # older names still work
+    assert canon("/hyperpositions") == "/trades" and canon("/fomoleaders") == "/fomotraders"
+    assert canon("/hyperreset") == "/reset" and canon("/fomostatus") == "/fomo" and canon("/invostatus") == "/invo"
 
 
-def test_the_two_families_are_complete_and_symmetrical():
-    wanted = {"status", "trades", "traders", "wallet", "positions", "leaders", "progress", "search", "pause", "resume",
-              "flatten", "reset", "add"}
-    assert {c[len("/hyper"):] for c in HYPER_COMMANDS} == wanted
-    assert {"/fomotrades", "/fomotraders", "/fomowallet", "/fomosearch", "/fomoreset", "/fomoflatten",
-            "/fomopause", "/fomoresume", "/fomoprogress", "/fomopositions", "/fomoleaders", "/fomo",
-            "/fomoadd", "/fomofollow", "/fomounfollow", "/fomowallets"} == set(FOMO_COMMANDS)
+def test_the_three_books_have_the_same_commands():
+    """Owner request 2026-10-10: one set of verbs, the book in front."""
+    for book, cmds in (("hyper", HYPER_COMMANDS), ("fomo", FOMO_COMMANDS), ("invo", INVO_COMMANDS)):
+        assert [c[len(book) + 1:] for c in cmds] == list(VERBS), book
+    assert VERBS == ("status", "trades", "traders", "wallets", "progress", "search", "add", "follow", "unfollow",
+                     "pause", "resume", "flatten", "reset")
+    assert set(SLASH_COMMANDS) == {"/help", "/restart", "/picks"} | set(HYPER_COMMANDS + FOMO_COMMANDS + INVO_COMMANDS)
     assert len(SLASH_COMMANDS) < 100 and len(set(SLASH_COMMANDS)) == len(SLASH_COMMANDS)
     assert all(len(c) - 1 <= 32 and c[1:].islower() for c in SLASH_COMMANDS)          # Discord's name rules
+    for b in ("hyper", "fomo", "invo"):                                                # same options everywhere
+        assert canon(f"/{b}flatten") in PIN_COMMANDS and canon(f"/{b}reset") in PIN_COMMANDS
+        assert all(canon(f"/{b}{v}") in WALLET_COMMANDS for v in ("add", "follow", "unfollow"))
 
 
 def test_dangerous_commands_need_the_pin():
@@ -127,20 +133,16 @@ def test_fomo_cards_show_the_book_the_trades_the_traders_and_the_wallet(sol):
     open_pos(bot)
     bot.prices.q["Tok1"] = type("Q", (), {"px": 0.012, "liq_usd": 5e5, "symbol": "MEME", "ts": time.time()})()
     for name, key, needles in [
-            ("/fomo", "sol:status", ["FOMO (paper)", "copying", "Wallet", "Solana data"]),
+            ("/fomo", "sol:status", ["FOMO (paper)", "copying", "Wallet", "Solana data", "Cash", "in open trades",
+                                     "Fees paid", "stops new copies at −5%"]),
             ("/fomotrades", "sol:trades", ["FOMO trades", "1 open", "MEME", "⬆️ BUY", "Entry → now", "0.01 → 0.012",
                                            "Sells when", cardfmt.short(A), "if hit", "If every stop hits"]),
             ("/fomotraders", "sol:traders", ["FOMO traders", cardfmt.short(A), "Made for you", "Their record", "90 trades",
-                                             "Typical hold", "This week / today", "Following for"]),
-            ("/fomowallet", "sol:wallet", ["FOMO wallet", "Cash", "In open trades", "Fees paid", "Today", "This week",
-                                           "stops new copies at −5%", "max 8"]),
-            ("/fomoleaders", "sol:leaders", ["FOMO leaders", cardfmt.short(A), "#1"])]:
+                                             "Typical hold", "This week / today", "Following for", "🔎 Search"])]:
         bot.command(Command(name))
         assert key in chat.cards and key in bot.live_cards, name
         for n in needles:
             assert n in chat.cards[key], (name, n, chat.cards[key])
-    bot.command(Command("/fomopositions"))
-    assert "MEME" in chat.sent[-1] and "stop" in chat.sent[-1]
     bot.command(Command("/fomoprogress"))
     assert "FOMO progress" in chat.sent[-1] and "every trade is a long" in chat.sent[-1]
 
@@ -148,11 +150,10 @@ def test_fomo_cards_show_the_book_the_trades_the_traders_and_the_wallet(sol):
 def test_fomo_wallet_cash_plus_invested_is_the_wallet(sol):
     bot, chat, _ = sol
     open_pos(bot, size=1000.0, px=0.01)
-    bot.command(Command("/fomowallet"))
-    text = chat.cards["sol:wallet"]
+    bot.command(Command("/fomo"))                 # /fomostatus shows where the money is (the old /fomowallet)
+    text = chat.cards["sol:status"]
     eq = bot.st.equity({"Tok1": 0.01})
-    assert f"Wallet now: <b>{eq:,.2f}$" in text and "In open trades: <b>10.00$" in text
-    assert f"Cash: <b>{eq - 10.0:,.2f}$" in text
+    assert f"Cash: <b>{eq - 10.0:,.2f}$ · in open trades 10.00$" in text
 
 
 def test_fomo_pause_resume_flatten_and_the_pin(sol):
@@ -207,8 +208,8 @@ def test_fomosearch_while_a_search_runs_reports_progress_instead_of_starting_ano
     bot.command(Command("/fomosearch"))
     assert not bot.scorer.search_req.is_set() and bot.search_pending
     assert "already running" in chat.sent[-1] and "12/200" in chat.sent[-1]
-    bot.command(Command("/fomoleaders"))
-    assert "12/200 FOMO traders" in chat.cards["sol:leaders"]
+    bot.command(Command("/fomotraders"))
+    assert "12/200 FOMO traders" in chat.cards["sol:traders"]
 
 
 def test_fomoreset_refuses_without_pin_or_with_open_trades(sol):

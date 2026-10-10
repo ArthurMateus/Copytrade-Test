@@ -92,7 +92,9 @@ def closed_card(t: dict, handle: str = "") -> str:
 
 
 # ---- wallet-level cards -----------------------------------------------------------------------------------
-def status_card(st: State, marks: dict, h, now_ms: float, auth_ok: bool, progress: dict | None = None) -> str:
+def status_card(st: State, marks: dict, h, now_ms: float, auth_ok: bool, progress: dict | None = None,
+                cfg=None) -> str:
+    """/fomostatus: the book at a glance, with where the money is (the old /fomowallet card) when `cfg` is given."""
     eq = st.equity(marks)
     pnl = eq - st.equity0
     day = st.marks.get("day", {}).get("equity") or st.equity0
@@ -108,8 +110,10 @@ def status_card(st: State, marks: dict, h, now_ms: float, auth_ok: bool, progres
             f"Solana data {ok(auth_ok, 'refused')}")
     return f"🪙 <b>FOMO (paper)</b> · {esc(state)}\n" + pre([
         ("Wallet", f"{fusd(eq, sign=False)} of {fusd(st.equity0, sign=False)} · {money(pnl, st.equity0)}"),
-        ("Today", money(eq - day, day)),
+        ("Today", money(eq - day, day)
+         + (f" · stops new copies at −{cfg.daily_loss_pct:g}%" if cfg is not None else "")),
         ("Open trades", f"{len(st.positions)} · at most {fusd(st.total_risk(), sign=False)} at risk"),
+        *(_money_rows(st, marks, eq) if cfg is not None else []),
         ("Traders", f"{len(st.followed)} followed" + (f" ({len(st.paused_leaders)} paused)" if st.paused_leaders else "")),
         ("Closed trades", str(len(st.closed))),
         ("Copy speed", lag_line(st)),
@@ -118,8 +122,15 @@ def status_card(st: State, marks: dict, h, now_ms: float, auth_ok: bool, progres
     ]) + "\n" + updated(now_ms)
 
 
+def _money_rows(st: State, marks: dict, eq: float) -> list:
+    invested = sum(p.size * (marks.get(p.coin) or p.entry_px) for p in st.positions.values())
+    fees = sum(t["fees"] for t in st.closed) + sum(p.fees for p in st.positions.values())
+    return [("Cash", f"{fusd(eq - invested, sign=False)} · in open trades {fusd(invested, sign=False)}"),
+            ("Fees paid", fusd(-fees))]
+
+
 def wallet_card(st: State, marks: dict, cfg, now_ms: float) -> str:
-    """/fomowallet: where the paper money is."""
+    """Where the paper money is (the money rows of /fomostatus use the same numbers)."""
     eq = st.equity(marks)
     invested = sum(p.size * (marks.get(p.coin) or p.entry_px) for p in st.positions.values())
     open_net = sum(net_pnl(p, marks.get(p.coin)) for p in st.positions.values())
@@ -269,23 +280,6 @@ def progress_text(st: State, marks: dict, now_ms: float) -> str:
         ("Copy speed", (f"{med:.1f}s") if med is not None else "-"),
         ("Too small to copy", str(st.counters.get("skipped_min_notional", 0))),
     ]) + ("\n<i>Spot memecoins: only buys are possible, so every trade is a long. Memecoins can gap through a stop.</i>")
-
-
-FOMO_HELP = ("🪙 <b>FOMO / Solana (paper)</b>\n"
-             "/fomo – book, P&amp;L and connection (live)\n"
-             "/fomotrades – open trades at live prices + P&amp;L vs the start (live)\n"
-             "/fomotraders – followed traders and what copying them earned (live)\n"
-             "/fomowallet – the paper wallet: cash, invested, fees, loss limits (live)\n"
-             "/fomowallets – the same trades at 1/2/5/10/20% risk per trade, compared (live)\n"
-             "/fomopositions · /fomoleaders · /fomoprogress\n"
-             "/fomosearch – find active FOMO traders on-chain, rank them, follow the best 7\n"
-             "/fomoadd &lt;wallet&gt; – check one Solana wallet with the strict rules, follow it if it passes\n"
-             "/fomofollow &lt;wallet&gt; – follow a wallet you picked, no scoring · /fomounfollow &lt;wallet&gt;\n"
-             "/fomopause · /fomoresume – new entries (exits always run)\n"
-             "/fomoflatten &lt;PIN&gt; – close every FOMO trade and pause\n"
-             "/fomoreset &lt;PIN&gt; – the FOMO wallet back to the start (no open trades), traders kept")
-
-SOL_HELP = FOMO_HELP     # old name
 
 
 REJECT_TEXT = (("pnl<=0", "lost money (30 d)"), ("not_profitable_7d", "lost money this week"),

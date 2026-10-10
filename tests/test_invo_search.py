@@ -211,3 +211,23 @@ def test_invosearch_searches_now_and_follows_the_best(search_env, monkeypatch):
         assert wait_for(lambda: all("invo:steady" in w.st.followed for w in bot.invo_extra))
     finally:
         stop_bot(bot, th)
+
+
+def test_invoadd_checks_a_trader_now_and_follows_it_if_it_passes(search_env, monkeypatch):
+    hl, dc, data, cdir, f, tok = search_env
+    add_trader(f, "steady", good=True)
+    add_trader(f, "coinflip", good=False)
+    monkeypatch.setenv("INVO_TOKEN_FILE", str(tok))
+    monkeypatch.setattr(invo_scorer, "REQ_GAP_S", 0.0)
+    bot, th = start_bot((hl, dc, data, cdir))
+    text = lambda: " ".join(m["text"] for m in dc.sent + dc.edits)
+    try:
+        dc.say("/invoadd coinflip")
+        assert wait_for(lambda: "/invoadd @coinflip fails the strict rules" in text(), timeout=60)
+        assert "invo:coinflip" not in bot.invo.st.followed
+        dc.say("/invoadd steady")
+        assert wait_for(lambda: "invo:steady" in bot.invo.st.followed, timeout=60)
+        assert wait_for(lambda: "passes every rule" in text())
+        assert wait_for(lambda: all("invo:steady" in w.st.followed for w in bot.invo_extra))
+    finally:
+        stop_bot(bot, th)
