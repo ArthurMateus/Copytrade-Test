@@ -113,6 +113,7 @@ class FakeInvo:
                          openTrades={"count": len(open_calls), "assets": [c["ticker"] for c in open_calls]})
                 if pid in self.updated:
                     p["updatedAt"] = iso(self.updated[pid])
+                p.update({"winRate": 95.0, "plSnapshot": 150.0})   # a portfolio good enough to copy, unless a test says
                 p.update(self.port_meta.get(pid, {}))
                 out.append(p)
             return {"portfolios": out}

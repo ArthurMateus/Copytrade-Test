@@ -160,7 +160,7 @@ def test_bot_copies_an_invo_call_and_closes_it_when_the_trader_does(invo_env, mo
         for cmd, needle in (("/invo", "Invo calls"), ("/invotrades", "Invo trades"), ("/invotraders", "Invo traders")):
             dc.say(cmd)
             assert wait_for(lambda: needle in text()), cmd
-        assert "@nicush" in text() and "✅ $100-$1000" in text() and "86% win" in text()   # its portfolios, copied
+        assert "@nicush" in text() and "✅ $100-$1000" in text() and "95% win" in text()   # its portfolios, copied
         n_edits = len(dc.edits)
         hl.mids["ETH"] = 3015.0                                                     # the price moves: cards are edited
         assert wait_for(lambda: len(dc.edits) > n_edits, timeout=10)
@@ -353,11 +353,11 @@ def test_each_book_controls_only_its_own_wallets(invo_env, monkeypatch):
 
 
 def test_weak_portfolios_are_skipped_and_the_owner_can_block_one(invo_env, monkeypatch):
-    """Owner request 2026-10-10: calls are only copied from a trader's good portfolios (win rate >= 80%, return >= 10%,
+    """Owner request 2026-10-10: calls are only copied from a trader's good portfolios (win rate >= 90%, return >= 100%,
     20+ closed calls); /invoblock blocks one by hand, /invounblock undoes it."""
     hl, dc, data, cdir, f, tok = invo_env
     good, weak = f.add_user("nicush", n_portfolios=2)
-    f.port_meta[good] = {"title": "Kitchen", "winRate": 88.0, "closedPositions": 929, "plSnapshot": 140.0}
+    f.port_meta[good] = {"title": "Kitchen", "winRate": 93.0, "closedPositions": 929, "plSnapshot": 140.0}
     f.port_meta[weak] = {"title": "Probably nothing", "winRate": 77.0, "closedPositions": 39, "plSnapshot": 12.0}
     bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
     text = lambda: " ".join(m["text"] for m in dc.sent + dc.edits)
@@ -370,7 +370,7 @@ def test_weak_portfolios_are_skipped_and_the_owner_can_block_one(invo_env, monke
         time.sleep(2.5)
         assert "SOL" not in bot.invo.st.positions
         dc.say("/invotraders")
-        assert wait_for(lambda: "🚫 Probably nothing" in text() and "skipped: win rate 77% &lt; 80%" in text()
+        assert wait_for(lambda: "🚫 Probably nothing" in text() and "skipped: win rate 77% &lt; 90%" in text()
                         and "✅ Kitchen" in text() and "+140%" in text())
         dc.say("/invoblock nicush kit")                                                    # by the start of its name
         assert wait_for(lambda: good in bot.invo.st.blocked.get("invo:nicush", {}))

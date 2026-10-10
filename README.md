@@ -68,7 +68,7 @@ e.g. `/hypertrades`, `/fomoadd <wallet>`, `/invofollow <user>`. Each book's comm
 | `reset <PIN>` | that book back to the start ($300, no history, traders kept, old history archived; refused while a trade is open) |
 
 Invo only: `/invoblock <user> <portfolio>` stops copying one portfolio of a followed trader (`/invounblock` undoes
-it). Calls are also only copied from a trader's portfolios with at least 80% wins, +10% return and 20 closed calls
+it). Calls are also only copied from a trader's portfolios with at least 90% wins, +100% return (doubled) and 20 closed calls
 (`config/invo.toml`); `/invotraders` marks each portfolio ✅ copied or 🚫 skipped and why.
 
 Plus `/picks`, `/help` and `/restart`. Older names (`/hyperwallet`, `/hyperpositions`, `/hyperleaders`, `/fomowallet`,

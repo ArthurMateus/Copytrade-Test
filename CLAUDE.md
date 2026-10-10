@@ -197,8 +197,8 @@ instances on the same wallet.
   (AES-GCM, key in `localStorage.FlutterSecureStorage`) and copies it; `tools/invo_check.py` verifies it.
 
 ## Invo portfolio filter and blocks (owner request 2026-10-10)
-- A trader's calls are copied only from its portfolios with win rate >= `invo.min_portfolio_win_rate` (0.80), return
-  >= `min_portfolio_pnl_pct` (10%; Invo's `plSnapshot` is the portfolio's % return: $100 -> $130 shows ~28-30) and
+- A trader's calls are copied only from its portfolios with win rate >= `invo.min_portfolio_win_rate` (0.90), return
+  >= `min_portfolio_pnl_pct` (100%; Invo's `plSnapshot` is the portfolio's % return: $100 -> $130 shows ~28-30) and
   >= `min_portfolio_calls` (20) closed calls, and not blocked by the owner (`/invoblock <user> <portfolio>`, matched by
   the start of its title; `/invounblock`). Blocks are ledger events `invo_block`/`invo_unblock` in the trader-size Invo
   wallet -> `State.blocked` {leader: {portfolio id: title}}. `Bot.invo_skip(name, Portfolio)` gives the reason; the
