@@ -24,10 +24,11 @@ def wallet_name(risk_pct: float) -> str:
 class SideWallet:
     def __init__(self, base: config.Config, risk_pct: float, data_dir: Path, broker: PaperBroker, health,
                  mids: dict, assets: dict, alts_ok: Callable[[str], bool], score_of: Callable[[str], float],
-                 name: str = "", label: str = "", sizer=None, own_leaders: bool = False, notify=None):
+                 name: str = "", label: str = "", sizer=None, own_leaders: bool = False, notify=None, cap=None):
         """`sizer` (the mirror wallet): its own copy sizes; `risk_pct` then only sets the limits that clamp them.
         `own_leaders` (the Invo calls wallet): it follows its own traders and gets its own moves, never the main
-        wallet's (the runner skips it for leader sync, Hyperliquid moves and reconcile)."""
+        wallet's (the runner skips it for leader sync, Hyperliquid moves and reconcile). `cap`: equity -> the most
+        notional one copy may hold (the Invo calls wallet's invo.max_risk_pct)."""
         self.own_leaders = own_leaders
         self.risk_pct = risk_pct
         self.name = name or wallet_name(risk_pct)
@@ -39,7 +40,7 @@ class SideWallet:
         self.st: State = self.ledger.replay()
         self.gate = RiskGate(self.cfg, alts_ok=alts_ok)
         self.pm = PositionManager(self.cfg, self.st, self.ledger, self.gate, broker, health, mids, assets,
-                                  score_of=score_of, pause_leaders=False, sizer=sizer,
+                                  score_of=score_of, pause_leaders=False, sizer=sizer, cap=cap,
                                   **({"notify": notify} if notify else {}))
 
     def rec(self, ev: dict) -> dict:

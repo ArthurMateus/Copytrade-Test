@@ -109,7 +109,7 @@ class Bot:
             w = SideWallet(cfg, cfg.invo.limits_pct, self.data, side_broker, self.health, self.mids, self.assets,
                            alts_ok=lambda leader: True, score_of=self.score_of, name="invo_calls",
                            label="invo calls (posted trades)", sizer=self.invo_size, own_leaders=True,
-                           notify=self.on_invo_notify)
+                           notify=self.on_invo_notify, cap=self.invo_cap)
             # a call is first seen up to poll_s after it was posted: entries may be that old (still fail closed)
             w.cfg.risk.max_entry_age_s = cfg.invo.max_call_age_s + cfg.invo.poll_s
             self.invo = w
@@ -326,11 +326,18 @@ class Bot:
 
     def invo_size(self, m, px: float, equity: float) -> float:
         """Invo calls wallet: the trader's exposure (portfolio share x leverage) x invo.size_mult of our equity,
-        at least the minimum notional; the wallet's RiskGate clamps it."""
+        capped at invo.max_risk_pct of our equity at our stop, at least the minimum notional; the wallet's RiskGate
+        clamps it too."""
         c = self._invo_call
         share = c.exposure if c is not None else 0.0
-        notional = max(share * self.cfg.invo.size_mult * equity, self.cfg.risk.min_notional_usd * 1.05)
+        notional = max(min(share * self.cfg.invo.size_mult * equity, self.invo_cap(equity)),
+                       self.cfg.risk.min_notional_usd * 1.05)
         return notional / px if px > 0 else 0.0
+
+    def invo_cap(self, equity: float) -> float:
+        """The most notional one Invo calls copy may hold (also after the trader's adds): invo.max_risk_pct of our
+        equity at our stop (owner request 2026-10-09: a 25% x 5x call had become a 375$ copy of a 300$ wallet)."""
+        return equity * self.cfg.invo.max_risk_pct / self.cfg.risk.stop_pct
 
     def invo_coin(self, ticker: str) -> str | None:
         """Invo ticker -> the Hyperliquid perp name (case can differ, e.g. kPEPE)."""

@@ -169,7 +169,9 @@ instances on the same wallet.
   `on_sides` skips it for sync/move/reconcile; `position_leaders` excludes `invo:` (no HL address). Calls become
   synthetic `Move`s (start 0 -> +-1 open, +-1 -> 0 close) through the normal PositionManager + RiskGate (limits of an
   `invo.limits_pct` 5% wallet, our 3% stop, `max_entry_age_s` = max_call_age_s + poll_s); size via `Bot.invo_size` =
-  their positionSize x leverage x `invo.size_mult` x our equity (>= 10$). Tickers mapped to HL names case-insensitively;
+  their positionSize x leverage x `invo.size_mult` x our equity (>= 10$), capped by `Bot.invo_cap` =
+  `invo.max_risk_pct` (2%) of equity at our stop, for opens AND adds (`PositionManager.cap`, skip `copy_cap`; owner
+  request 2026-10-09 after a 25% x 5x STRK call became a 375$ copy). Tickers mapped to HL names case-insensitively;
   not on HL -> told, not copied. `/hyperreset` keeps the Invo follows. Off without INVO_TOKEN_FILE (`/invo` says how).
 - Adds and trims (owner request 2026-10-09): a call's COMMITTED size is `entrySize` (percent, fixed unless the trader
   adds or trims); `positionSize` drifts with the price and must not drive copies. Synthetic Moves use the committed

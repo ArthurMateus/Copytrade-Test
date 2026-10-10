@@ -164,7 +164,8 @@ take-profit, stop-loss and size as a share of their portfolio. Invo never shows 
 bot copies the calls themselves, in its own paper side wallet **"invo calls"** ($300, compared with the others in
 `/hyperwallet`), at live Hyperliquid prices:
 - a call that appears while we watch (and is at most `invo.max_call_age_s` old) is opened with exposure = their size x
-  their leverage x `invo.size_mult` of our equity (at least $10), through the wallet's own RiskGate (limits of a 5%
+  their leverage x `invo.size_mult` of our equity (at least $10, at most `invo.max_risk_pct` = 2% of our equity at
+  our 3% stop, i.e. $200 on $300, also after the trader adds), through the wallet's own RiskGate (limits of a 5%
   wallet, our 3% stop); calls already open when we start watching a trader are never copied;
 - when the trader closes the call (or Invo closes it at its target/stop), we close.
 Commands: `/invofollow <username>`, `/invounfollow <username>`, and the live cards `/invo` (followed traders, open

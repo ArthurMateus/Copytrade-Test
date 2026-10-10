@@ -192,6 +192,9 @@ class Invo:
     max_call_age_s: float = 180.0         # a call older than this when we first see it is not copied (late entry)
     size_mult: float = 1.0                # our exposure = their size x leverage x this, of our equity (>= 10$)
     limits_pct: float = 5.0               # the wallet's limits are those of a side wallet at this risk level
+    # cap per copy (owner request 2026-10-09, after a 25% x 5x STRK call became a 375$ copy of a 300$ wallet):
+    # a copy never risks more than this % of our equity at our stop (2% at a 3% stop = 200$ on 300$)
+    max_risk_pct: float = 2.0
     max_traders: int = 7
     # fixed-risk Invo wallets next to the trader-size one (owner request 2026-10-09): each copy risks this % of the
     # wallet's own 300$ at our 3% stop, whatever the trader's size
@@ -318,6 +321,7 @@ CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
     ("invo", "max_call_age_s"): (10, 1800),
     ("invo", "size_mult"): (0.1, 10.0),
     ("invo", "limits_pct"): (0.5, 20.0),
+    ("invo", "max_risk_pct"): (0.1, 20.0),
     ("invo", "max_traders"): (0, 20),
     ("sol", "max_candidates"): (1, 1000),
     ("sol", "discover_pages"): (1, 500),

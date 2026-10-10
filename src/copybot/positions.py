@@ -38,12 +38,14 @@ class PositionManager:
                  health: Callable[[], Health], mids: dict[str, float], assets: dict[str, Asset],
                  notify: Callable[..., None] = lambda *a, **k: None,
                  score_of: Callable[[str], float] = lambda leader: 0.0, pause_leaders: bool = True,
-                 sizer: Callable[[Move, float, float], float] | None = None):
+                 sizer: Callable[[Move, float, float], float] | None = None,
+                 cap: Callable[[float], float] | None = None):
         self.cfg, self.st, self.ledger, self.gate, self.broker = cfg, st, ledger, gate, broker
         self.health, self.mids, self.assets, self.notify = health, mids, assets, notify
         self.score_of = score_of   # wallet score 0-100 of a leader (0 when unknown)
         self.pause_leaders = pause_leaders   # False for side wallets: they follow the main wallet's pauses
         self.sizer = sizer   # (move, price, our equity) -> wanted size; None = fixed risk (the gate still clamps)
+        self.cap = cap       # our equity -> the most notional one copy may hold (opens and adds); None = no cap
 
     # ---- ledger helpers -----------------------------------------------------------------------
     def _rec(self, ev: dict) -> dict:
@@ -242,6 +244,11 @@ class PositionManager:
         pos = self.st.positions[m.coin]
         h = self.health()
         px = self.mids.get(m.coin) or m.px
+        if self.cap is not None:
+            room = self.cap(self.st.equity(self.mids)) / px - pos.size if px > 0 else 0.0
+            if room * px < self.cfg.risk.min_notional_usd:
+                return self._skip("copy_cap", coin=m.coin, leader=m.leader, action="add")
+            size = min(size, room)
         d = self.gate.check(Order("add", m.coin, pos.side, size, px, leader=m.leader, fill_time_ms=m.time_ms),
                             self.st, h, self.mids, self.assets.get(m.coin))
         if not d:

@@ -177,6 +177,29 @@ def test_bot_copies_an_invo_call_and_closes_it_when_the_trader_does(invo_env, mo
         stop_bot(bot, th)
 
 
+def test_a_huge_call_is_capped_at_max_risk_pct_also_after_the_traders_add(invo_env, monkeypatch):
+    """The STRK case: 25% x 5x = 125% of the portfolio. The copy is capped at invo.max_risk_pct (2%) of our 300$
+    at our 3% stop = 200$, and the trader's later add does not push it past the cap."""
+    hl, tg, data, cdir, f, tok = invo_env
+    pid = f.add_user("lazy")[0]
+    bot, th = start_with_invo((hl, tg, data, cdir), tok, monkeypatch)
+    try:
+        tg.say("/invofollow lazy")
+        assert wait_for(lambda: bot.invo_watch.known.get("lazy") is not None, timeout=10)
+        cid = f.open_call(pid, "ETH", long=False, leverage=5, size=0.25, entry=3000.0)
+        assert wait_for(lambda: "ETH" in bot.invo.st.positions, timeout=10)
+        p = bot.invo.st.positions["ETH"]
+        assert p.size * p.entry_px == pytest.approx(300 * 0.02 / 0.03, rel=0.05)          # 200$, not 375$
+        f.resize_call(pid, cid, 0.40)                                                       # they add 60%
+        time.sleep(3)
+        p = bot.invo.st.positions["ETH"]
+        assert p.size * p.entry_px <= 300 * 0.02 / 0.03 * 1.05                              # still at the cap
+        f.close_call(pid, cid)
+        assert wait_for(lambda: "ETH" not in bot.invo.st.positions, timeout=10)
+    finally:
+        stop_bot(bot, th)
+
+
 def test_without_a_token_file_invo_is_off_and_says_how_to_turn_it_on(env, monkeypatch):
     hl, tg, data, cdir = env
     monkeypatch.delenv("INVO_TOKEN_FILE", raising=False)
