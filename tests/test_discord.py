@@ -127,6 +127,18 @@ def test_rate_limit_is_honoured(dc):
     assert posts[1] - posts[0] >= 0.95
 
 
+def test_an_empty_rate_limit_bucket_is_waited_out_before_the_next_write(dc):
+    """Discord says how many writes are left (X-RateLimit-Remaining) and when the bucket refills: the bot waits
+    instead of running into a 429."""
+    fake, ui, _, _ = dc
+    fake.rl_headers = {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset-After": "1.0"}
+    ui.send("one")
+    ui.send("two")
+    assert wait_for(lambda: len(fake.sent) == 2, timeout=6)
+    posts = [t for t, c in fake.calls if c.startswith("POST")]
+    assert posts[1] - posts[0] >= 0.95
+
+
 def test_gateway_reconnects_after_a_drop(dc):
     fake, ui, cmds, _ = dc
     assert wait_for(fake.connected)

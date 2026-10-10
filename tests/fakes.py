@@ -284,6 +284,7 @@ class FakeDiscord:
         self.identified: list[dict] = []
         self.calls: list[tuple[float, str]] = []
         self.fail_429 = 0
+        self.rl_headers: dict = {}              # rate-limit headers added to every REST answer
         self.next_id = 10_000
         self.seq = 0
         self.lock = threading.Lock()
@@ -300,6 +301,8 @@ class FakeDiscord:
                 code, obj = fake.rest(verb, urlparse(self.path).path, body, self.headers.get("Authorization", ""))
                 b = json.dumps(obj).encode() if obj is not None else b""
                 self.send_response(code)
+                for k, v in fake.rl_headers.items():
+                    self.send_header(k, v)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(b)))
                 self.end_headers()

@@ -118,12 +118,19 @@ class DiscordApi:
         self._headers = {"Authorization": f"Bot {token}", "Content-Type": "application/json",
                          "User-Agent": "DiscordBot (https://github.com/ArthurMateus/Copytrade-Test, 1.0)"}
 
-    def call(self, verb: str, path: str, body: dict | list | None = None, timeout: float = 10.0):
+    def call(self, verb: str, path: str, body: dict | list | None = None, timeout: float = 10.0, on_limit=None):
+        """`on_limit(seconds)` is called when Discord says the route's bucket is empty (X-RateLimit-Remaining 0):
+        waiting that long BEFORE the next write avoids the 429 instead of hitting it."""
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(self.base + path, data, self._headers, method=verb)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 raw = r.read()
+                if on_limit and r.headers.get("X-RateLimit-Remaining") == "0":
+                    try:
+                        on_limit(float(r.headers.get("X-RateLimit-Reset-After") or 0))
+                    except ValueError:
+                        pass
                 return json.loads(raw) if raw else None
         except urllib.error.HTTPError as e:
             try:
@@ -157,13 +164,18 @@ class DiscordUI(ChatUI):
     def _call(self, method: str, params: dict):
         if method == "sendMessage":
             r = self.api.call("POST", f"/channels/{self.channel}/messages",
-                              {"embeds": [embed(params["text"])], "allowed_mentions": {"parse": []}})
+                              {"embeds": [embed(params["text"])], "allowed_mentions": {"parse": []}},
+                              on_limit=self._bucket_empty)
             return {"message_id": int(r["id"])}
         if method == "editMessageText":
             self.api.call("PATCH", f"/channels/{self.channel}/messages/{params['message_id']}",
-                          {"embeds": [embed(params["text"])]})
+                          {"embeds": [embed(params["text"])]}, on_limit=self._bucket_empty)
             return {"message_id": params["message_id"]}
         raise ValueError(method)
+
+    def _bucket_empty(self, seconds: float) -> None:
+        """Discord's bucket for this channel is used up: hold every write until it refills (no 429 needed)."""
+        self.blocked_until = max(self.blocked_until, self.clock() + min(max(seconds, 0.0), 60.0))
 
     # ---- worker threads -------------------------------------------------------------------------
     def start(self) -> None:
