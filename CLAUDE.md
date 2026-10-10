@@ -197,14 +197,14 @@ instances on the same wallet.
   (AES-GCM, key in `localStorage.FlutterSecureStorage`) and copies it; `tools/invo_check.py` verifies it.
 
 ## Invo portfolio filter and blocks (owner request 2026-10-10)
-- A trader's calls are copied only from its portfolios with win rate >= `invo.min_portfolio_win_rate` (0.90), return
+- A trader's calls are copied only from its portfolios with win rate >= `invo.min_portfolio_win_rate` (0.80), return
   >= `min_portfolio_pnl_pct` (100%; Invo's `plSnapshot` is the portfolio's % return: $100 -> $130 shows ~28-30) and
   >= `min_portfolio_calls` (20) closed calls, and not blocked by the owner (`/invoblock <user> <portfolio>`, matched by
   the start of its title; `/invounblock`). Blocks are ledger events `invo_block`/`invo_unblock` in the trader-size Invo
   wallet -> `State.blocked` {leader: {portfolio id: title}}. `Bot.invo_skip(name, Portfolio)` gives the reason; the
   `Watcher(skip=)` drops new calls of skipped portfolios (log `invo_call_skipped`) but closes/resizes of existing
-  copies still flow; `InvoScorer(skip=)` scores a trader only on the portfolios we would copy. /invotraders shows each
-  portfolio as ✅ copied or 🚫 skipped (why). `/invoblock` and `/invounblock` are the only book-specific commands
+  copies still flow; `InvoScorer(skip=)` scores a trader only on the portfolios we would copy. /invotraders lists only
+  the copied (✅) portfolios (none: one 🚫 line). `/invoblock` and `/invounblock` are the only book-specific commands
   (`chat.INVO_EXTRA`).
 
 ## One command set for every book (owner request 2026-10-10)

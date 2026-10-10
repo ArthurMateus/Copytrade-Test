@@ -299,16 +299,17 @@ class Bot:
         return notional / px
 
     def invo_record_rows(self) -> dict:
-        """Invo's own numbers for each followed trader's portfolios (from the watcher's last read), and whether its
-        calls are copied (✅) or skipped (🚫 and why)."""
+        """Invo's own numbers for the portfolios of each followed trader whose calls are copied (from the watcher's
+        last read). Skipped ones are only counted: a portfolio that starts passing the rules is copied (and listed)
+        from then on by itself."""
         out = {}
         for name, ports in (self.invo_watch.stats if self.invo_watch else {}).items():
-            rows = []
-            for p in ports[:6]:
-                why = self.invo_skip(name, p)
-                rows.append((f"{'🚫' if why else '✅'} {p.title.strip()[:24] or 'portfolio'}",
-                             f"{p.win_rate:.0f}% win · {p.pnl_pct:+,.0f}% · {p.closed} calls · {p.open_count} open"
-                             + (f" · skipped: {why}" if why else "")))
+            ok = [p for p in ports if not self.invo_skip(name, p)]
+            rows = [(f"✅ {p.title.strip()[:24] or 'portfolio'}",
+                     f"{p.win_rate:.0f}% win · {p.pnl_pct:+,.0f}% · {p.closed} calls · {p.open_count} open")
+                    for p in ok[:4]]
+            if not ok and ports:
+                rows = [("Portfolios", f"🚫 none passes the rules yet ({len(ports)} skipped)")]
             out[INVO + name] = rows
         return out
 

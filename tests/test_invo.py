@@ -353,7 +353,7 @@ def test_each_book_controls_only_its_own_wallets(invo_env, monkeypatch):
 
 
 def test_weak_portfolios_are_skipped_and_the_owner_can_block_one(invo_env, monkeypatch):
-    """Owner request 2026-10-10: calls are only copied from a trader's good portfolios (win rate >= 90%, return >= 100%,
+    """Owner request 2026-10-10: calls are only copied from a trader's good portfolios (win rate >= 80%, return >= 100%,
     20+ closed calls); /invoblock blocks one by hand, /invounblock undoes it."""
     hl, dc, data, cdir, f, tok = invo_env
     good, weak = f.add_user("nicush", n_portfolios=2)
@@ -370,8 +370,8 @@ def test_weak_portfolios_are_skipped_and_the_owner_can_block_one(invo_env, monke
         time.sleep(2.5)
         assert "SOL" not in bot.invo.st.positions
         dc.say("/invotraders")
-        assert wait_for(lambda: "🚫 Probably nothing" in text() and "skipped: win rate 77% &lt; 90%" in text()
-                        and "✅ Kitchen" in text() and "+140%" in text())
+        assert wait_for(lambda: "✅ Kitchen" in text() and "+140%" in text())
+        assert "Probably nothing" not in text()                                           # skipped ones: not listed
         dc.say("/invoblock nicush kit")                                                    # by the start of its name
         assert wait_for(lambda: good in bot.invo.st.blocked.get("invo:nicush", {}))
         assert wait_for(lambda: "Blocked" in text() and "Kitchen" in text())

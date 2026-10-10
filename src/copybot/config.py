@@ -208,7 +208,7 @@ class Invo:
     # portfolio filter (owner request 2026-10-10): a followed trader's calls are only copied from its portfolios with
     # at least this win rate, this % return (Invo's plSnapshot) and this many closed calls; /invoblock adds manual
     # blocks. Also applied to the search's scoring (a trader is judged on the portfolios we would copy)
-    min_portfolio_win_rate: float = 0.90     # owner 2026-10-10: at least 90% wins ...
+    min_portfolio_win_rate: float = 0.80     # owner 2026-10-10: at least 80% wins ...
     min_portfolio_pnl_pct: float = 100.0     # ... and at least doubled (+100%)
     min_portfolio_calls: int = 20
     search: bool = True
