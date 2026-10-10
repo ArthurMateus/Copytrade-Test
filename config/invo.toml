@@ -16,8 +16,8 @@ risk_wallets_pct = [1.0, 2.0, 5.0, 10.0, 20.0]
 # daily picks (13h, /picks). It only reports: you follow with /invofollow.
 search = true
 review_hours = 24.0       # one search per this many hours                                          [1, 168]
-discover_pages = 3        # pages of 20 read from each Discover ranking                             [0, 20]
-max_candidates = 150      # traders scored per search (followed ones are always re-checked)        [0, 1000]
+discover_pages = 20       # pages of 20 read from each Discover ranking                             [0, 20]
+max_candidates = 1000     # traders scored per search (followed ones are always re-checked)        [0, 1000]
 history_days = 180        # closed calls this old count                                             [30, 180]
 max_calls = 600           # closed calls read per trader at most                                    [50, 5000]
 min_hl_share = 0.5        # at least this share of its calls on coins Hyperliquid lists             [0, 1]
