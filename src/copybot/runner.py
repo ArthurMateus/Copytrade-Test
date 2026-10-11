@@ -123,8 +123,9 @@ class Bot:
                 self.invo_extra.append(x)
                 self.sides.append(x)
             for x in self.invo_wallets():
-                # a call is first seen up to poll_s after it was posted: entries may be that old (still fail closed)
-                x.cfg.risk.max_entry_age_s = cfg.invo.max_call_age_s + cfg.invo.poll_s
+                # a call is first seen up to a round (poll_s + the reads) after it was posted: entries may be that
+                # old (still fail closed)
+                x.cfg.risk.max_entry_age_s = cfg.invo.max_call_age_s + cfg.invo.poll_s + 10
                 x.cfg.risk.trail_after_pct, x.cfg.risk.trail_pct = cfg.invo.trail_after_pct, cfg.invo.trail_pct
             # watched: the followed traders AND the unfollowed ones we still hold a copy of (their exits are copied);
             # rebuilt on the trading thread (invo_refresh_watched), read by the watcher thread

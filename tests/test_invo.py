@@ -112,6 +112,29 @@ def test_watcher_reports_an_unknown_username_once(fake, tmp_path):
     assert [out.get_nowait() for _ in range(out.qsize())] == [("invo_unknown", "ghost")]
 
 
+def test_one_failing_trader_does_not_hold_up_the_others_and_a_refusing_invo_gets_backoff(fake, tmp_path):
+    """Owner request 2026-10-11 (copies in < 3 s): no pause between rounds, so a trader whose read fails must not end
+    the round for the traders after it, and when Invo refuses every read the watcher waits longer each round."""
+    tok = tmp_path / "invo.token"
+    tok.write_text("REFRESH0", encoding="utf-8")
+    fake.add_user("aaa")
+    pid = fake.add_user("zzz")[0]
+    out = queue.Queue()
+    w = invo.Watcher(invo.InvoClient(fake.url, str(tok), min_interval_s=0), out, lambda: {"aaa", "zzz"}, 0, 180,
+                     threading.Event())
+    assert w.round() == 0                                   # both baselines read, next round at once
+    [out.get_nowait() for _ in range(out.qsize())]
+    fake.broken_users.add(fake.users["aaa"])                # "aaa" (read first) now fails
+    cid = fake.open_call(pid, "ETH")
+    assert w.round() == 0                                   # one trader failing is no reason to wait
+    assert [(k, c.id) for k, _, c in (out.get_nowait() for _ in range(out.qsize()))] == [("invo_open", cid)]
+    fake.throttle = True                                    # Invo refuses everything: 2 s, 4 s, ... at most 60 s
+    assert [w.round() for _ in range(7)] == [2.0, 4.0, 8.0, 16.0, 32.0, 60.0, 60.0]
+    fake.throttle = False
+    fake.broken_users.clear()
+    assert w.round() == 0 and w.fails == 0
+
+
 # ---- the bot end to end -----------------------------------------------------------------------------------
 @pytest.fixture
 def invo_env(env, tmp_path):

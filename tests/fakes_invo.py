@@ -38,6 +38,8 @@ class FakeInvo:
         self.valid_refresh = refresh_token
         self.valid_access = ""
         self.refuse_refresh = False
+        self.broken_users: set[str] = set()              # user ids whose portfolio list answers 500
+        self.throttle = False                            # every API call answers 429 (rate limited)
         self._n = itertools.count(1)
         self.lock = threading.Lock()
         fake = self
@@ -77,6 +79,10 @@ class FakeInvo:
                     return self._send(405, {"detail": "Method Not Allowed"})       # as the real API answers
                 if not fake.valid_access or auth != "Bearer " + fake.valid_access:
                     return self._send(401, {"status": "error", "message": "Missing authorization header"})
+                if fake.throttle:
+                    return self._send(429, {"message": "Too Many Requests"})
+                if path == "/portfolios/v2/get_users_portfolios" and body.get("userId") in fake.broken_users:
+                    return self._send(500, {"status": "error", "message": "Internal server error"})
                 return self._send(200, fake.answer(path, body))
 
         self.http = _Server(("127.0.0.1", 0), H)

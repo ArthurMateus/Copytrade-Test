@@ -243,6 +243,12 @@ instances on the same wallet.
   within ~3.5 s (7 traders) + 5 s instead of up to ~40 s (a STRK copy was 26 s late). Invo has no push channel we can
   use; if it starts refusing requests (watch `invo_poll_failed` in the log), raise them again. Copies are always filled
   on Hyperliquid's real book at Hyperliquid's fees; Invo's entry price is only shown ("their entry").
+- 2026-10-11 (owner: "lower than 3 s?"): `poll_s` 0, `request_gap_s` 0.25 (~3.4 req/s; 7 traders = ~2 s per round,
+  a call seen ~1 s after posting on average). Measured in the owner's Chrome: ~0.29 s per request, ~6 req/s clean,
+  ~13 req/s began to fail; the app's only websocket is Hyperliquid's; `/posts/get_feed` (`filter: moves|recent|
+  following`, `params.itemLimit`) is a small curated subset (0 of booobsas's 37 calls), so per-trader polling stays.
+  `Watcher.round`: a failing trader no longer ends the round; all reads failing -> wait 2, 4 ... 60 s. The daily
+  Invo search shares the client's spacing, so rounds are slower while it runs.
 
 ## Account value = perp + spot stablecoins (bug found live 2026-10-10)
 - `/hyperadd` scored with the PERP account value only while the daily search used the leaderboard value, so the same

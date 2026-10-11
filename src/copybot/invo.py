@@ -291,6 +291,7 @@ class Watcher:
         self.calls: dict[str, dict[str, Call]] = {}        # portfolio id -> its open calls last read
         self.auth_ok = True
         self.last_ok = 0.0
+        self.fails = 0                                     # rounds in a row in which every read failed
         self.unknown: set[str] = set()
         self.stats: dict[str, list[Portfolio]] = {}       # username -> its active portfolios (for /invotraders)
         self.skip = skip
@@ -302,15 +303,7 @@ class Watcher:
     def run(self) -> None:
         while not self.stop.is_set():
             try:
-                names = set(self.traders())
-                for gone in set(self.known) - names:         # watched again later: a fresh baseline
-                    self.forget(gone)
-                for name in sorted(names):
-                    self.poll(name)
-                self.last_ok = time.time()
-                if not self.auth_ok:
-                    self.auth_ok = True
-                    self.out.put(("invo_auth", True, ""))
+                self.stop.wait(self.round())
             except InvoAuthError as e:
                 if self.auth_ok:
                     self.out.put(("invo_auth", False, str(e)))
@@ -318,7 +311,34 @@ class Watcher:
                 self.stop.wait(300)
             except Exception as e:
                 log.warn("invo_poll_failed", err=f"{type(e).__name__}: {e}"[:200])
-            self.stop.wait(self.poll_s)
+                self.stop.wait(max(self.poll_s, 1.0))
+
+    def round(self) -> float:
+        """Read every watched trader once; returns the seconds to wait before the next round. A trader whose read
+        fails is skipped for this round only (owner request 2026-10-11: one bad trader used to end the round for
+        the traders after it). When EVERY read fails (Invo refusing us), wait 2, 4, 8 ... up to 60 s instead of
+        asking again at once."""
+        names = set(self.traders())
+        for gone in set(self.known) - names:                 # watched again later: a fresh baseline
+            self.forget(gone)
+        failed = 0
+        for name in sorted(names):
+            try:
+                self.poll(name)
+            except InvoAuthError:
+                raise
+            except Exception as e:
+                failed += 1
+                log.warn("invo_poll_failed", trader=name, err=f"{type(e).__name__}: {e}"[:200])
+        if names and failed == len(names):
+            self.fails += 1
+            return min(60.0, 2.0 ** self.fails)
+        self.fails = 0
+        self.last_ok = time.time()
+        if not self.auth_ok:
+            self.auth_ok = True
+            self.out.put(("invo_auth", True, ""))
+        return self.poll_s if names else max(self.poll_s, 1.0)
 
     def poll(self, name: str) -> None:
         uid = self.uids.get(name)
