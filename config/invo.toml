@@ -16,6 +16,9 @@ risk_wallets_pct = [1.0, 2.0, 5.0, 10.0, 20.0]
 # winners this book needs. 5 and 5 would start it at +5% and trail 5% behind.
 trail_after_pct = 0.0     # once a copy is this % in profit the stop follows the price (0 = off)   [0, 50]
 trail_pct = 3.0           # ... this % behind the best price, never below break-even                [0.2, 20]
+pause_dd_pct = 4.0        # drop a trader once its copies lost this % of the wallet from their best [0.5, 50]
+                          # (4% = two stops of the biggest copy; 5 losing copies in a row also drop it)
+aliases = {}              # Invo ticker -> Hyperliquid coin when the names differ, e.g. { MATIC = "POL" }
 # Portfolio filter: a trader's calls are only copied from its portfolios with at least this win rate, this % return
 # (Invo's P&L of the portfolio) and this many closed calls. /invoblock <user> <portfolio> blocks one by hand.
 min_portfolio_win_rate = 0.80   # 0.80 = 80%                                                          [0, 1]

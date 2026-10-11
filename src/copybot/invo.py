@@ -31,7 +31,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -39,6 +39,9 @@ from copybot import log
 
 PREFIX = "invo:"          # leader name of an Invo trader in the ledger: "invo:<username>"
 RESIZE_MIN = 0.02         # a committed size change smaller than 2% is noise, not an add or a trim
+VANISH_S = 10.0           # a call missing from our reads but not in the trader's closed list is only treated as closed
+                          # (deleted) after this long: one incomplete answer must not close a copy (audit 2026-10-11)
+REREAD_MAX = 5            # an open-call list shorter than the portfolio's count is read again this many rounds
 
 
 class InvoAuthError(Exception):
@@ -174,9 +177,13 @@ class InvoClient:
         self._auth_lock = threading.Lock()     # the watcher and the search share one login: one refresh at a time
         self._last = 0.0
         self._access = ""
+        self._unsaved = ""                     # a rotated refresh token we could not write to the file yet
+        self.save_failed = False               # the watcher reports it (the Invo book goes dark at the next restart)
 
     # ---- tokens ------------------------------------------------------------------------------------
     def _refresh_token(self) -> str:
+        if self._unsaved:
+            return self._unsaved
         try:
             raw = Path(self.token_file).read_bytes()
         except OSError:
@@ -211,9 +218,25 @@ class InvoClient:
         self._access = access
         if new_refresh:
             log.add_secret(new_refresh)
+            self._unsaved = new_refresh             # the old refresh token is spent: keep only the new one
+            self.save_token()
+
+    def save_token(self) -> bool:
+        """Write the rotated refresh token to INVO_TOKEN_FILE (retried by the watcher every round while it fails: a
+        locked file must not lose the only valid login, audit 2026-10-11)."""
+        if not self._unsaved:
+            return True
+        try:
             tmp = Path(self.token_file).with_suffix(".tmp")
-            tmp.write_text(new_refresh, encoding="utf-8")
-            os.replace(tmp, self.token_file)        # the old refresh token is spent: keep only the new one
+            tmp.write_text(self._unsaved, encoding="utf-8")
+            os.replace(tmp, self.token_file)
+        except OSError as e:
+            if not self.save_failed:
+                log.error("invo_token_save_failed", err=f"{type(e).__name__}"[:60])
+            self.save_failed = True
+            return False
+        self._unsaved, self.save_failed = "", False
+        return True
 
     # ---- requests ------------------------------------------------------------------------------------
     def post(self, path: str, body: dict) -> dict:
@@ -250,8 +273,12 @@ class InvoClient:
         return parse_user(self.post("/users/get_user", {"userId": None, "usersUsername": username}))
 
     def portfolios(self, user_id: str) -> list[Portfolio]:
-        return parse_portfolios(self.post("/portfolios/v2/get_users_portfolios",
-                                          {"userId": user_id, "params": {"isDeleted": False, "page": 1, "size": 20}}))
+        body = self.post("/portfolios/v2/get_users_portfolios",
+                         {"userId": user_id, "params": {"isDeleted": False, "page": 1, "size": 20}})
+        if not isinstance(body, dict) or not isinstance(body.get("portfolios"), list):
+            # an answer without the list is a failed read, not "no portfolios" (that would close every copy)
+            raise InvoError(200, "portfolio list missing in the answer")
+        return parse_portfolios(body)
 
     def open_calls(self, portfolio_id: str) -> list[Call]:
         return parse_calls(self.post("/investments/get_investments",
@@ -277,7 +304,9 @@ class Watcher:
     trader added to or trimmed an open call (its committed size changed by more than RESIZE_MIN). The first poll of a trader is only a baseline: calls
     already open when we start watching are never copied (we would enter late); it is reported as
     ("invo_baseline", username, [open Calls]) so copies whose call closed meanwhile can be closed. One portfolio-list request per
-    trader per poll; open calls are only read for portfolios whose open-trade list changed."""
+    trader per poll; open calls are only read for portfolios whose open-trade list changed. A call that disappears is
+    only reported closed once it shows in its portfolio's closed calls (with Invo's closing price and reason), or after
+    VANISH_S if it never does (deleted): one incomplete answer must not close a copy (audit 2026-10-11)."""
 
     def __init__(self, client: InvoClient, out, traders, poll_s: float, max_age_s: float, stop: threading.Event,
                  now=lambda: int(time.time() * 1000), skip=lambda name, portfolio: None):
@@ -296,6 +325,8 @@ class Watcher:
         self.stats: dict[str, list[Portfolio]] = {}       # username -> its active portfolios (for /invotraders)
         self.skip = skip
         self.ports: dict[str, Portfolio] = {}              # portfolio id -> its last read
+        self.missing: dict[str, float] = {}                # call id -> when it first went missing (not confirmed closed)
+        self.rereads: dict[str, int] = {}                  # portfolio id -> reads in a row that returned too few calls
 
     def start(self) -> None:
         threading.Thread(target=self.run, name="invo", daemon=True).start()
@@ -330,6 +361,7 @@ class Watcher:
             except Exception as e:
                 failed += 1
                 log.warn("invo_poll_failed", trader=name, err=f"{type(e).__name__}: {e}"[:200])
+        self.client.save_token()                             # retried while the token file is locked
         if names and failed == len(names):
             self.fails += 1
             return min(60.0, 2.0 ** self.fails)
@@ -360,12 +392,21 @@ class Watcher:
                 continue
             sig = (p.open_count, tuple(sorted(p.open_assets)), p.updated_ms)     # an edit changes updated_ms
             if p.open_count and (self.sig.get(p.id) != sig or p.id not in self.calls):
-                self.calls[p.id] = {c.id: c for c in self.client.open_calls(p.id) if c.is_open}
+                got = self.calls[p.id] = {c.id: c for c in self.client.open_calls(p.id) if c.is_open}
+                # fewer calls than the portfolio counts: Invo's list may lag its count, so read it again next round
+                # instead of waiting for the next change (the new call would be too old by then; audit 2026-10-11)
+                n = self.rereads[p.id] = self.rereads.get(p.id, 0) + 1 if len(got) < p.open_count else 0
+                if 0 < n < REREAD_MAX:
+                    self.sig.pop(p.id, None)
+                    now_open.update(got)
+                    continue
             elif not p.open_count:
                 self.calls[p.id] = {}
             self.sig[p.id] = sig
             now_open.update(self.calls.get(p.id, {}))
         before = self.known.get(name)
+        if before is None and any(0 < self.rereads.get(p.id, 0) < REREAD_MAX for p in ports if p.active):
+            return                     # a first read with a short call list: take the baseline once it is complete
         self.known[name] = now_open
         if before is None:                                  # baseline: never copy calls opened before we watched
             log.info("invo_baseline", trader=name, open_calls=len(now_open))
@@ -385,10 +426,33 @@ class Watcher:
                 else:
                     log.info("invo_call_too_old", trader=name, ticker=c.ticker, age_s=round(age_s))
         for cid, c in before.items():
-            if cid not in now_open:
-                self.out.put(("invo_close", name, c))
-            elif c.exposure > 0 and abs(now_open[cid].exposure - c.exposure) / c.exposure > RESIZE_MIN:
-                self.out.put(("invo_resize", name, c, now_open[cid]))
+            if cid in now_open:
+                self.missing.pop(cid, None)
+                if c.exposure > 0 and abs(now_open[cid].exposure - c.exposure) / c.exposure > RESIZE_MIN:
+                    self.out.put(("invo_resize", name, c, now_open[cid]))
+                continue
+            done = self.closed_call(c)
+            if done is not None:                            # confirmed: the trader closed it (real price and reason)
+                self.missing.pop(cid, None)
+                self.out.put(("invo_close", name, done))
+                continue
+            first = self.missing.setdefault(cid, self.now() / 1000)
+            if self.now() / 1000 - first >= VANISH_S:      # gone and never closed: deleted (or hidden) by the trader
+                self.missing.pop(cid, None)
+                log.warn("invo_call_vanished", trader=name, ticker=c.ticker, call=cid)
+                self.out.put(("invo_close", name, replace(c, reason_closed="call deleted by the trader")))
+            else:                                           # maybe one incomplete answer: keep it, look again
+                self.known[name][cid] = c
+
+    def closed_call(self, c: Call) -> Call | None:
+        """The call as it appears in its portfolio's closed calls (newest page), or None (not there, or not readable)."""
+        try:
+            return next((x for x in self.client.closed_calls(c.portfolio_id, 1) if x.id == c.id), None)
+        except InvoAuthError:
+            raise
+        except Exception as e:
+            log.warn("invo_close_check_failed", call=c.id, err=f"{type(e).__name__}: {e}"[:120])
+            return None
 
     def forget(self, name: str) -> None:
         self.known.pop(name, None)

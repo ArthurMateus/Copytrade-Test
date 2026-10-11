@@ -135,6 +135,81 @@ def test_one_failing_trader_does_not_hold_up_the_others_and_a_refusing_invo_gets
     assert w.round() == 0 and w.fails == 0
 
 
+def test_a_call_missing_from_one_read_is_closed_only_when_invo_confirms_it(fake, tmp_path):
+    """Audit 2026-10-11: one incomplete answer (no portfolio list, or a call missing) used to close our copy at once
+    and the call, back a moment later, was too old to copy again. Now a close needs the call in the portfolio's closed
+    calls (which also gives Invo's closing price and reason); a call that never shows there (deleted) closes after
+    VANISH_S."""
+    tok = tmp_path / "invo.token"
+    tok.write_text("REFRESH0", encoding="utf-8")
+    pid = fake.add_user("akira")[0]
+    t = [time.time() * 1000]
+    out = queue.Queue()
+    w = invo.Watcher(invo.InvoClient(fake.url, str(tok), min_interval_s=0), out, lambda: {"akira"}, 0, 180,
+                     threading.Event(), now=lambda: t[0])
+    drain = lambda: [out.get_nowait() for _ in range(out.qsize())]
+    w.round()
+    drain()
+    a = fake.open_call(pid, "ETH", created_ms=int(t[0]))
+    b = fake.open_call(pid, "SOL", created_ms=int(t[0]))
+    w.round()
+    assert sorted(c.id for k, _, c in drain() if k == "invo_open") == sorted([a, b])
+    fake.blank_users.add(fake.users["akira"])               # 200 without the portfolio list: a failed read
+    w.round()
+    assert drain() == [] and w.known["akira"].keys() == {a, b}
+    fake.blank_users.clear()
+    fake.delete_call(pid, a)                                 # gone, never closed
+    for dt in (0, 5_000):
+        t[0] += dt
+        w.round()
+        assert drain() == []                                 # not yet: maybe Invo answered incompletely
+    t[0] += 6_000
+    w.round()
+    (k, _, c), = drain()
+    assert (k, c.id, c.reason_closed) == ("invo_close", a, "call deleted by the trader")
+    fake.close_call(pid, b, price=161.5, reason="target_hit")
+    w.round()
+    (k, _, c), = drain()                                     # confirmed: at once, with Invo's numbers
+    assert (k, c.id, c.closing_price, c.reason_closed, c.is_open) == ("invo_close", b, 161.5, "target_hit", False)
+
+
+def test_a_call_counted_before_it_is_listed_is_still_copied(fake, tmp_path):
+    """Audit 2026-10-11: Invo's open-call count can move before its list; the portfolio used to be marked as read and
+    the call was only seen at the next change (too old to copy by then)."""
+    tok = tmp_path / "invo.token"
+    tok.write_text("REFRESH0", encoding="utf-8")
+    pid = fake.add_user("akira")[0]
+    out = queue.Queue()
+    w = invo.Watcher(invo.InvoClient(fake.url, str(tok), min_interval_s=0), out, lambda: {"akira"}, 0, 180,
+                     threading.Event())
+    w.round()
+    out.get_nowait()
+    cid = fake.open_call(pid, "ETH")
+    fake.hidden.add(cid)
+    w.round()
+    assert out.empty()
+    fake.hidden.clear()
+    w.round()
+    assert [(k, c.id) for k, _, c in (out.get_nowait() for _ in range(out.qsize()))] == [("invo_open", cid)]
+
+
+def test_a_rotated_token_that_cannot_be_saved_is_kept_and_saved_later(fake, tmp_path):
+    """Audit 2026-10-11: the old refresh token is spent once Invo rotates it; if the file write failed the bot kept
+    only the spent one and lost the login at the next refresh."""
+    tok = tmp_path / "invo.token"
+    tok.write_text("REFRESH0", encoding="utf-8")
+    (tmp_path / "invo.tmp").mkdir()                          # the temporary file cannot be written
+    fake.add_user("x")
+    c = invo.InvoClient(fake.url, str(tok), min_interval_s=0)
+    assert c.user("x") and c.save_failed
+    assert tok.read_text(encoding="utf-8") == "REFRESH0"
+    fake.expire_access()
+    assert c.user("x")                                       # the next refresh uses the token kept in memory
+    (tmp_path / "invo.tmp").rmdir()
+    assert c.save_token() and not c.save_failed
+    assert tok.read_text(encoding="utf-8") == fake.valid_refresh
+
+
 # ---- the bot end to end -----------------------------------------------------------------------------------
 @pytest.fixture
 def invo_env(env, tmp_path):
@@ -361,10 +436,11 @@ def test_memecoins_listed_per_1000_on_hyperliquid_are_copied_under_their_k_name(
     from types import SimpleNamespace
     from copybot.runner import Bot
     assets = {a["name"]: None for a in fixture("meta_and_asset_ctxs.json")[0]["universe"]}
-    b = SimpleNamespace(assets=assets)
+    b = SimpleNamespace(assets=assets, cfg=SimpleNamespace(invo=SimpleNamespace(aliases={"matic": "POL"})))
     b.invo_coin = lambda t: Bot.invo_coin(b, t)
     for ticker, want in (("PEPE", ("kPEPE", 1000.0)), ("bonk", ("kBONK", 1000.0)), ("SHIB", ("kSHIB", 1000.0)),
-                         ("ETH", ("ETH", 1.0)), ("FARTCOIN", ("FARTCOIN", 1.0)), ("NOPE123", (None, 1.0))):
+                         ("ETH", ("ETH", 1.0)), ("FARTCOIN", ("FARTCOIN", 1.0)), ("NOPE123", (None, 1.0)),
+                         ("MATIC", ("POL", 1.0))):                  # invo.aliases (audit 2026-10-11)
         assert Bot.invo_trade_coin(b, ticker) == want, ticker
     assert Bot.invo_coin(b, "PEPE") is None
 
@@ -500,5 +576,95 @@ def test_weak_portfolios_are_skipped_and_the_owner_can_block_one(invo_env, monke
         assert wait_for(lambda: not bot.invo.st.blocked.get("invo:nicush"))
         dc.say("/invoblock nicush nothing-like-this")
         assert wait_for(lambda: "Its portfolios: Kitchen, Probably nothing" in text())
+    finally:
+        stop_bot(bot, th)
+
+
+def test_after_a_restart_only_the_copied_call_moves_our_copy(invo_env, monkeypatch):
+    """Audit 2026-10-11: after a restart a copy was matched to its call by coin and side only; with the same coin open
+    in a portfolio we do not copy, that portfolio's close closed our copy. The call id is now saved with the copy."""
+    hl, dc, data, cdir, f, tok = invo_env
+    good, weak = f.add_user("prateek", n_portfolios=2)
+    f.port_meta[weak] = {"title": "Casino", "winRate": 60.0, "closedPositions": 300, "plSnapshot": -20.0}
+    bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
+    try:
+        dc.say("/invofollow prateek")
+        assert wait_for(lambda: bot.invo_watch.known.get("prateek") is not None, timeout=10)
+        a = f.open_call(good, "ETH", long=True, leverage=5, size=0.05, entry=3000.0)
+        assert wait_for(lambda: "ETH" in bot.invo.st.positions, timeout=10)
+        b = f.open_call(weak, "ETH", long=True, leverage=5, size=0.05, entry=3000.0)     # skipped (weak portfolio)
+        pos_id = bot.invo.st.positions["ETH"].pos_id
+        assert bot.invo.st.invo_links[pos_id]["call"] == a
+        assert "their entry" in bot.invo.st.invo_links[pos_id]["info"]
+    finally:
+        stop_bot(bot, th)
+        bot.lock.f.close()
+    bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
+    try:
+        assert bot.invo_calls[("invo_calls", a)] == "ETH" and "their entry" in bot.invo_info[pos_id]
+        assert wait_for(lambda: bot.invo_watch.known.get("prateek") is not None, timeout=10)
+        f.close_call(weak, b)
+        time.sleep(3)
+        assert "ETH" in bot.invo.st.positions                                # the other portfolio's close: ignored
+        f.close_call(good, a)
+        assert wait_for(lambda: "ETH" not in bot.invo.st.positions, timeout=10)
+    finally:
+        stop_bot(bot, th)
+
+
+def test_a_restart_before_hyperliquid_answers_does_not_close_the_copies(invo_env, monkeypatch):
+    """Audit 2026-10-11: without Hyperliquid's coin list (network still coming up) no call mapped to a coin and the
+    first read closed EVERY Invo copy as "closed while the bot was not watching". It now waits for the list."""
+    from copybot import hl as hlmod
+    hl, dc, data, cdir, f, tok = invo_env
+    pid = f.add_user("akira")[0]
+    bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
+    try:
+        dc.say("/invofollow akira")
+        assert wait_for(lambda: bot.invo_watch.known.get("akira") is not None, timeout=10)
+        eth = f.open_call(pid, "ETH", long=True, leverage=5, size=0.05, entry=3000.0)
+        f.open_call(pid, "SOL", long=False, leverage=5, size=0.05, entry=150.0)
+        assert wait_for(lambda: {"ETH", "SOL"} <= set(bot.invo.st.positions), timeout=10)
+    finally:
+        stop_bot(bot, th)
+        bot.lock.f.close()
+    f.close_call(pid, eth)                                               # while the bot is off
+    real_meta, held = hlmod.Info.meta, {"bot": None, "waited": False}
+
+    def meta(self, *a, **k):                                             # Hyperliquid unreachable until the Invo
+        b = held["bot"]                                                  # baseline had to wait for it
+        if b is None or not b.invo_baseline_wait:
+            raise OSError("network down")
+        held["waited"] = True
+        return real_meta(self, *a, **k)
+    monkeypatch.setattr(hlmod.Info, "meta", meta)
+    monkeypatch.setattr("copybot.runner.Bot.boot", _remember(held))
+    bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
+    try:
+        assert wait_for(lambda: held["waited"] and "ETH" not in bot.invo.st.positions, timeout=20)
+        assert "SOL" in bot.invo.st.positions and bot.invo.st.closed[-1]["coin"] == "ETH"
+    finally:
+        stop_bot(bot, th)
+
+
+def _remember(held):
+    from copybot.runner import Bot
+    boot = Bot.boot
+
+    def wrapped(self):
+        held["bot"] = self
+        return boot(self)
+    return wrapped
+
+
+def test_one_normal_stop_does_not_drop_an_invo_trader(invo_env, monkeypatch):
+    """Audit 2026-10-11: the shared leader-pause limit (10% of equity / 7 = 4.29$) dropped a trader on one 3% stop of a
+    140$+ copy. The Invo limit is invo.pause_dd_pct (4%) of the wallet."""
+    hl, dc, data, cdir, f, tok = invo_env
+    bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
+    try:
+        r = bot.invo.cfg.risk
+        assert bot.invo.st.equity0 * r.leader_pause_dd_pct / 100 / r.max_leaders == pytest.approx(12.0)
+        assert bot.cfg.risk.leader_pause_dd_pct == 10.0                  # the Hyperliquid wallets keep their rule
     finally:
         stop_bot(bot, th)

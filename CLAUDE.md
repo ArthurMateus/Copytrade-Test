@@ -250,6 +250,28 @@ instances on the same wallet.
   `Watcher.round`: a failing trader no longer ends the round; all reads failing -> wait 2, 4 ... 60 s. The daily
   Invo search shares the client's spacing, so rounds are slower while it runs.
 
+## Invo audit fixes (owner request 2026-10-11, after a review by four subagents)
+- Watcher: a call missing from a read is closed only when it shows in its portfolio's closed calls (page 1; the
+  close then carries Invo's closing price and reason) or after `invo.VANISH_S` (10 s) if it never does (log
+  `invo_call_vanished`, reason "call deleted by the trader"). A portfolio answer without the `portfolios` list is a
+  failed read. An open-call list shorter than the portfolio's count is read again (up to `REREAD_MAX` rounds), and a
+  first read waits for it before the baseline.
+- Each copy's Invo call id and card text are a ledger event `invo_link` (`State.invo_links`, by pos_id): a restart
+  re-links copies by call id (coin+side only for older copies), so another portfolio's call on the same coin no longer
+  moves our copy, and the card text survives. `on_invo_baseline` waits (`invo_baseline_wait`) until Hyperliquid's coin
+  list is loaded (the `meta` event): without it every copy looked orphaned and was closed.
+- Leader pause of the Invo wallet: copy drawdown > `invo.pause_dd_pct` (4%) of the wallet (was 10% of equity/7 =
+  4.29$, one stop of a 140$ copy). Applied by setting the wallet's `leader_pause_dd_pct` = pause_dd_pct x max_leaders.
+- `invo.aliases` (Invo ticker -> HL coin, e.g. MATIC = "POL"); a rotated refresh token that cannot be written stays in
+  memory and is retried every round (log `invo_token_save_failed`); `invo_entry_gap` logs our entry vs the trader's
+  (in their unit, kPEPE x1000) and the card shows it ("ours +0.12% worse").
+- Search (`invo_scorer.VERSION` 2, cached scores redone): every portfolio of a trader is scored (active or not,
+  whatever its own win rate: judging only the 80%-win ones selected on the outcome); a trader needs >= 1 portfolio
+  passing the copy floors (`no_copyable_portfolio`); each call pays our `cost_bps` (13) as fees, so a +0.01% Invo "win"
+  is a loss; PEPE/BONK/... are scored on kPEPE prices (`invo_trade_coin`). Fields `portfolios`,
+  `copyable_portfolios`, `losing_portfolios` per score. Not done yet (owner to decide): a walk-forward test of the
+  selection, ranking by a shrunk lower bound, skipping calls whose price already moved past the trader's entry.
+
 ## Account value = perp + spot stablecoins (bug found live 2026-10-10)
 - `/hyperadd` scored with the PERP account value only while the daily search used the leaderboard value, so the same
   wallet passed the search (3% drop) and failed /hyperadd (max_drawdown>30%): 0x6d73... had 1,481$ in perps and

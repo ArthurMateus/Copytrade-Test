@@ -3,10 +3,15 @@ Hyperliquid wallets.
 
 Candidates: the usernames on Invo's Discover rankings (trending / this month / all time portfolios, trending users),
 plus the followed traders (always re-checked: a followed trader failing the rules `drop_after_fails` searches in a row
-is dropped). For each one: its active portfolios -> its closed calls of the last `history_days` (and its open ones).
+is dropped). For each one: ALL its portfolios (active or not, whatever their own win rate) -> its closed calls of the last
+`history_days` and its open ones. Judging a trader only on the portfolios that already look good selected on the
+outcome: paper portfolios are free, losers can be left open or abandoned (audit 2026-10-11). The portfolio filter
+still decides what is COPIED; a trader with no portfolio passing it fails `no_copyable_portfolio`.
 
 Scoring: every closed call becomes one round trip of synthetic fills (`calls_to_fills`): size = the committed share of
-the portfolio x leverage of a notional `BASE` portfolio, P&L = what that call made. Open calls become open positions at
+the portfolio x leverage of a notional `BASE` portfolio, P&L = what that call made minus OUR round-trip cost (a +0.01%
+"win" on Invo is a loss for a copy). Coins Hyperliquid lists per 1,000 (PEPE -> kPEPE) are scored on kPEPE's prices.
+Open calls become open positions at
 live Hyperliquid prices (losing ones count as lost trades, as for wallets). `scoring.full_score` then applies exactly
 the Hyperliquid rules and points (win rate, profit factor, no single trade > 30% of the profit, drawdowns, this
 week/today, losing streak, recent win rate, copy edge after our costs with our 3% stop checked on 1h candles, score
@@ -38,18 +43,21 @@ HOUR = 3_600_000
 BASE = 10_000.0          # notional portfolio the calls' shares are applied to (only ratios matter)
 FILTERS = ("trending", "month", "all_time")
 REQ_GAP_S = 1.0          # extra spacing of the search's own requests (the watcher's polls go first)
+VERSION = 2              # Invo-only scoring changes (2: every portfolio, our cost per call, k-coins): rescore
 
 REASON_TEXT = {"not_on_hyperliquid": "most calls are on coins Hyperliquid does not list",
                "too_fast": "calls too short to copy", "inactive": "no new call lately",
-               "no_calls": "no closed calls in a portfolio good enough to copy"}
+               "no_calls": "no closed calls lately",
+               "no_copyable_portfolio": "no portfolio passes the copy floors (win rate, return, calls)"}
 
 
 def key_coin(key: str) -> str:
     return key.split("|", 1)[0]
 
 
-def calls_to_fills(calls: list[tuple[str, Call]]) -> list[Fill]:
-    """[(Hyperliquid coin, closed call)] -> two synthetic fills per call (open, close), each call its own coin key."""
+def calls_to_fills(calls: list[tuple[str, Call]], cost_bps: float = 0.0) -> list[Fill]:
+    """[(Hyperliquid coin, closed call)] -> two synthetic fills per call (open, close), each call its own coin key.
+    Each fill pays half of `cost_bps` of its notional as a fee, so a call's net is what a copy would keep."""
     out: list[Fill] = []
     for n, (coin, c) in enumerate(sorted(calls, key=lambda x: (x[1].created_ms, x[1].id))):
         if not c.closed_ms or not c.closing_price or c.closing_price <= 0 or c.entry <= 0:
@@ -61,10 +69,11 @@ def calls_to_fills(calls: list[tuple[str, Call]]) -> list[Fill]:
         key = f"{coin}|{n}"
         pnl = side * sz * (c.closing_price - c.entry)
         close_ms = max(c.closed_ms, c.created_ms + 1)
-        out.append(Fill(key, c.entry, sz, "B" if side > 0 else "A", c.created_ms, 0.0, "Open", 0.0, 0.0, True,
-                        2 * n, 2 * n, ""))
-        out.append(Fill(key, c.closing_price, sz, "A" if side > 0 else "B", close_ms, side * sz, "Close", pnl, 0.0,
-                        True, 2 * n + 1, 2 * n + 1, ""))
+        fee = cost_bps / 2 / 1e4
+        out.append(Fill(key, c.entry, sz, "B" if side > 0 else "A", c.created_ms, 0.0, "Open", 0.0,
+                        sz * c.entry * fee, True, 2 * n, 2 * n, ""))
+        out.append(Fill(key, c.closing_price, sz, "A" if side > 0 else "B", close_ms, side * sz, "Close", pnl,
+                        sz * c.closing_price * fee, True, 2 * n + 1, 2 * n + 1, ""))
     return out
 
 
@@ -87,13 +96,24 @@ def slice_candles(cs: list[Candle], start: int, end: int) -> list[Candle]:
     return cs[i:j]
 
 
+def to_hl(coin_of, c: Call) -> tuple[str | None, Call]:
+    """(Hyperliquid coin, the call in that coin's price unit). `coin_of(ticker)` gives a coin or (coin, price factor)."""
+    r = coin_of(c.ticker)
+    coin, fx = r if isinstance(r, tuple) else (r, 1.0)
+    if coin and fx != 1.0:
+        x = lambda v: v * fx if v else v
+        c = replace(c, entry=c.entry * fx, closing_price=x(c.closing_price), target=x(c.target), stop=x(c.stop))
+    return coin, c
+
+
 def score_trader(name: str, closed: list[Call], opened: list[Call], coin_of, candles_of, mids: dict, now_ms: int,
                  params: scoring.ScoreParams, min_hl_share: float, min_hold_min: float,
-                 max_idle_days: float) -> dict:
-    """Pure (given its inputs): the trader's Score dict (+ Invo fields), eligible only if every rule passes."""
-    hl_closed = [(coin_of(c.ticker), c) for c in closed]
+                 max_idle_days: float, portfolios: tuple[int, int, int] | None = None) -> dict:
+    """Pure (given its inputs): the trader's Score dict (+ Invo fields), eligible only if every rule passes.
+    `portfolios` = (read, copyable, losing): no copyable one fails the trader (None = not checked)."""
+    hl_closed = [to_hl(coin_of, c) for c in closed]
     on_hl = [(k, c) for k, c in hl_closed if k]
-    fills = calls_to_fills(on_hl)
+    fills = calls_to_fills(on_hl, params.cost_bps)
     ordered = sorted(on_hl, key=lambda x: (x[1].created_ms, x[1].id))     # the order calls_to_fills numbers them
     cs: dict[str, list[Candle]] = {}
     full: dict[str, list[Candle]] = {}
@@ -106,7 +126,7 @@ def score_trader(name: str, closed: list[Call], opened: list[Call], coin_of, can
             full[coin] = candles_of(coin, start, now_ms)
         c = ordered[int(f.coin.split("|", 1)[1])][1]
         cs[f.coin] = slice_candles(full[coin], c.created_ms, c.closed_ms or now_ms)
-    live = open_account([(k, c) for k, c in ((coin_of(c.ticker), c) for c in opened) if k], mids)
+    live = open_account([(k, c) for k, c in (to_hl(coin_of, c) for c in opened) if k], mids)
     s = scoring.full_score(name, fills, cs, BASE, now_ms, params, live).to_dict()
     holds = [(c.closed_ms - c.created_ms) / 60_000 for _, c in on_hl if c.closed_ms]
     newest = max([c.created_ms for c in closed] + [c.created_ms for c in opened], default=0)
@@ -114,7 +134,12 @@ def score_trader(name: str, closed: list[Call], opened: list[Call], coin_of, can
              median_hold_min=statistics.median(holds) if holds else 0.0, open_calls=len(opened),
              idle_days=(now_ms - newest) / DAY if newest else 999.0,
              exposure=statistics.median([c.exposure for _, c in on_hl]) if on_hl else 0.0, coin_pnl={})
+    s["iv"] = VERSION
+    if portfolios is not None:
+        s.update(portfolios=portfolios[0], copyable_portfolios=portfolios[1], losing_portfolios=portfolios[2])
     extra = []
+    if portfolios is not None and portfolios[1] == 0:
+        extra.append("no_copyable_portfolio")
     if not closed:
         extra.append("no_calls")
     elif s["hl_share"] < min_hl_share:
@@ -139,7 +164,7 @@ class InvoScorer:
     def __init__(self, cfg, client, params: scoring.ScoreParams, coin_of, candles_of, mids: dict, followed,
                  out: queue.Queue, cache_dir: str | os.PathLike, stop: threading.Event,
                  now=lambda: int(time.time() * 1000), skip=lambda name, portfolio: None):
-        """`skip(name, Portfolio)`: portfolios whose calls would not be copied are not scored either."""
+        """`skip(name, Portfolio)`: why a portfolio's calls would not be copied (a trader needs one that would)."""
         self.cfg, self.c, self.client = cfg, cfg.invo, client
         self.params = replace(params, coins=None)      # every Hyperliquid perp (the Invo wallets copy alts too)
         self.coin_of, self.candles_of, self.mids, self.followed = coin_of, candles_of, mids, followed
@@ -148,7 +173,8 @@ class InvoScorer:
         self.dir.mkdir(parents=True, exist_ok=True)
         st = self._load()
         self.scores: dict = {k: v for k, v in st.get("scores", {}).items()
-                             if v.get("v") == scoring.VERSION and v.get("rules") == self.params.rules()}
+                             if v.get("v") == scoring.VERSION and v.get("rules") == self.params.rules()
+                             and v.get("iv") == VERSION}
         self.fails: dict = st.get("fails", {})
         self.last = int(st.get("last", 0)) if self.scores else 0     # rules changed (or first start): search now
         self.progress: dict = {"phase": "idle", "todo": 0, "done": 0}
@@ -290,10 +316,10 @@ class InvoScorer:
         since = now - self.c.history_days * DAY
         closed: list[Call] = []
         opened: list[Call] = []
-        for p in self.client.portfolios(u[0]):
-            self._gap()
-            if not p.active or self.skip(name, p):
-                continue
+        ports = self.client.portfolios(u[0])
+        self._gap()
+        copyable = sum(1 for p in ports if p.active and not self.skip(name, p))
+        for p in ports:                         # every portfolio counts, not only the ones that look good
             if p.open_count:
                 opened += [c for c in self.client.open_calls(p.id) if c.is_open]
                 self._gap()
@@ -307,4 +333,5 @@ class InvoScorer:
                 page += 1
         closed = closed[: self.c.max_calls]
         return score_trader(name, closed, opened, self.coin_of, self.candles_of, self.mids, now, self.params,
-                            self.c.min_hl_share, self.c.min_hold_min, self.c.max_idle_days)
+                            self.c.min_hl_share, self.c.min_hold_min, self.c.max_idle_days,
+                            (len(ports), copyable, sum(1 for p in ports if p.pnl_pct < 0)))

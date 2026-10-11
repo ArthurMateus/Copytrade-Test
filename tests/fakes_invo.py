@@ -40,6 +40,8 @@ class FakeInvo:
         self.refuse_refresh = False
         self.broken_users: set[str] = set()              # user ids whose portfolio list answers 500
         self.throttle = False                            # every API call answers 429 (rate limited)
+        self.blank_users: set[str] = set()               # user ids whose portfolio list answers 200 without the list
+        self.hidden: set[str] = set()                    # open call ids counted by the portfolio but not listed yet
         self._n = itertools.count(1)
         self.lock = threading.Lock()
         fake = self
@@ -83,6 +85,8 @@ class FakeInvo:
                     return self._send(429, {"message": "Too Many Requests"})
                 if path == "/portfolios/v2/get_users_portfolios" and body.get("userId") in fake.broken_users:
                     return self._send(500, {"status": "error", "message": "Internal server error"})
+                if path == "/portfolios/v2/get_users_portfolios" and body.get("userId") in fake.blank_users:
+                    return self._send(200, {"success": True})
                 return self._send(200, fake.answer(path, body))
 
         self.http = _Server(("127.0.0.1", 0), H)
@@ -128,7 +132,8 @@ class FakeInvo:
             page, size = int(pg.get("page", 1)), int(pg.get("size", 50))
             with self.lock:
                 if body.get("isOpen"):
-                    calls = copy.deepcopy(self.calls.get(body["portfolioId"], []))
+                    calls = [copy.deepcopy(c) for c in self.calls.get(body["portfolioId"], [])
+                             if c["id"] not in self.hidden]
                 else:
                     calls = copy.deepcopy(self.closed.get(body["portfolioId"], [])[(page - 1) * size: page * size])
             r = copy.deepcopy(fixture("invo_investments_open.json"))
@@ -193,6 +198,17 @@ class FakeInvo:
                     c.update(entrySize=size * 100, positionSize=size, changes={"isAdded": True})
             self.updated[pid] = int(time.time() * 1000)
 
-    def close_call(self, pid: str, cid: str) -> None:
+    def close_call(self, pid: str, cid: str, price: float | None = None, reason: str = "manual") -> None:
+        """The trader closes the call: it leaves the open list and is first in the closed list (as on Invo)."""
+        with self.lock:
+            gone = [c for c in self.calls.get(pid, []) if c["id"] == cid]
+            self.calls[pid] = [c for c in self.calls.get(pid, []) if c["id"] != cid]
+            for c in gone:
+                c.update(isOpen=False, closedAt=iso(int(time.time() * 1000)), reasonClosed=reason,
+                         closingPrice=price if price is not None else c["entryPrice"])
+                self.closed.setdefault(pid, []).insert(0, c)
+
+    def delete_call(self, pid: str, cid: str) -> None:
+        """The call disappears without being closed (deleted by the trader, or hidden by Invo)."""
         with self.lock:
             self.calls[pid] = [c for c in self.calls.get(pid, []) if c["id"] != cid]

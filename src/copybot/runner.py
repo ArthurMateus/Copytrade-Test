@@ -109,6 +109,7 @@ class Bot:
         self._invo_call = None                       # the call being opened (read by invo_size)
         self.invo_info: dict[str, str] = {}          # our position id -> what the trader called (for its card)
         self._invo_close_why: str | None = None      # the trader's close reason while it is being mirrored
+        self.invo_baseline_wait: dict[str, list] = {}  # trader -> its first read, held until Hyperliquid's coins load
         if cfg.invo.enabled and cfg.invo_token_file:
             w = SideWallet(cfg, cfg.invo.limits_pct, self.data, side_broker, self.health, self.mids, self.assets,
                            alts_ok=lambda leader: True, score_of=self.score_of, name="invo_calls",
@@ -127,6 +128,9 @@ class Bot:
                 # old (still fail closed)
                 x.cfg.risk.max_entry_age_s = cfg.invo.max_call_age_s + cfg.invo.poll_s + 10
                 x.cfg.risk.trail_after_pct, x.cfg.risk.trail_pct = cfg.invo.trail_after_pct, cfg.invo.trail_pct
+                # the leader pause compares a trader's copy drawdown with leader_pause_dd_pct of (equity /
+                # max_leaders): set so the limit is invo.pause_dd_pct of the whole wallet
+                x.cfg.risk.leader_pause_dd_pct = cfg.invo.pause_dd_pct * max(1, x.cfg.risk.max_leaders)
             # watched: the followed traders AND the unfollowed ones we still hold a copy of (their exits are copied);
             # rebuilt on the trading thread (invo_refresh_watched), read by the watcher thread
             self.invo_watched: frozenset[str] = frozenset()
@@ -135,6 +139,13 @@ class Bot:
                                           lambda: self.invo_watched, cfg.invo.poll_s,
                                           cfg.invo.max_call_age_s, self.stop, skip=self.invo_skip)
             self.invo_refresh_watched()
+            for x in self.invo_wallets():                # the call each open copy belongs to (ledger, audit 2026-10-11)
+                for p in x.st.positions.values():
+                    link = x.st.invo_links.get(p.pos_id)
+                    if link and p.leader.startswith(INVO):
+                        self.invo_calls[(x.name, link["call"])] = p.coin
+                        if x is self.invo and link.get("info"):
+                            self.invo_info[p.pos_id] = link["info"]
         elif cfg.invo.enabled:
             log.info("invo_off", why="INVO_TOKEN_FILE not set")
         self.det = Detector()
@@ -150,7 +161,7 @@ class Bot:
         self.invo_search: InvoScorer | None = None
         self.invo_scores: dict = {}
         if self.invo is not None and cfg.invo.search:
-            self.invo_search = InvoScorer(cfg, self.invo_watch.client, self.scorer.params, self.invo_coin,
+            self.invo_search = InvoScorer(cfg, self.invo_watch.client, self.scorer.params, self.invo_trade_coin,
                                           self.scorer.candles, self.mids,
                                           lambda: {a[len(INVO):] for a in self.invo.st.followed}, self.q,
                                           self.data / "cache", self.stop, skip=self.invo_skip)
@@ -327,7 +338,7 @@ class Bot:
         last read). Skipped ones are only counted: a portfolio that starts passing the rules is copied (and listed)
         from then on by itself."""
         out = {}
-        for name, ports in (self.invo_watch.stats if self.invo_watch else {}).items():
+        for name, ports in list((self.invo_watch.stats if self.invo_watch else {}).items()):
             ok = [p for p in ports if not self.invo_skip(name, p)]
             rows = [(f"✅ {p.title.strip()[:24] or 'portfolio'}",
                      f"{p.win_rate:.0f}% win · {p.pnl_pct:+,.0f}% · {p.closed} calls · {p.open_count} open")
@@ -490,11 +501,16 @@ class Bot:
         return equity * self.cfg.invo.max_risk_pct / self.cfg.risk.stop_pct
 
     def invo_coin(self, ticker: str) -> str | None:
-        """Invo ticker -> the Hyperliquid perp name of the same unit (case can differ). Used by the Invo search,
-        whose prices must be in the coin's own unit, so PEPE does not map to kPEPE here (see invo_trade_coin)."""
-        if ticker in self.assets:
-            return ticker
-        return next((a for a in self.assets if a.upper() == ticker.upper()), None)
+        """Invo ticker -> the Hyperliquid perp name of the same unit (case can differ; invo.aliases for renamed
+        coins). PEPE does not map to kPEPE here (see invo_trade_coin)."""
+        alias = {k.upper(): v for k, v in self.cfg.invo.aliases.items()}.get(ticker.upper())
+        for t in ((alias, ticker) if alias else (ticker,)):
+            if t in self.assets:
+                return t
+            hit = next((a for a in self.assets if a.upper() == t.upper()), None)
+            if hit:
+                return hit
+        return None
 
     def invo_trade_coin(self, ticker: str) -> tuple[str | None, float]:
         """Invo ticker -> (Hyperliquid perp name, price factor) for copying. Hyperliquid lists some memecoins per
@@ -529,9 +545,16 @@ class Bot:
         return coin
 
     def on_invo_baseline(self, trader: str, calls: list) -> None:
-        """First read of a trader (start, re-follow): match our open copies to its open calls by coin and side, and
-        close copies whose call is gone (it closed while we were not watching; code audit 2026-10-10 #5)."""
+        """First read of a trader (start, re-follow): match our open copies to its open calls (by the call id saved
+        with the copy, else by coin and side), and close copies whose call is gone (it closed while we were not
+        watching; code audit 2026-10-10 #5). Held until Hyperliquid's coin list is loaded: without it no call maps to
+        a coin and every copy would look orphaned (audit 2026-10-11)."""
+        if not self.assets:
+            log.warn("invo_baseline_waits", trader=trader, why="Hyperliquid coin list not loaded yet")
+            self.invo_baseline_wait[trader] = calls
+            return
         leader = INVO + trader
+        ids = {c.id for c in calls}
         open_by = {}
         for c in calls:
             coin, _ = self.invo_trade_coin(c.ticker)
@@ -539,11 +562,18 @@ class Bot:
                 open_by.setdefault((coin, 1 if c.long else -1), []).append(c)
         for w in self.invo_wallets():
             for p in [p for p in w.st.positions.values() if p.leader == leader]:
-                mine = open_by.get((p.coin, p.side), [])
-                if len(mine) == 1:
-                    self.invo_calls[(w.name, mine[0].id)] = p.coin
-                if mine:
-                    continue
+                link = w.st.invo_links.get(p.pos_id)
+                if link:
+                    if link["call"] in ids:
+                        self.invo_calls[(w.name, link["call"])] = p.coin
+                        continue
+                    self.invo_calls.pop((w.name, link["call"]), None)
+                else:                                          # copies opened before calls were saved with them
+                    mine = open_by.get((p.coin, p.side), [])
+                    if len(mine) == 1:
+                        self.invo_calls[(w.name, mine[0].id)] = p.coin
+                    if mine:
+                        continue
                 log.warn("invo_closed_unseen", wallet=w.name, trader=trader, coin=p.coin)
                 self._invo_close_why = "closed while the bot was not watching"
                 try:
@@ -618,12 +648,22 @@ class Bot:
             p = w.st.positions.get(coin)
             if p is not None and p.leader == leader:
                 self.invo_calls[(w.name, call.id)] = coin
+                # how much worse than the trader we got in (+ = we paid more for a long / got less for a short), in
+                # the trader's own price unit (kPEPE = PEPE x 1000): the first number to watch live (audit 2026-10-11)
+                gap = side * (p.entry_px / (call.entry * fx) - 1) * 100 if call.entry > 0 else 0.0
+                info = ""
                 if primary:
-                    self.invo_info[p.pos_id] = (
-                        f"Invo call by @{cardfmt.esc(trader)}: {call.committed * 100:.1f}% x {call.leverage:g}x of their "
-                        f"paper portfolio · their entry {cardfmt.fpx(call.entry)} · target "
-                        f"{cardfmt.fpx(call.target) if call.target else '-'} · stop "
-                        f"{cardfmt.fpx(call.stop) if call.stop else '-'}")
+                    log.info("invo_entry_gap", trader=trader, coin=coin, gap_pct=round(gap, 3),
+                             their=call.entry * fx, ours=p.entry_px,
+                             age_s=round((time.time() * 1000 - call.created_ms) / 1000, 1))
+                    word = "worse" if gap > 0 else "better" if gap < 0 else "same"
+                    info = (f"Invo call by @{cardfmt.esc(trader)}: {call.committed * 100:.1f}% x {call.leverage:g}x of "
+                            f"their paper portfolio · their entry {cardfmt.fpx(call.entry)} (ours {gap:+.2f}% {word})"
+                            f" · target {cardfmt.fpx(call.target) if call.target else '-'} · stop "
+                            f"{cardfmt.fpx(call.stop) if call.stop else '-'}")
+                    self.invo_info[p.pos_id] = info
+                w.rec({"ev": "invo_link", "pos_id": p.pos_id, "call": call.id, "info": info})
+                if primary:
                     self.invo_card(p, force=True)
             return
         if kind == "invo_resize":
@@ -640,6 +680,7 @@ class Bot:
             if primary and p is not None and p.pos_id in self.invo_info:
                 self.invo_info[p.pos_id] = self.invo_info[p.pos_id].split(" · resized")[0] + (
                     f" · resized by the trader {call.committed * 100:.1f}% → {new.committed * 100:.1f}%")
+                w.rec({"ev": "invo_link", "pos_id": p.pos_id, "call": new.id, "info": self.invo_info[p.pos_id]})
             log.info("invo_resize", wallet=w.name, trader=trader, coin=held, old=round(call.committed, 4),
                      new=round(new.committed, 4), ours_before=before, ours_after=p.size if p else 0)
             return
@@ -808,6 +849,12 @@ class Bot:
         elif kind == "meta":
             assets, at = item[1], item[2]
             self.assets.update(assets)
+            for trader, calls in list(self.invo_baseline_wait.items()) if self.assets else ():
+                del self.invo_baseline_wait[trader]
+                try:
+                    self.on_invo_baseline(trader, calls)
+                except Exception:
+                    log.exception("invo_error", kind="invo_baseline")
             hk = hour_key(at)
             if self.st.marks.get("funding", {}).get("key") != hk and at % 3_600_000 < 600_000:
                 self.pm.apply_funding(self.assets, hk)

@@ -106,6 +106,37 @@ def test_rankings_are_read_structurally():
         == ["a", "b"]
 
 
+def test_a_win_smaller_than_our_cost_counts_as_a_loss():
+    """Audit 2026-10-11: Invo counts ETH 2472.8 -> 2473.1 (+0.01%) as a win; a copy loses our 13 bps on it."""
+    tiny = [call(entry=3000.0, close=3000.3, start=NOW - 100 * DAY + i * DAY, i=i) for i in range(40)]
+    s = score(tiny)
+    assert s["win_rate"] == 0.0 and s["pnl"] < 0 and not s["eligible"]
+
+
+def test_pepe_calls_are_scored_on_kpepe_prices():
+    """Audit 2026-10-11: PEPE calls are copied on kPEPE (x1000) but the search left them out as not on Hyperliquid."""
+    seen = []
+
+    def candles(coin, s, e):
+        seen.append(coin)
+        return []
+    calls = [call(ticker="PEPE", entry=0.00001, close=0.0000102 if i % 3 else 0.0000099,
+                  start=NOW - 150 * DAY + i * 2 * DAY, i=i) for i in range(60)]
+    s = invo_scorer.score_trader("t", calls, [], lambda t: ("kPEPE", 1000.0) if t == "PEPE" else (None, 1.0),
+                                 candles, {}, NOW, PARAMS, 0.5, 15.0, 14.0)
+    assert s["hl_share"] == 1.0 and set(seen) == {"kPEPE"}
+    assert s["win_rate"] == pytest.approx(2 / 3, abs=0.01)
+
+
+def test_a_trader_is_judged_on_every_portfolio_and_needs_one_we_would_copy():
+    """Audit 2026-10-11: scoring only the portfolios that already show 80%+ wins selected on the outcome. The search
+    now reads every portfolio; the floors only decide what is copied."""
+    s = invo_scorer.score_trader("t", history(), [], lambda t: t if t == "ETH" else None, lambda c, a, b: [],
+                                 {"ETH": 3000.0}, NOW, PARAMS, 0.5, 15.0, 14.0, portfolios=(3, 0, 2))
+    assert "no_copyable_portfolio" in s["reasons"] and not s["eligible"]
+    assert (s["portfolios"], s["copyable_portfolios"], s["losing_portfolios"]) == (3, 0, 2)
+
+
 # ---- the report (pure) --------------------------------------------------------------------------------------------
 def test_report_compares_with_the_previous_day_and_says_why_one_left(tmp_path):
     st = picks.Store(tmp_path / "picks.json")

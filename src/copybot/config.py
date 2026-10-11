@@ -211,11 +211,17 @@ class Invo:
     # are small), lowering profit per copy; 0 = off, e.g. 5 / 5 = start at +5%, trail 5% behind
     trail_after_pct: float = 0.0
     trail_pct: float = 3.0
+    # a followed trader is dropped when its copies in the trader-size wallet have lost this % of the wallet from their
+    # best (audit 2026-10-11: the shared rule, 10% of equity / 7 = 4.29$, dropped an 80%-win trader on ONE normal
+    # stop of a 140$ copy). 4% = two stops of the largest copy (max_risk_pct 2%); 5 losses in a row still drop it
+    pause_dd_pct: float = 4.0
+    # Invo ticker -> Hyperliquid coin when the names differ (checked against Hyperliquid's list at each use)
+    aliases: dict = field(default_factory=dict)
     # the daily Invo search (copybot/invo_scorer.py): Invo's Discover rankings -> each trader's closed calls ->
     # the SAME scoring as Hyperliquid wallets (scoring.full_score) plus Invo gates; results in the daily picks
     # portfolio filter (owner request 2026-10-10): a followed trader's calls are only copied from its portfolios with
     # at least this win rate, this % return (Invo's plSnapshot) and this many closed calls; /invoblock adds manual
-    # blocks. Also applied to the search's scoring (a trader is judged on the portfolios we would copy)
+    # blocks. The search scores EVERY portfolio of a trader (2026-10-11) and only needs one passing these
     min_portfolio_win_rate: float = 0.80     # owner 2026-10-10: at least 80% wins ...
     min_portfolio_pnl_pct: float = 100.0     # ... and at least doubled (+100%)
     min_portfolio_calls: int = 20
@@ -361,6 +367,7 @@ CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
     ("invo", "max_risk_pct"): (0.1, 20.0),
     ("invo", "trail_after_pct"): (0.0, 50.0),
     ("invo", "trail_pct"): (0.2, 20.0),
+    ("invo", "pause_dd_pct"): (0.5, 50.0),
     ("invo", "review_hours"): (1.0, 168.0),
     ("invo", "min_portfolio_win_rate"): (0.0, 1.0),
     ("invo", "min_portfolio_pnl_pct"): (-100.0, 100000.0),
@@ -468,6 +475,8 @@ def validate(cfg: Config) -> None:
             raise ConfigError(f"{sec}.{key}: at most 8 distinct numbers in (0, 50]")
     if cfg.sol.drop_rank <= cfg.sol.join_rank:
         raise ConfigError("sol.drop_rank must be > join_rank")
+    if not all(isinstance(k, str) and isinstance(v, str) and v for k, v in cfg.invo.aliases.items()):
+        raise ConfigError('invo.aliases: Invo ticker = "Hyperliquid coin", e.g. { MATIC = "POL" }')
 
 
 def scaled(cfg: Config, risk_pct: float) -> Config:

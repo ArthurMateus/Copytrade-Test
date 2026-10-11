@@ -77,6 +77,7 @@ class State:
     followed: dict[str, int] = field(default_factory=dict)         # leader -> followed since (ms)
     paused_leaders: dict[str, str] = field(default_factory=dict)   # leader -> reason (no new entries)
     blocked: dict = field(default_factory=dict)  # Invo: leader -> {portfolio id: title} the owner blocked (/invoblock)
+    invo_links: dict = field(default_factory=dict)  # Invo: our position id -> {"call": Invo call id, "info": card text}
     picked: set = field(default_factory=set)      # FOMO: wallets the owner picked (/fomofollow): never re-ranked away
     dropped: dict[str, int] = field(default_factory=dict)          # leader -> dropped at (ms), for cooldown
     leader_stats: dict[str, LeaderStats] = field(default_factory=dict)
@@ -325,6 +326,10 @@ class State:
 
     def _ev_invo_block(self, ev):
         self.blocked.setdefault(ev["leader"], {})[ev["portfolio"]] = ev.get("title", "")
+
+    def _ev_invo_link(self, ev):
+        """Which Invo call a copy belongs to (so a restart still knows which call's exit or resize moves it)."""
+        self.invo_links[ev["pos_id"]] = {"call": ev["call"], "info": ev.get("info", "")}
 
     def _ev_invo_unblock(self, ev):
         self.blocked.get(ev["leader"], {}).pop(ev["portfolio"], None)
