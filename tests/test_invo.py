@@ -84,7 +84,8 @@ def test_watcher_copies_only_new_fresh_calls_and_reports_closes(fake, tmp_path):
     w = invo.Watcher(invo.InvoClient(fake.url, str(tok), min_interval_s=0), out, lambda: {"nicush"}, 1, 180,
                      threading.Event())
     w.poll("nicush")
-    assert out.empty()
+    (k, name, base), = [out.get_nowait() for _ in range(out.qsize())]     # the baseline: reported, never copied
+    assert (k, name, [c.id for c in base]) == ("invo_baseline", "nicush", [old])
     n_reads = sum(1 for p, _ in fake.requests if p == "/investments/get_investments")
     w.poll("nicush")                                        # nothing changed: no investment read at all
     assert sum(1 for p, _ in fake.requests if p == "/investments/get_investments") == n_reads
@@ -255,6 +256,96 @@ def test_a_trader_whose_copies_lose_too_much_is_dropped_at_once(invo_env, monkey
         stop_bot(bot, th)
 
 
+def test_an_unfollowed_traders_exit_still_closes_our_copy_and_invo_does_not_trail(invo_env, monkeypatch):
+    """Owner request 2026-10-11: a dropped or unfollowed trader is still read while we hold its copy, so its close is
+    copied (it used to stay open until our stop); its new calls are not. The Invo wallets do not trail (invo.toml)."""
+    hl, dc, data, cdir, f, tok = invo_env
+    pid = f.add_user("henderson")[0]
+    bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
+    try:
+        assert all(w.cfg.risk.trail_after_pct == 0 for w in bot.invo_wallets())
+        assert bot.cfg.risk.trail_after_pct == 3.0                       # the Hyperliquid wallets still trail
+        dc.say("/invofollow henderson")
+        assert wait_for(lambda: bot.invo_watch.known.get("henderson") is not None, timeout=10)
+        cid = f.open_call(pid, "ETH", long=False, leverage=5, size=0.05, entry=3000.0)
+        assert wait_for(lambda: "ETH" in bot.invo.st.positions, timeout=10)
+        dc.say("/invounfollow henderson")
+        assert wait_for(lambda: "invo:henderson" not in bot.invo.st.followed)
+        assert "henderson" in bot.invo_watched                           # still read: we hold its copy
+        f.open_call(pid, "SOL", long=True, leverage=5, size=0.05, entry=150.0)      # a new call: not copied
+        time.sleep(3)
+        assert "SOL" not in bot.invo.st.positions
+        f.close_call(pid, cid)
+        assert wait_for(lambda: "ETH" not in bot.invo.st.positions, timeout=10)
+        assert bot.invo.st.closed[-1]["reason"] == "leader_close"
+        assert wait_for(lambda: all("ETH" not in w.st.positions for w in bot.invo_extra), timeout=10)
+        assert wait_for(lambda: "henderson" not in bot.invo_watched)     # nothing held any more: no longer read
+    finally:
+        stop_bot(bot, th)
+
+
+def test_a_call_closed_while_the_bot_was_off_closes_our_copy_at_the_restart(invo_env, monkeypatch):
+    """Code audit 2026-10-10 #5: the first read after a start is a baseline; a copy whose call is no longer open
+    there is closed (it used to run on our stop forever). A copy whose call is still open is kept."""
+    hl, dc, data, cdir, f, tok = invo_env
+    pid = f.add_user("akira")[0]
+    bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
+    try:
+        dc.say("/invofollow akira")
+        assert wait_for(lambda: bot.invo_watch.known.get("akira") is not None, timeout=10)
+        eth = f.open_call(pid, "ETH", long=True, leverage=5, size=0.05, entry=3000.0)
+        f.open_call(pid, "SOL", long=False, leverage=5, size=0.05, entry=150.0)
+        assert wait_for(lambda: {"ETH", "SOL"} <= set(bot.invo.st.positions), timeout=10)
+    finally:
+        stop_bot(bot, th)
+        bot.lock.f.close()                                               # as the process exit would
+    f.close_call(pid, eth)                                               # while the bot is off
+    bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
+    try:
+        assert wait_for(lambda: "ETH" not in bot.invo.st.positions, timeout=15)
+        assert bot.invo.st.closed[-1]["coin"] == "ETH" and "SOL" in bot.invo.st.positions
+        assert wait_for(lambda: all("ETH" not in w.st.positions and "SOL" in w.st.positions for w in bot.invo_extra))
+        assert any(k[1] != eth and v == "SOL" for k, v in bot.invo_calls.items())     # SOL matched to its call again
+    finally:
+        stop_bot(bot, th)
+
+
+def test_a_call_we_skipped_never_moves_the_copy_of_another_call_on_that_coin(invo_env, monkeypatch):
+    """Code audit 2026-10-10 #4: call B on a coin we already hold for call A is skipped; B's close must not close A's
+    copy (it used to, matched by the coin alone)."""
+    hl, dc, data, cdir, f, tok = invo_env
+    pid = f.add_user("nicush")[0]
+    bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
+    try:
+        dc.say("/invofollow nicush")
+        assert wait_for(lambda: bot.invo_watch.known.get("nicush") is not None, timeout=10)
+        a = f.open_call(pid, "ETH", long=True, leverage=5, size=0.05, entry=3000.0)
+        assert wait_for(lambda: "ETH" in bot.invo.st.positions, timeout=10)
+        b = f.open_call(pid, "ETH", long=False, leverage=5, size=0.05, entry=3000.0)
+        time.sleep(2)
+        f.close_call(pid, b)
+        time.sleep(3)
+        assert "ETH" in bot.invo.st.positions and bot.invo.st.positions["ETH"].side == 1
+        f.close_call(pid, a)
+        assert wait_for(lambda: "ETH" not in bot.invo.st.positions, timeout=10)
+    finally:
+        stop_bot(bot, th)
+
+
+def test_memecoins_listed_per_1000_on_hyperliquid_are_copied_under_their_k_name():
+    """Owner request 2026-10-11: Hyperliquid lists PEPE, BONK, SHIB, FLOKI ... per 1,000 coins as kPEPE, kBONK ...; a
+    PEPE call trades kPEPE with the trader's prices x1000. The Invo search keeps the same-unit names only."""
+    from types import SimpleNamespace
+    from copybot.runner import Bot
+    assets = {a["name"]: None for a in fixture("meta_and_asset_ctxs.json")[0]["universe"]}
+    b = SimpleNamespace(assets=assets)
+    b.invo_coin = lambda t: Bot.invo_coin(b, t)
+    for ticker, want in (("PEPE", ("kPEPE", 1000.0)), ("bonk", ("kBONK", 1000.0)), ("SHIB", ("kSHIB", 1000.0)),
+                         ("ETH", ("ETH", 1.0)), ("FARTCOIN", ("FARTCOIN", 1.0)), ("NOPE123", (None, 1.0))):
+        assert Bot.invo_trade_coin(b, ticker) == want, ticker
+    assert Bot.invo_coin(b, "PEPE") is None
+
+
 def test_committed_size_comes_from_entrySize_not_the_price_dependent_positionSize():
     pump, eth = invo.parse_calls(fixture("invo_investments_open.json"))
     assert pump.entry_size == pytest.approx(0.04998597660369806) and pump.size == pytest.approx(0.0324751614)
@@ -271,6 +362,7 @@ def test_watcher_reports_an_add_or_a_trim_of_an_open_call(fake, tmp_path):
     w = invo.Watcher(invo.InvoClient(fake.url, str(tok), min_interval_s=0), out, lambda: {"nicush"}, 1, 180,
                      threading.Event())
     w.poll("nicush")
+    assert out.get_nowait()[:2] == ("invo_baseline", "nicush")
     cid = fake.open_call(pid, "ETH", size=0.05)
     w.poll("nicush")
     assert out.get_nowait()[0] == "invo_open"

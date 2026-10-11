@@ -12,6 +12,10 @@ max_risk_pct = 2.0        # one copy never risks more than this % of our 300$ at
 limits_pct = 5.0          # the wallet's risk limits = a side wallet at this risk level              [0.5, 20]
 max_traders = 7           #                                                                         [0, 20]
 risk_wallets_pct = [1.0, 2.0, 5.0, 10.0, 20.0]
+# Trailing stop of every Invo wallet (instead of the one in risk.toml). Off: on 180 days of real prices it cut the big
+# winners this book needs. 5 and 5 would start it at +5% and trail 5% behind.
+trail_after_pct = 0.0     # once a copy is this % in profit the stop follows the price (0 = off)   [0, 50]
+trail_pct = 3.0           # ... this % behind the best price, never below break-even                [0.2, 20]
 # Portfolio filter: a trader's calls are only copied from its portfolios with at least this win rate, this % return
 # (Invo's P&L of the portfolio) and this many closed calls. /invoblock <user> <portfolio> blocks one by hand.
 min_portfolio_win_rate = 0.80   # 0.80 = 80%                                                          [0, 1]

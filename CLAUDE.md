@@ -262,6 +262,16 @@ instances on the same wallet.
   and `Bot.invo_drop` unfollows it in every Invo wallet at once (found live: lazylegendx lost 15.93$ in 10 trades and
   stayed followed because only the daily search could drop it).
 
+## Invo fixes after the stop-loss study (owner request 2026-10-11)
+- `invo.trail_after_pct` / `trail_pct` replace the risk.toml trail in every Invo wallet; 0 = off (default): on 180 days
+  of real prices the 3/3 trail cut the big winners this book needs. The 3% hard stop stays.
+- `Bot.invo_trade_coin`: a PEPE/BONK/SHIB/FLOKI call trades kPEPE/... (price x1000); `invo_coin` (search) is unchanged.
+- Unfollowed traders with an open copy stay watched (`invo_refresh_watched`) so their exits/resizes are copied; new
+  calls of theirs are not. The watcher's first read emits `("invo_baseline", user, calls)`: `on_invo_baseline`
+  re-links our copies to the calls and closes copies whose call closed while we were not watching (`invo_closed_unseen`).
+- `boot_repair` keeps a stop on the winning side of the entry (a trailed stop is no longer reset at restart).
+- Each new call logs `invo_call` with the trader's own stop/target distance (to judge "use their stop" later).
+
 ## Daily picks, report-only searches (owner request 2026-10-09)
 - `selection.auto_follow` and `sol.auto_follow` = false (default): `select()` (HL) never joins or swaps for rank, only
   drops paused / no-longer-eligible leaders; `sol/hysteresis.select` likewise (every bad one leaves; owner picks kept);

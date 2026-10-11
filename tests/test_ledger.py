@@ -96,6 +96,11 @@ def test_a_trailed_stop_past_the_entry_is_valid_after_a_restart(tmp_path):
     lg.close()
     st = Ledger(tmp_path / "l.jsonl").replay()
     assert st.positions["BTC"].stop_px == 103.0 and st.positions["ETH"].stop_px == 96.0 and not st.uncertain
+    # the restart repair keeps them too (code audit 2026-10-10 #3: it reset them to entry - 3% at every restart)
+    from copybot.wallets import boot_repair
+    events = []
+    assert boot_repair(st, events.append, None, "test") == [] and events == []
+    assert st.positions["BTC"].stop_px == 103.0 and st.positions["ETH"].stop_px == 96.0
 
 
 def test_event_for_unknown_position_is_uncertain(tmp_path):

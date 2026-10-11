@@ -203,6 +203,11 @@ class Invo:
     # fixed-risk Invo wallets next to the trader-size one (owner request 2026-10-09): each copy risks this % of the
     # wallet's own 300$ at our 3% stop, whatever the trader's size
     risk_wallets_pct: list = field(default_factory=lambda: [1.0, 2.0, 5.0, 10.0, 20.0])
+    # trailing stop of the Invo wallets (owner request 2026-10-11): replaces risk.trail_after_pct / trail_pct there.
+    # Off by default: on 180 days of real prices the 3/3 trail cut the big winners this book needs (its usual wins
+    # are small), lowering profit per copy; 0 = off, e.g. 5 / 5 = start at +5%, trail 5% behind
+    trail_after_pct: float = 0.0
+    trail_pct: float = 3.0
     # the daily Invo search (copybot/invo_scorer.py): Invo's Discover rankings -> each trader's closed calls ->
     # the SAME scoring as Hyperliquid wallets (scoring.full_score) plus Invo gates; results in the daily picks
     # portfolio filter (owner request 2026-10-10): a followed trader's calls are only copied from its portfolios with
@@ -351,6 +356,8 @@ CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
     ("invo", "size_mult"): (0.1, 10.0),
     ("invo", "limits_pct"): (0.5, 20.0),
     ("invo", "max_risk_pct"): (0.1, 20.0),
+    ("invo", "trail_after_pct"): (0.0, 50.0),
+    ("invo", "trail_pct"): (0.2, 20.0),
     ("invo", "review_hours"): (1.0, 168.0),
     ("invo", "min_portfolio_win_rate"): (0.0, 1.0),
     ("invo", "min_portfolio_pnl_pct"): (-100.0, 100000.0),

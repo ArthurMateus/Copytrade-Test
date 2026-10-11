@@ -90,7 +90,9 @@ def boot_repair(st: State, rec, gate: RiskGate, name: str) -> list[str]:
     for iid in list(st.open_intents):
         rec({"ev": "intent_abort", "intent": iid})
     for p in list(st.positions.values()):  # never a stop-less position
-        bad = p.stop_px <= 0 or (p.side > 0 and p.stop_px >= p.entry_px) or (p.side < 0 and p.stop_px <= p.entry_px)
+        # a stop on the winning side of the entry is valid: the trailing stop moved it there to lock in profit
+        # (code audit 2026-10-10 #3: it used to be reset to entry - 3% at every restart; same rule as Ledger.replay)
+        bad = not (0 < p.stop_px < p.entry_px * 10)
         if bad:
             stop = gate.stop_for(p.side, p.entry_px)
             rec({"ev": "stop_set", "coin": p.coin, "pos_id": p.pos_id, "stop_px": stop})

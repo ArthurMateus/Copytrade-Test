@@ -275,7 +275,8 @@ class Watcher:
     ("invo_open", username, Call) for a call that appeared since the last poll and is fresh, and
     ("invo_close", username, Call) for one that disappeared, and ("invo_resize", username, old Call, new Call) when the
     trader added to or trimmed an open call (its committed size changed by more than RESIZE_MIN). The first poll of a trader is only a baseline: calls
-    already open when we start watching are never copied (we would enter late). One portfolio-list request per
+    already open when we start watching are never copied (we would enter late); it is reported as
+    ("invo_baseline", username, [open Calls]) so copies whose call closed meanwhile can be closed. One portfolio-list request per
     trader per poll; open calls are only read for portfolios whose open-trade list changed."""
 
     def __init__(self, client: InvoClient, out, traders, poll_s: float, max_age_s: float, stop: threading.Event,
@@ -301,7 +302,10 @@ class Watcher:
     def run(self) -> None:
         while not self.stop.is_set():
             try:
-                for name in sorted(self.traders()):
+                names = set(self.traders())
+                for gone in set(self.known) - names:         # watched again later: a fresh baseline
+                    self.forget(gone)
+                for name in sorted(names):
                     self.poll(name)
                 self.last_ok = time.time()
                 if not self.auth_ok:
@@ -345,6 +349,9 @@ class Watcher:
         self.known[name] = now_open
         if before is None:                                  # baseline: never copy calls opened before we watched
             log.info("invo_baseline", trader=name, open_calls=len(now_open))
+            # the trading loop matches our open copies to these calls (after a restart) and closes the copies whose
+            # call closed while we were not watching
+            self.out.put(("invo_baseline", name, list(now_open.values())))
             return
         for cid, c in now_open.items():
             if cid not in before:
