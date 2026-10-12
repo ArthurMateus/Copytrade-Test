@@ -236,6 +236,10 @@ class DiscordUI(ChatUI):
         guild = self.api.call("GET", f"/channels/{self.channel}")["guild_id"]
         cmds = []
         for c in SLASH_COMMANDS:
+            # a book that is off shows no commands (owner request 2026-10-12); /hyperflatten stays for leftovers
+            if (c.startswith("/hyper") and not self.cfg.selection.enabled and canon(c) != "/flatten") or \
+                    (c.startswith("/fomo") and not self.cfg.sol.enabled):
+                continue
             cmd = {"name": c[1:], "description": DESCRIPTIONS.get(c, c[1:]), "type": 1}
             if canon(c) in PIN_COMMANDS:
                 cmd["options"] = [{"type": 3, "name": "pin", "description": "Your COPYBOT_PIN", "required": True}]

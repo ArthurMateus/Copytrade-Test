@@ -16,6 +16,7 @@ def dc_cfg(fake: FakeDiscord, **env):
                                      "DISCORD_OWNER_ID": fake.owner, "COPYBOT_PIN": PIN, **env})
     cfg.discord.api_base, cfg.discord.gateway_url = fake.api_base, fake.gateway_url
     cfg.discord.edit_min_interval_s, cfg.discord.min_send_interval_s = 0.3, 0.02
+    cfg.selection.enabled = cfg.sol.enabled = True     # every book's commands (the owner runs only Invo)
     return cfg
 
 

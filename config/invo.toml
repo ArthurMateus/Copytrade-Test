@@ -11,7 +11,7 @@ size_mult = 1.0           # our exposure = their size x leverage x this, of our 
 live_size_mult = 10.0     # the same for real-money portfolios (their traders bet ~1% of the account) [0.1, 50]
 max_risk_pct = 2.0        # one copy never risks more than this % of our 300$ at our 3% stop (2% = 200$ max) [0.1, 20]
 limits_pct = 5.0          # the wallet's risk limits = a side wallet at this risk level              [0.5, 20]
-max_traders = 7           #                                                                         [0, 20]
+max_traders = 10          #                                                                         [0, 20]
 risk_wallets_pct = [1.0, 2.0, 5.0, 10.0, 20.0]
 # Trailing stop of every Invo wallet (instead of the one in risk.toml). Off: on 180 days of real prices it cut the big
 # winners this book needs. 5 and 5 would start it at +5% and trail 5% behind.

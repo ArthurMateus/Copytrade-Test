@@ -3,7 +3,7 @@
 # History and discovery use the free public Solana endpoint; live trades use Helius when HELIUS_API_KEY is set in the
 # environment (never logged or committed), otherwise the public endpoint too.
 # Allowed ranges (hard ceilings, checked at start) are in brackets.
-enabled = true
+enabled = false           # off (owner request 2026-10-12: only Invo runs); true = back on
 auto_follow = false       # false: searches only REPORT the best wallets (daily picks at 13h, /picks); you follow them
                           # with /fomoadd. Paused or failing wallets still leave by themselves. true = the old way.
 dex_url = "https://api.dexscreener.com"

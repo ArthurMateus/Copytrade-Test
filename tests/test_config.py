@@ -80,7 +80,8 @@ def test_solana_and_discord_sections_load_with_documented_ranges(tmp_path):
     d = tmp_path / "config"
     shutil.copytree("config", d)
     cfg = config.load(d, env={})
-    assert cfg.sol.enabled and cfg.sol.stop_pct == 30.0
+    assert not cfg.sol.enabled and not cfg.selection.enabled and cfg.sol.stop_pct == 30.0   # only Invo runs
+    assert cfg.invo.max_traders == 10
     (d / "sol.toml").write_text("stop_pct = 99.0\n", encoding="utf-8")
     with pytest.raises(config.ConfigError, match="sol.stop_pct"):
         config.load(d, env={})

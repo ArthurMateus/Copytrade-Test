@@ -62,6 +62,9 @@ class Broker:
 
 @dataclass
 class Selection:
+    # the Hyperliquid book (followed wallets, its wallets, its search). False (owner request 2026-10-12: "only Invo"):
+    # none of it runs; Hyperliquid still gives every price, order book and fill of the Invo copies
+    enabled: bool = True
     # False (owner request 2026-10-09): the search only REPORTS the best wallets (daily picks, /picks); the owner
     # follows them with /hyperadd. Bad leaders still leave by themselves (paused, or no longer passing the rules).
     auto_follow: bool = False

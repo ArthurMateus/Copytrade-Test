@@ -1,4 +1,6 @@
 # Leader selection and hysteresis.
+enabled = false               # the Hyperliquid book (owner request 2026-10-12: only Invo runs). Invo copies still use
+                              # Hyperliquid's prices and order books. true = back on (then /hyperresume)
 auto_follow = false           # false: the search only REPORTS the best wallets (daily picks at 13h, /picks); you
                               # follow them with /hyperadd. Bad leaders still leave by themselves. true = the old way.
 rescore_minutes = 60.0        # one selection cycle                          [0.05, 1440]

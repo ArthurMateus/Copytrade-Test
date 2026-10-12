@@ -104,11 +104,14 @@ class Bot:
         self.pm = PositionManager(cfg, self.st, self.ledger, self.gate, self.broker, self.health, self.mids,
                                   self.assets, notify=self.on_notify, score_of=self.score_of)
         side_broker = PaperBroker(cfg.broker, self.recent_book)
+        # the Hyperliquid book (selection.enabled; off since 2026-10-12, owner: "only Invo"): its main wallet stays
+        # (ledger, cards) but paused, without side wallets, search or followed wallets' fills
+        self.hyper = cfg.selection.enabled
         self.sides = [SideWallet(cfg, r, self.data, side_broker, self.health, self.mids, self.assets,
                                  alts_ok=self.gate.alts_ok, score_of=self.score_of)
-                      for r in cfg.risk.side_wallets_risk_pct]
+                      for r in (cfg.risk.side_wallets_risk_pct if self.hyper else [])]
         self.leader_value: dict[str, float] = {}   # followed leader -> perp value + spot stablecoins (every 5 min)
-        if cfg.risk.mirror_wallet:
+        if cfg.risk.mirror_wallet and self.hyper:
             m = cfg.risk.mirror_mult
             self.sides.append(SideWallet(cfg, cfg.risk.mirror_limits_pct, self.data, side_broker, self.health,
                                          self.mids, self.assets, alts_ok=self.gate.alts_ok, score_of=self.score_of,
@@ -295,6 +298,8 @@ class Bot:
             self.assets.update(self.info.meta(timeout=10))
         except Exception as e:
             log.warn("boot_meta_failed", err=str(e))
+        if not self.hyper and not self.st.entries_paused:   # no new Hyperliquid copies; open ones still exit
+            self.rec({"ev": "pause", "reason": "Hyperliquid book off"})
         problems = boot_repair(self.st, self.rec, self.gate, "main")
         if problems:
             self.ui.send("⚠️ <b>Restart with uncertainty</b> · ⏸️ entries paused, exits and stops keep running\n"
@@ -326,7 +331,10 @@ class Bot:
             log.info("position_restored", coin=p.coin, side=p.side, size=p.size, entry=p.entry_px, stop=p.stop_px,
                      leader=p.leader)
         lines = [f"⚡ Hyperliquid: {len(self.st.positions)} open · {_traders(len(self.st.followed))}"
-                 + (" · ⏸️ paused" if self.st.entries_paused else "")]
+                 + (" · ⏸️ paused" if self.st.entries_paused else "") if self.hyper else
+                 "⚡ Hyperliquid book: off (Invo copies still use its prices)"
+                 + (f" · {len(self.st.positions)} old trade(s) still open until their exit" if self.st.positions
+                    else "")]
         if self.sol:
             try:
                 self.sol.boot()
@@ -355,10 +363,11 @@ class Bot:
         if self.invo_search:
             self.invo_search.start()
         self.scorer.focus = set(self.st.followed)
-        self.scorer.start()
+        if self.hyper:                 # (off: the Scorer object still serves candles and funding to the Invo search)
+            self.scorer.start()
 
     def wanted_users(self) -> set[str]:
-        return set(self.st.followed) | self.position_leaders()
+        return (set(self.st.followed) if self.hyper else set()) | self.position_leaders()
 
     def position_leaders(self) -> set[str]:
         """Owners and backers of open positions in any wallet: their fills and positions must keep being watched."""
@@ -835,7 +844,7 @@ class Bot:
                     last_rec = time.time()
                     for leader in sorted(self.leaders_with_positions):
                         self.q.put(("leader_pos", leader, self.info.positions(leader, rt.trading_timeout_s)))
-                if self.cfg.risk.mirror_wallet and time.time() - last_values >= 300:
+                if self.cfg.risk.mirror_wallet and self.hyper and time.time() - last_values >= 300:
                     last_values = time.time()
                     for leader in sorted(self.st.followed):        # BULK class: never competes with exits
                         try:
@@ -903,7 +912,7 @@ class Bot:
         eq = self.st.equity(self.mids)
         for kind, key in (("day", day_key(now)), ("week", week_key(now))):
             if self.st.marks.get(kind, {}).get("key") != key:
-                if kind == "day" and self.st.marks.get("day"):
+                if kind == "day" and self.st.marks.get("day") and self.hyper:
                     self.ui.send(cardfmt.progress_text(self.st, self.mids, self.mids.get("BTC"), now))
                 self.rec({"ev": "mark", "kind": kind, "key": key, "equity": eq})
 
@@ -1085,7 +1094,7 @@ class Bot:
     def send_picks(self, daily: bool) -> None:
         """The picks report, one message per book. Daily: it becomes the baseline the next report compares with."""
         n = self.cfg.picks.top_n
-        books = [self.hyper_book(n)]
+        books = [self.hyper_book(n)] if self.hyper else []
         if self.sol:
             books.append(self.sol.picks_book(n, self.picks.prev("fomo")))
         if self.invo is not None:
@@ -1444,9 +1453,14 @@ class Bot:
         if c.name.startswith("/invo"):
             return self.invo_command(c)
         if c.name == "/help":
-            self.ui.send(HELP + ("" if self.sol else
-                                 "\n\n🪙 FOMO is off (enabled = true in config/sol.toml, then restart)"))
-        elif c.name in ("/status", "/trades", "/traders", "/wallets"):
+            return self.ui.send(HELP + ("" if self.hyper else "\n\n⚡ Hyperliquid is off (enabled = true in "
+                                        "config/selection.toml, then restart)")
+                                + ("" if self.sol else ("\n" if not self.hyper else "\n\n") + "🪙 FOMO is off (enabled = true in config/sol.toml, then "
+                                   "restart)"))
+        if not self.hyper and c.name not in ("/picks", "/restart", "/flatten"):
+            return self.ui.send("⚡ The Hyperliquid book is off: only Invo runs (/invo… commands). To turn it back on: "
+                                "enabled = true in config/selection.toml, then /restart.")
+        if c.name in ("/status", "/trades", "/traders", "/wallets"):
             key = c.name[1:]
             self.live_cards.add(key)
             self.last_body.pop(key, None)

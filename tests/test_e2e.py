@@ -40,6 +40,9 @@ def write_config(d: Path, hl: FakeHL, dc: FakeDiscord, data: Path) -> Path:
     cdir.mkdir(parents=True, exist_ok=True)
     for f in (ROOT / "config").glob("*.toml"):
         (cdir / f.name).write_text(f.read_text(encoding="utf-8"), encoding="utf-8")
+    # the Hyperliquid book is off in the owner's config (2026-10-12); its tests turn it on
+    sel = cdir / "selection.toml"
+    sel.write_text(sel.read_text(encoding="utf-8").replace("enabled = false", "enabled = true", 1), encoding="utf-8")
     (cdir / "runtime.toml").write_text(
         f'info_url = "{hl.info_url}"\nws_url = "{hl.ws_url}"\nleaderboard_url = "{hl.lb_url}"\n'
         f'data_dir = "{data.as_posix()}"\nlog_dir = "{(data / "logs").as_posix()}"\n'
@@ -321,6 +324,32 @@ def start_bot(env, scorer=False):
     assert wait_for(lambda: LEADER in hl.subscribed_users() and bot.health().clock_ok)
     return bot, th
 
+
+
+def test_with_the_hyperliquid_book_off_only_invo_runs(env):
+    """Owner request 2026-10-12 ("only leaving invo"): selection.enabled = false. No Hyperliquid copies, side wallets or
+    search; its commands are hidden (but /hyperflatten) and answer that the book is off; prices still flow."""
+    hl, dc, data, cdir = env
+    sel = cdir / "selection.toml"
+    sel.write_text(sel.read_text(encoding="utf-8").replace("enabled = true", "enabled = false", 1), encoding="utf-8")
+    seed_ledger(data)
+    bot = Bot(config.load(cdir, env=env_for(dc)))
+    th = threading.Thread(target=bot.run, daemon=True)
+    th.start()
+    try:
+        assert wait_for(lambda: bot.health().clock_ok and bot.health().mids_age_s < 1)
+        assert wait_for(lambda: any("Hyperliquid book: off" in m["text"] for m in dc.sent))
+        assert bot.st.entries_paused and not bot.sides and LEADER not in hl.subscribed_users()
+        assert wait_for(lambda: dc.commands is not None)
+        names = {c["name"] for c in dc.commands}
+        assert "hyperflatten" in names and "invostatus" in names
+        assert not {"hyperstatus", "hyperadd", "fomostatus"} & names
+        hl.push_fills(LEADER, [leader_fill(hl, "ETH", 50, "B")])
+        dc.say("/hyperstatus")
+        assert wait_for(lambda: any("Hyperliquid book is off" in m["text"] for m in dc.sent))
+        assert "ETH" not in bot.st.positions and not bot.scorer.scores
+    finally:
+        stop_bot(bot, th)
 
 def stop_bot(bot, th):
     bot.stop.set()

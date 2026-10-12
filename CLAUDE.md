@@ -317,6 +317,16 @@ instances on the same wallet.
   `hl.parse_funding`, fixture `funding_history.json`) -> `calls_to_fills(..., funding_of)` takes the funding paid while
   each call was held off its result (and so off the copy edge).
 
+## Only Invo runs (owner request 2026-10-12)
+- `selection.enabled` = false (config/selection.toml) turns the Hyperliquid book off: no HL side wallets/mirror, no
+  HL search thread (`Scorer` object kept: it serves candles and funding to the Invo search), no followed wallets' fills
+  (`wanted_users` = only leaders of still-open old copies, so they can exit), the main wallet gets a `pause` event
+  ("Hyperliquid book off"), its daily progress message and picks are skipped, /hyper… commands answer "off" (except
+  /picks /restart /flatten) and are not registered on Discord (but /hyperflatten). `sol.enabled` = false likewise
+  (/fomo… hidden). Hyperliquid still gives every price, book and fill of the Invo copies. Tests turn HL back on in
+  `test_e2e.write_config`; `test_with_the_hyperliquid_book_off_only_invo_runs` covers the off mode.
+- `invo.max_traders` 7 -> 10 (owner request 2026-10-12).
+
 ## Invo: ask before changing, picks, only hard failures skip a portfolio (owner request 2026-10-12)
 - A 3 AM search dropped all 7 followed traders: VERSION bumps re-searched at every restart (each counted as a failed
   search), traders not read in that search were dropped too (empty reasons "()"), and /invofollow picks were not kept.
