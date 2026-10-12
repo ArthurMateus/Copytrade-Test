@@ -358,6 +358,21 @@ instances on the same wallet.
 - Agreement (two followed traders, same coin and side) already boosted Invo copies; in a capped wallet (trader
   size) the boost now stays within `invo_cap` (it was consensus_risk_pct x5 = ~250$ on a ~60$ copy).
 
+## Invo fixes after the first 96 copies (owner request 2026-10-12)
+- Analysis of the live ledgers (invo_calls: 96 closed copies, 60% won, -16.64$; avg win +0.95% vs avg loss -2.3% of the
+  copy, so ~71% wins are needed): limpan96's "Scalping" (94% on Invo, PF 1.73 in our replay counting its losing OPEN
+  calls) won 3 of 11 copies; 4,902 Invo 429s; the biggest copies lost most. A "skip if the price already moved" rule
+  lost money at every threshold: not added.
+- `invo_scorer.HARD` blocks `profit_factor<` again (below `selection.min_profit_factor`, 2); no VERSION bump (cached
+  reasons already carry it). `invo.request_gap_s` 0.25 -> 0.5, `invo.max_risk_pct` 2 -> 1 (cap 100$).
+- The 8% / trader-exit versions (`x.base_name`) copy only calls their usual-stop version copied (`invo_one`, log
+  `invo_skip why="not copied by ..."`); their wallet-wide budgets (total risk, positions, daily/weekly loss) are loose
+  so they hold the same calls; per-trade/per-coin limits and margin still apply (a 20% trader-exit copy cannot always
+  be held: its guard stop allows ~3x leverage).
+- `invo_link` now also carries `portfolio`, `title`, `live` and, when the trader's exit closed the copy, `closed_by`
+  (`confirmed` = in its closed calls, `vanished` = `invo.DELETED`, `unseen` = closed while not watching); later
+  `invo_link` events merge fields. The card says "real-money" or "paper" portfolio and its title.
+
 ## Account value = perp + spot stablecoins (bug found live 2026-10-10)
 - `/hyperadd` scored with the PERP account value only while the daily search used the leaderboard value, so the same
   wallet passed the search (3% drop) and failed /hyperadd (max_drawdown>30%): 0x6d73... had 1,481$ in perps and

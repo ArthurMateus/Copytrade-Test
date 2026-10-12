@@ -333,8 +333,12 @@ class State:
         self.blocked.setdefault(ev["leader"], {})[ev["portfolio"]] = ev.get("title", "")
 
     def _ev_invo_link(self, ev):
-        """Which Invo call a copy belongs to (so a restart still knows which call's exit or resize moves it)."""
-        self.invo_links[ev["pos_id"]] = {"call": ev["call"], "info": ev.get("info", "")}
+        """Which Invo call a copy belongs to (so a restart still knows which call's exit or resize moves it), plus,
+        since 2026-10-12, its portfolio and how it closed ("closed_by"), for the results analysis. Later events of
+        the same copy only change the fields they carry."""
+        link = self.invo_links.setdefault(ev["pos_id"], {"info": ""})
+        link["call"] = ev["call"]
+        link.update({k: ev[k] for k in ("info", "portfolio", "title", "live", "closed_by") if k in ev})
 
     def _ev_invo_unblock(self, ev):
         self.blocked.get(ev["leader"], {}).pop(ev["portfolio"], None)

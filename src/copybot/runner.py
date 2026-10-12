@@ -24,7 +24,7 @@ from pathlib import Path
 from copybot import config, hl, log, picks, cardfmt
 from copybot.broker import PaperBroker
 from copybot.detector import Detector, Move
-from copybot.invo import PREFIX as INVO, InvoClient, Watcher as InvoWatcher
+from copybot.invo import DELETED as INVO_DELETED, PREFIX as INVO, InvoClient, Watcher as InvoWatcher
 from copybot.invo_scorer import InvoScorer, copy_blockers, reason_text as invo_reason
 
 EMERGENCY_STOP_PCT = 30.0   # "trader's exit" Invo wallets: the farthest stop, only a guard (a normal trade never gets
@@ -159,6 +159,7 @@ class Bot:
                                    name=f"{name}_{f'stop{s:g}' if s > 0 else 'trader'}",
                                    label=f"{size_label} · {stop_word(s)}", sizer=sizer, cap=cap, own_leaders=True)
                     x.size_label, x.stop_label = size_label, stop_word(s)
+                    x.base_name = name               # its usual-stop version: the calls it copies (see invo_one)
                     variants.append((x, stop))
                     self.invo_extra.append(x)
                     self.sides.append(x)
@@ -175,6 +176,13 @@ class Bot:
                 # usual one would leave no leverage for the same copy size)
                 x.cfg.risk.stop_pct = stop
                 x.cfg.risk.liq_buffer_mult = 1.0
+                # same calls as its usual-stop version (owner request 2026-10-12: the 8% and trader-exit versions of
+                # the bigger sizes copied 3 of 13 calls, their budget still full of copies the usual stop had closed):
+                # that version decides which calls are copied, so the wallet-wide budgets here only stop runaways.
+                # Per-trade and per-coin limits stay (same copy size); margin still limits what it can hold.
+                r = x.cfg.risk
+                r.max_total_risk_pct, r.max_positions = 1000.0, 100
+                r.daily_loss_pct = r.weekly_loss_pct = 100.0
             # watched: the followed traders AND the unfollowed ones we still hold a copy of (their exits are copied);
             # rebuilt on the trading thread (invo_refresh_watched), read by the watcher thread
             self.invo_watched: frozenset[str] = frozenset()
@@ -674,10 +682,20 @@ class Bot:
                 try:
                     w.pm.on_move(Move(leader, p.coin, p.side * 1.0, 0.0, int(time.time() * 1000),
                                       int(time.time() * 1000), 0, (), 0.0, 1))
+                    self.invo_closed_by(w, p, link["call"] if link else "", "unseen")
                 except Exception:
                     log.exception("invo_wallet_error", wallet=w.name, kind="invo_baseline")
                 finally:
                     self._invo_close_why = None
+
+    def invo_closed_by(self, w, p, call_id: str, how: str) -> None:
+        """Records how a copy closed by the trader's exit was known (ledger `invo_link`, field closed_by)."""
+        q = w.st.positions.get(p.coin)
+        if q is not None and q.pos_id == p.pos_id:
+            return                                     # still open: nothing to record
+        w.rec({"ev": "invo_link", "pos_id": p.pos_id, "call": call_id, "closed_by": how})
+        if w is self.invo:
+            log.info("invo_copy_closed", trader=p.leader[len(INVO):], coin=p.coin, how=how)
 
     def invo_wallets(self) -> list:
         """The trader-size Invo wallet first (it owns the followed list, the cards and the notes), then the fixed-risk
@@ -729,6 +747,10 @@ class Bot:
         if kind == "invo_open":
             if leader not in w.st.followed:
                 return
+            base = getattr(w, "base_name", None)
+            if base is not None and (base, call.id) not in self.invo_calls:
+                log.info("invo_skip", wallet=w.name, trader=trader, coin=coin, why=f"not copied by {base}")
+                return
             if coin in w.st.positions:
                 log.info("invo_skip", wallet=w.name, trader=trader, coin=coin, why="coin already held")
                 return
@@ -747,17 +769,22 @@ class Bot:
                 # the trader's own price unit (kPEPE = PEPE x 1000): the first number to watch live (audit 2026-10-11)
                 gap = side * (p.entry_px / (call.entry * fx) - 1) * 100 if call.entry > 0 else 0.0
                 info = ""
+                port = self.invo_watch.ports.get(call.portfolio_id) if self.invo_watch is not None else None
+                title = port.title.strip() if port is not None else ""
                 if primary:
                     log.info("invo_entry_gap", trader=trader, coin=coin, gap_pct=round(gap, 3),
                              their=call.entry * fx, ours=p.entry_px,
                              age_s=round((time.time() * 1000 - call.created_ms) / 1000, 1))
                     word = "worse" if gap > 0 else "better" if gap < 0 else "same"
+                    kind_word = "real-money" if call.live else "paper"
                     info = (f"Invo call by @{cardfmt.esc(trader)}: {call.committed * 100:.1f}% x {call.leverage:g}x of "
-                            f"their paper portfolio · their entry {cardfmt.fpx(call.entry)} (ours {gap:+.2f}% {word})"
+                            f"their {kind_word} portfolio{' ' + cardfmt.esc(title) if title else ''}"
+                            f" · their entry {cardfmt.fpx(call.entry)} (ours {gap:+.2f}% {word})"
                             f" · target {cardfmt.fpx(call.target) if call.target else '-'} · stop "
                             f"{cardfmt.fpx(call.stop) if call.stop else '-'}")
                     self.invo_info[p.pos_id] = info
-                w.rec({"ev": "invo_link", "pos_id": p.pos_id, "call": call.id, "info": info})
+                w.rec({"ev": "invo_link", "pos_id": p.pos_id, "call": call.id, "info": info,
+                       "portfolio": call.portfolio_id, "title": title, "live": call.live})
                 if primary:
                     self.invo_card(p, force=True)
             return
@@ -790,6 +817,9 @@ class Bot:
                               call.created_ms, abs(hash(call.id)) % 10**12, (), (call.closing_price or 0.0) * fx, 1))
         finally:
             self._invo_close_why = None
+        # how the trader's close was known: in its closed calls ("confirmed") or the call just disappeared
+        # ("vanished"): a copy closed by a wrong read would only show up here (analysis 2026-10-12)
+        self.invo_closed_by(w, p, call.id, "vanished" if call.reason_closed == INVO_DELETED else "confirmed")
 
     def on_invo_notify(self, kind: str, **kw) -> None:
         """The Invo wallet's position manager: every close (the trader's, or our stop) finalizes the copy's card."""

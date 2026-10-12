@@ -53,8 +53,11 @@ VERSION = 5              # Invo-only scoring changes (2: every portfolio, our co
 
 # Owner request 2026-10-12 ("it skipped a bunch of portfolios that were good"): a portfolio's calls are NOT copied only
 # when our replay says copying it loses money, or it is bait (one call makes the profit, minute-long calls). Quality
-# points (score < 70, profit factor < 2, win rate ...) only rank traders in the search; the owner's floors decide the rest.
-HARD = ("pnl<=0", "profit_factor<=1", "copy_edge<=0", "too_fast", "one_trade>")
+# points (score < 70, win rate ...) only rank traders in the search; the owner's floors decide the rest.
+# Profit factor below selection.min_profit_factor (2) is a hard skip again (owner request 2026-10-12, after the first
+# 96 copies: limpan96's "Scalping", PF 1.73 counting its losing open calls, won 3 of 11 copies). The replay counts each
+# losing OPEN call as a lost trade (scoring.full_score), so a portfolio that hides losers by holding them fails here.
+HARD = ("pnl<=0", "profit_factor<", "copy_edge<=0", "too_fast", "one_trade>")
 FAIL_GAP_MS = 20 * 3_600_000   # a trader's failed searches count at most once per this (restarts re-search at once)
 
 

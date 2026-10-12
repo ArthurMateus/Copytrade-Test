@@ -55,6 +55,7 @@ PREFIX = "invo:"          # leader name of an Invo trader in the ledger: "invo:<
 RESIZE_MIN = 0.02         # a committed size change smaller than 2% is noise, not an add or a trim
 SLOW_MAX_S = 3.0          # Invo answered 429 (too many requests): spacing doubles up to this ...
 CALM_S = 60.0             # ... and eases back (x0.75 per CALM_S without a 429) to invo.request_gap_s
+DELETED = "call deleted by the trader"   # reason_closed of a call that vanished without showing in the closed list
 VANISH_S = 10.0           # a call missing from our reads but not in the trader's closed list is only treated as closed
                           # (deleted) after this long: one incomplete answer must not close a copy (audit 2026-10-11)
 REREAD_MAX = 5            # an open-call list shorter than the portfolio's count is read again this many rounds
@@ -598,7 +599,7 @@ class Watcher:
             if self.now() / 1000 - first >= VANISH_S:      # gone and never closed: deleted (or hidden) by the trader
                 self.missing.pop(cid, None)
                 log.warn("invo_call_vanished", trader=name, ticker=c.ticker, call=cid)
-                self.out.put(("invo_close", name, replace(c, reason_closed="call deleted by the trader")))
+                self.out.put(("invo_close", name, replace(c, reason_closed=DELETED)))
             else:                                           # maybe one incomplete answer: keep it, look again
                 self.known[name][cid] = c
 

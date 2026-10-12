@@ -5,11 +5,13 @@
 enabled = true
 api_base = "https://api.invoapp.com/v1_0"
 poll_s = 0.0              # pause between rounds; each round asks every watched trader once        [0, 600]
-request_gap_s = 0.25      # spacing of requests to Invo (7 traders = ~2 s per round; ~3.4 req/s)   [0.2, 5]
+request_gap_s = 0.5       # spacing of requests to Invo (7 traders = ~4 s per round; 2 req/s). 0.25 brought 429  [0.2, 5]
+                          # storms (4,902 refused reads 10-11/12, copies up to 170 s late)
 max_call_age_s = 180.0    # calls older than this when first seen are not copied (late entry)      [10, 1800]
 size_mult = 1.0           # our exposure = their size x leverage x this, of our 300$ (at least 10$) [0.1, 10]
 live_size_mult = 10.0     # the same for real-money portfolios (their traders bet ~1% of the account) [0.1, 50]
-max_risk_pct = 2.0        # one copy never risks more than this % of our 300$ at our 3% stop (2% = 200$ max) [0.1, 20]
+max_risk_pct = 1.0        # one copy never risks more than this % of our 300$ at our 3% stop (1% = 100$ max) [0.1, 20]
+                          # (2 until 2026-10-12: the 5 worst copies, 76-377$, lost more than the 5 best made)
 limits_pct = 5.0          # the wallet's risk limits = a side wallet at this risk level              [0.5, 20]
 max_traders = 10          #                                                                         [0, 20]
 risk_wallets_pct = [1.0, 2.0, 5.0, 10.0, 20.0]
@@ -18,7 +20,7 @@ risk_wallets_pct = [1.0, 2.0, 5.0, 10.0, 20.0]
 trail_after_pct = 0.0     # once a copy is this % in profit the stop follows the price (0 = off)   [0, 50]
 trail_pct = 3.0           # ... this % behind the best price, never below break-even                [0.2, 20]
 pause_dd_pct = 4.0        # drop a trader once its copies lost this % of the wallet from their best [0.5, 50]
-                          # (4% = two stops of the biggest copy; 5 losing copies in a row also drop it)
+                          # (4% = four stops of the biggest copy at max_risk_pct 1; 5 losing copies in a row also drop it)
 # Stops compared (owner request 2026-10-12): every size above (trader size and each risk level) runs once per stop,
 # same calls and same copy size, only the exit differs; /invowallets shows the 3 best and 3 worst combinations.
 # Must include our usual stop (risk.toml stop_pct, 3). 0 = the trader's exit: the copy closes when the trader closes,

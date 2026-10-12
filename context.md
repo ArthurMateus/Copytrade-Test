@@ -66,12 +66,15 @@ from another chat by passing that URL to the Artifact tool after reading it).
 - `uv run python tools/invo_check.py <user>`: checks the Invo login.
 
 ## Things the owner asked to watch / recent findings (2026-10-10)
-- Invo trader-size wallet lost early on one oversized call (STRK, 25% x 5x = 375$ copy): capped since at 2% risk per
-  copy. lazylegendx lost 15.93$ in 10 copies: Invo traders are now paused/dropped by the leader pause rules.
+- Invo trader-size wallet lost early on one oversized call (STRK, 25% x 5x = 375$ copy): capped since at 1% risk per
+  copy (2% until 2026-10-12). lazylegendx lost 15.93$ in 10 copies: Invo traders are now paused/dropped by the leader pause rules.
 - The 20%/10% Invo wallets were +15-20% after one day, mostly unrealized and from a few large positions: too early to
   call skill (judge after ~50-100 closed trades per wallet).
 - Trailing stop on every HL/Invo wallet: from +3% the stop trails 3% behind, never below break-even (`risk.trail_*`).
-- Invo checks every 5 s (`invo.poll_s`), requests 0.5 s apart; watch `invo_poll_failed` in the log if Invo objects.
+- Invo requests are 0.5 s apart (`invo.request_gap_s`; 0.25 brought 429 storms on 10-11/12); watch
+  `invo_poll_failed` / `invo_throttled` in the log if Invo objects.
+- 2026-10-12 analysis of the first 96 Invo copies: see CLAUDE.md "Invo fixes after the first 96 copies". Data copied
+  from the bot PC lives in `reports/trades-2026-10-12/` (git-ignored).
 - Discord 429s are avoided by reading Discord's rate-limit headers; occasional `discord_429` warnings are harmless.
 - Open idea the owner liked: a separate paper wallet copying the "missed by one rule" traders, to test whether the
   strict rules actually earn more. Not built yet; waiting for the `*_why.py` outputs.

@@ -312,16 +312,19 @@ def test_each_portfolio_is_scored_and_only_passing_ones_are_copied():
     assert weak["reasons"] == ["profit_factor<2", "score<70"]
 
 
-def test_only_a_loss_after_costs_or_bait_stops_a_portfolios_copies():
+def test_only_a_loss_after_costs_bait_or_a_low_profit_factor_stops_a_portfolios_copies():
     """Owner request 2026-10-12 ("it skipped a bunch of portfolios that were good"): quality points no longer block a
-    portfolio; losing after our costs, one call making the profit or minute-long calls still do."""
+    portfolio; losing after our costs, one call making the profit or minute-long calls still do, and (owner request
+    later that day, after limpan96's PF 1.73 portfolio won 3 of 11 copies) a profit factor under the floor."""
     from types import SimpleNamespace
     from copybot.runner import Bot
-    assert invo_scorer.copy_blockers(["profit_factor<2", "score<70", "win_rate<45%"]) == []
+    assert invo_scorer.copy_blockers(["score<70", "win_rate<45%", "max_drawdown>30%"]) == []
+    assert invo_scorer.copy_blockers(["profit_factor<2", "score<70"]) == ["profit_factor<2"]
     assert invo_scorer.copy_blockers(["copy_edge<=0", "one_trade>30%_of_profit", "too_fast", "trades<30"]) == \
         ["copy_edge<=0", "one_trade>30%_of_profit", "too_fast"]
     cfg = config.load("config", env={})
-    per = {"good": {"reasons": ["profit_factor<2", "score<70"]}, "bait": {"reasons": ["one_trade>30%_of_profit"]},
+    per = {"good": {"reasons": ["score<70"]}, "bait": {"reasons": ["one_trade>30%_of_profit"]},
+           "weak": {"reasons": ["profit_factor<2", "score<70"]},
            "live": {"reasons": ["score<70"]}}
     b = SimpleNamespace(cfg=cfg, invo=None, invo_scores={"t": {"by_portfolio": per, "reasons": ["loses_overall"]}})
     b.invo_portfolio_score = lambda n, pid: Bot.invo_portfolio_score(b, n, pid)
@@ -330,6 +333,7 @@ def test_only_a_loss_after_costs_or_bait_stops_a_portfolios_copies():
                                                                pnl_pct=300.0)
     assert Bot.invo_skip(b, "t", port("good")) is None
     assert "one call made most of the profit" in Bot.invo_skip(b, "t", port("bait"))
+    assert "profit factor<2" in Bot.invo_skip(b, "t", port("weak"))
     assert Bot.invo_skip(b, "t", port("live", "live", win=10.0)) is None      # a live one that passes: no floors
     assert "win rate" in Bot.invo_skip(b, "t", port("new", win=50.0))         # not scored yet: the owner's floors
 

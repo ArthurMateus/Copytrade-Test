@@ -362,7 +362,7 @@ def test_real_money_calls_are_sized_with_their_own_multiplier():
     b = SimpleNamespace(cfg=cfg, invo_cap=lambda eq: Bot.invo_cap(b, eq))
     for call, mult in ((calls[0], cfg.invo.live_size_mult), (paper, cfg.invo.size_mult)):
         b._invo_call = call
-        want = max(min(call.exposure * mult * 300, 200.0), 10.5)
+        want = max(min(call.exposure * mult * 300, 300 * cfg.invo.max_risk_pct / 100 / 0.03), 10.5)
         assert Bot.invo_size(b, None, 2.0, 300.0) * 2.0 == pytest.approx(want), call.ticker
     b._invo_call = calls[0]                                # LDO: 0.445% x 5x = 2.2% exposure, x10 of 300$ = 66.8$
     assert Bot.invo_size(b, None, 2.0, 300.0) * 2.0 == pytest.approx(66.8, abs=0.1)     # (x1 would be 6.7$ -> 10$)
@@ -443,8 +443,8 @@ def test_bot_copies_an_invo_call_and_closes_it_when_the_trader_does(invo_env, mo
 
 
 def test_a_huge_call_is_capped_at_max_risk_pct_also_after_the_traders_add(invo_env, monkeypatch):
-    """The STRK case: 25% x 5x = 125% of the portfolio. The copy is capped at invo.max_risk_pct (2%) of our 300$
-    at our 3% stop = 200$, and the trader's later add does not push it past the cap."""
+    """The STRK case: 25% x 5x = 125% of the portfolio. The copy is capped at invo.max_risk_pct (1%) of our 300$
+    at our 3% stop = 100$, and the trader's later add does not push it past the cap."""
     hl, dc, data, cdir, f, tok = invo_env
     pid = f.add_user("lazy")[0]
     bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
@@ -454,11 +454,12 @@ def test_a_huge_call_is_capped_at_max_risk_pct_also_after_the_traders_add(invo_e
         cid = f.open_call(pid, "ETH", long=False, leverage=5, size=0.25, entry=3000.0)
         assert wait_for(lambda: "ETH" in bot.invo.st.positions, timeout=10)
         p = bot.invo.st.positions["ETH"]
-        assert p.size * p.entry_px == pytest.approx(300 * 0.02 / 0.03, rel=0.05)          # 200$, not 375$
+        cap = 300 * bot.cfg.invo.max_risk_pct / 100 / 0.03
+        assert p.size * p.entry_px == pytest.approx(cap, rel=0.05)                        # 100$, not 375$
         f.resize_call(pid, cid, 0.40)                                                       # they add 60%
         time.sleep(3)
         p = bot.invo.st.positions["ETH"]
-        assert p.size * p.entry_px <= 300 * 0.02 / 0.03 * 1.05                              # still at the cap
+        assert p.size * p.entry_px <= cap * 1.05                                            # still at the cap
         f.close_call(pid, cid)
         assert wait_for(lambda: "ETH" not in bot.invo.st.positions, timeout=10)
     finally:
@@ -505,10 +506,10 @@ def test_a_trader_whose_copies_lose_too_much_is_dropped_at_once(invo_env, monkey
     try:
         dc.say("/invofollow lazy")
         assert wait_for(lambda: bot.invo_watch.known.get("lazy") is not None, timeout=10)
-        f.open_call(pid, "SOL", long=True, leverage=5, size=0.25, entry=150.0)     # capped at 200$
+        f.open_call(pid, "SOL", long=True, leverage=5, size=0.25, entry=150.0)     # capped at 100$
         assert wait_for(lambda: "SOL" in bot.invo.st.positions, timeout=10)
         time.sleep(1.2)                                           # side wallets reuse an order book for 1 s
-        hl.mids["SOL"] = 140.0                                    # our stop: about -13$ > 10% of 300$/7
+        hl.mids["SOL"] = 130.0                                    # our stop: about -13$ > 4% of 300$
         assert wait_for(lambda: "invo:lazy" not in bot.invo.st.followed, timeout=10)
         assert wait_for(lambda: all("invo:lazy" not in w.st.followed for w in bot.invo_extra))
         text = lambda: " ".join(m["text"] for m in dc.sent + dc.edits)
@@ -867,6 +868,19 @@ def test_every_size_runs_with_every_stop_and_only_the_exit_differs(invo_env, mon
         f.close_call(pid, cid, price=2880.0)
         assert wait_for(lambda: "ETH" not in s8.st.positions and "ETH" not in tr.st.positions, timeout=10)
         assert tr.st.closed[-1]["reason"] == "leader_close"
+        # each copy keeps its portfolio and how the trader's close was known (analysis 2026-10-12)
+        link = tr.st.invo_links[tr.st.closed[-1]["pos_id"]]
+        assert (link["call"], link["portfolio"], link["closed_by"]) == (cid, pid, "confirmed")
+        assert "closed_by" not in s3.st.invo_links[s3.st.closed[-1]["pos_id"]]      # our stop closed that one
+        # a call its usual-stop version did not copy is not copied by the 8% / trader-exit versions either
+        s3.rec({"ev": "pause", "reason": "test"})
+        sol = f.open_call(pid, "SOL", long=True, leverage=10, size=0.05, entry=150.0)
+        assert wait_for(lambda: "SOL" in w["invo_risk_2pct_trader"].st.positions, timeout=10)
+        assert all("SOL" not in x.st.positions for x in (s3, s8, tr))
+        f.delete_call(pid, sol)                                                    # gone without a close
+        assert wait_for(lambda: "SOL" not in w["invo_risk_2pct_trader"].st.positions, timeout=20)
+        x = w["invo_risk_2pct_trader"]
+        assert x.st.invo_links[x.st.closed[-1]["pos_id"]]["closed_by"] == "vanished"
         dc.say("/invowallets")
         assert wait_for(lambda: any("Best" in m["text"] and "Worst" in m["text"] and "By stop" in m["text"]
                                     for m in dc.sent + dc.edits))
