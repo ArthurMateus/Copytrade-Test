@@ -126,42 +126,39 @@ class Bot:
         self._invo_close_why: str | None = None      # the trader's close reason while it is being mirrored
         self.invo_baseline_wait: dict[str, list] = {}  # trader -> its first read, held until Hyperliquid's coins load
         if cfg.invo.enabled and cfg.invo_token_file:
-            # every size x every stop (owner request 2026-10-12): the trader-size wallet and the 1-20% risk wallets
-            # at our usual stop (their names and history unchanged), plus the same sizes at each other stop in
-            # invo.stops_pct (0 = the trader's exit). A size's versions copy the same notional: only the exit differs.
-            base = cfg.risk.stop_pct
+            # every size x every stop (owner request 2026-10-12): the trader-size wallet and the 1-20% risk wallets,
+            # each once per stop in invo.stops_pct (0 = the trader's exit). A size's versions copy the same notional:
+            # only the exit differs. The versions at invo.main_stop_pct keep the plain names (invo_calls,
+            # invo_risk_<r>pct), decide which calls are copied, and invo_calls posts the cards and owns the followed
+            # list; the others are named <name>_stop<s> / <name>_trader (owner request 2026-10-12: "keep the trades
+            # open until the traders close them", main_stop_pct 0; it was our 3% stop)
+            base, main = cfg.risk.stop_pct, cfg.invo.main_stop_pct
             stop_word = lambda s: f"{s:g}% stop" if s > 0 else "trader's exit"
-            w = SideWallet(cfg, cfg.invo.limits_pct, self.data, side_broker, self.health, self.mids, self.assets,
-                           alts_ok=lambda leader: True, score_of=self.score_of, name="invo_calls",
-                           label=f"trader size · {stop_word(base)}", sizer=self.invo_size, own_leaders=True,
-                           notify=self.on_invo_notify, cap=self.invo_cap, pause_leaders=True)
-            w.size_label, w.stop_label = "trader size", stop_word(base)
-            self.invo = w
-            self.sides.append(w)
+            suffix = lambda s: "" if s == main else f"_stop{s:g}" if s > 0 else "_trader"
             sizes = [("invo_calls", "trader size", cfg.invo.limits_pct, cfg.invo.max_risk_pct / base, self.invo_size,
                       self.invo_cap)]
-            for r in cfg.invo.risk_wallets_pct:
-                x = SideWallet(cfg, r, self.data, side_broker, self.health, self.mids, self.assets,
-                               alts_ok=lambda leader: True, score_of=self.score_of, name=f"invo_risk_{r:g}pct",
-                               label=f"{r:g}% risk · {stop_word(base)}", own_leaders=True)
-                x.size_label, x.stop_label = f"{r:g}% risk", stop_word(base)
-                self.invo_extra.append(x)
-                self.sides.append(x)
-                sizes.append((f"invo_risk_{r:g}pct", f"{r:g}% risk", r, r / base,
-                              lambda m, px, eq, r=r: eq * r / base / px if px > 0 else 0.0, None))
+            sizes += [(f"invo_risk_{r:g}pct", f"{r:g}% risk", r, r / base,
+                       lambda m, px, eq, r=r: eq * r / base / px if px > 0 else 0.0, None)
+                      for r in cfg.invo.risk_wallets_pct]
             variants = []
-            for s in [s for s in cfg.invo.stops_pct if s != base]:
+            for s in [main, *[s for s in cfg.invo.stops_pct if s != main]]:      # the deciding versions first
                 for name, size_label, risk, mult, sizer, cap in sizes:
                     stop = s if s > 0 else invo_emergency_stop(mult)
-                    # limits of a wallet risking the same notional at this stop, so they clamp like the base one's
+                    primary = s == main and name == "invo_calls"
+                    # limits of a wallet risking the same notional at this stop, so they clamp alike at every stop
                     x = SideWallet(cfg, risk * stop / base, self.data, side_broker, self.health, self.mids,
                                    self.assets, alts_ok=lambda leader: True, score_of=self.score_of,
-                                   name=f"{name}_{f'stop{s:g}' if s > 0 else 'trader'}",
-                                   label=f"{size_label} · {stop_word(s)}", sizer=sizer, cap=cap, own_leaders=True)
+                                   name=name + suffix(s), label=f"{size_label} · {stop_word(s)}", sizer=sizer,
+                                   cap=cap, own_leaders=True,
+                                   **(dict(notify=self.on_invo_notify, pause_leaders=True) if primary else {}))
                     x.size_label, x.stop_label = size_label, stop_word(s)
-                    x.base_name = name               # its usual-stop version: the calls it copies (see invo_one)
-                    variants.append((x, stop))
-                    self.invo_extra.append(x)
+                    if s != main:
+                        x.base_name = name           # its main-stop version: the calls it copies (see invo_one)
+                    variants.append((x, s, stop))
+                    if primary:
+                        self.invo = x
+                    else:
+                        self.invo_extra.append(x)
                     self.sides.append(x)
             for x in self.invo_wallets():
                 # a call is first seen up to a round (poll_s + the reads) after it was posted: entries may be that
@@ -171,18 +168,20 @@ class Bot:
                 # the leader pause compares a trader's copy drawdown with leader_pause_dd_pct of (equity /
                 # max_leaders): set so the limit is invo.pause_dd_pct of the whole wallet
                 x.cfg.risk.leader_pause_dd_pct = cfg.invo.pause_dd_pct * max(1, x.cfg.risk.max_leaders)
-            for x, stop in variants:
-                # its stop; the stop only has to sit before liquidation (a wider stop with the 3x buffer of the
-                # usual one would leave no leverage for the same copy size)
-                x.cfg.risk.stop_pct = stop
-                x.cfg.risk.liq_buffer_mult = 1.0
-                # same calls as its usual-stop version (owner request 2026-10-12: the 8% and trader-exit versions of
-                # the bigger sizes copied 3 of 13 calls, their budget still full of copies the usual stop had closed):
-                # that version decides which calls are copied, so the wallet-wide budgets here only stop runaways.
-                # Per-trade and per-coin limits stay (same copy size); margin still limits what it can hold.
-                r = x.cfg.risk
-                r.max_total_risk_pct, r.max_positions = 1000.0, 100
-                r.daily_loss_pct = r.weekly_loss_pct = 100.0
+            for x, s, stop in variants:
+                if s != base:
+                    # its stop; the stop only has to sit before liquidation (a wider stop with the 3x buffer of the
+                    # usual one would leave no leverage for the same copy size)
+                    x.cfg.risk.stop_pct = stop
+                    x.cfg.risk.liq_buffer_mult = 1.0
+                if s != main:
+                    # same calls as its main-stop version (owner request 2026-10-12: the 8% and trader-exit versions
+                    # of the bigger sizes copied 3 of 13 calls, their budget still full of copies the usual stop had
+                    # closed): that version decides which calls are copied, so the wallet-wide budgets here only stop
+                    # runaways. Per-trade and per-coin limits stay (same copy size); margin still limits what it holds.
+                    r = x.cfg.risk
+                    r.max_total_risk_pct, r.max_positions = 1000.0, 100
+                    r.daily_loss_pct = r.weekly_loss_pct = 100.0
             # watched: the followed traders AND the unfollowed ones we still hold a copy of (their exits are copied);
             # rebuilt on the trading thread (invo_refresh_watched), read by the watcher thread
             self.invo_watched: frozenset[str] = frozenset()
@@ -1611,6 +1610,9 @@ class Bot:
             d = self.data / "wallets" / w.name
             if d.exists():
                 shutil.move(str(d), str(arch / w.name))
+        for d in sorted((self.data / "wallets").glob("invo_*")):   # wallets of an earlier invo.main_stop_pct
+            if d.is_dir():
+                shutil.move(str(d), str(arch / d.name))
         d = self.data / "wallets" / self.invo.name
         d.mkdir(parents=True, exist_ok=True)
         lg = Ledger(d / "ledger.jsonl")

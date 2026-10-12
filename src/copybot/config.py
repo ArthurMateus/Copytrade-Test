@@ -226,6 +226,10 @@ class Invo:
     # to risk.stop_pct is the existing wallets. 0 = the trader's exit: no stop of ours but a guard just before where a
     # copy that big would be liquidated (runner.invo_emergency_stop: 30% for small copies, ~11% at 20% risk)
     stops_pct: list = field(default_factory=lambda: [3.0, 8.0, 0.0])
+    # the stop of the main Invo wallets (one of stops_pct): they keep the plain names, decide which calls are copied
+    # and the trader-size one posts the cards. Owner request 2026-10-12: 0 = keep a copy open until the trader closes
+    # it (config/invo.toml); the default here is our usual stop. Changing it: /invoflatten, then /invoreset.
+    main_stop_pct: float = 3.0
     # Invo ticker -> Hyperliquid coin when the names differ (checked against Hyperliquid's list at each use)
     aliases: dict = field(default_factory=dict)
     # the daily Invo search (copybot/invo_scorer.py): Invo's Discover rankings -> each trader's closed calls ->
@@ -493,6 +497,8 @@ def validate(cfg: Config) -> None:
             or len(set(st)) != len(st) or len(st) > 4 or cfg.risk.stop_pct not in st:
         raise ConfigError(f"invo.stops_pct: at most 4 distinct stops in [0, 25] including risk.stop_pct "
                           f"({cfg.risk.stop_pct:g}); 0 = the trader's exit")
+    if cfg.invo.main_stop_pct not in st:
+        raise ConfigError(f"invo.main_stop_pct: one of invo.stops_pct ({', '.join(f'{v:g}' for v in st)})")
     if not all(isinstance(k, str) and isinstance(v, str) and v for k, v in cfg.invo.aliases.items()):
         raise ConfigError('invo.aliases: Invo ticker = "Hyperliquid coin", e.g. { MATIC = "POL" }')
 

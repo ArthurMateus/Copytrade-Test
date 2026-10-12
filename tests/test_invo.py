@@ -888,6 +888,43 @@ def test_every_size_runs_with_every_stop_and_only_the_exit_differs(invo_env, mon
         stop_bot(bot, th)
 
 
+def test_with_main_stop_0_the_main_wallets_hold_until_the_trader_closes(invo_env, monkeypatch):
+    """Owner request 2026-10-12: "keep the trades open until the traders close it (the 3% and 8% will still work)".
+    invo.main_stop_pct = 0: invo_calls and invo_risk_<r>pct have only the liquidation guard, the 3% versions are
+    invo_*_stop3 and copy the same calls."""
+    hl, dc, data, cdir, f, tok = invo_env
+    with open(cdir / "invo.toml", "a", encoding="utf-8") as fh:
+        fh.write("main_stop_pct = 0.0\n")
+    pid = f.add_user("nicush")[0]
+    bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
+    try:
+        names = {w.name for w in bot.invo_wallets()}
+        assert bot.invo.name == "invo_calls" and bot.invo.stop_label == "trader's exit"
+        assert {"invo_calls_stop3", "invo_calls_stop8", "invo_risk_1pct_stop3"} <= names and len(names) == 18
+        assert not any(n.endswith("_trader") for n in names)
+        dc.say("/invofollow nicush")
+        assert wait_for(lambda: bot.invo_watch.known.get("nicush") is not None, timeout=10)
+        w = {x.name: x for x in bot.invo_wallets()}
+        main, s3 = w["invo_calls"], w["invo_calls_stop3"]
+        cid = f.open_call(pid, "ETH", long=True, leverage=10, size=0.05, entry=3000.0)
+        assert wait_for(lambda: all("ETH" in x.st.positions for x in w.values()), timeout=10)
+        assert main.st.positions["ETH"].stop_px == pytest.approx(main.st.positions["ETH"].entry_px * 0.70)
+        assert s3.st.positions["ETH"].stop_px == pytest.approx(s3.st.positions["ETH"].entry_px * 0.97)
+        assert main.st.positions["ETH"].size == pytest.approx(s3.st.positions["ETH"].size, rel=0.02)
+        hl.mids["ETH"] = 3000.0 * 0.96                                    # our 3% stop, not the trader's exit
+        assert wait_for(lambda: "ETH" not in s3.st.positions and "ETH" not in w["invo_risk_5pct_stop3"].st.positions,
+                        timeout=10)
+        time.sleep(1.5)
+        assert "ETH" in main.st.positions and "ETH" in w["invo_risk_5pct"].st.positions
+        f.close_call(pid, cid, price=2880.0)
+        assert wait_for(lambda: all("ETH" not in x.st.positions for x in w.values()), timeout=10)
+        assert main.st.closed[-1]["reason"] == "leader_close"
+        text = lambda: " ".join(m["text"] for m in dc.sent + dc.edits)
+        assert wait_for(lambda: "closed by the trader" in text())         # the main wallet's card
+    finally:
+        stop_bot(bot, th)
+
+
 def test_the_wallets_card_shows_the_best_and_worst_combinations():
     from copybot import cardfmt
     from copybot.ledger import State

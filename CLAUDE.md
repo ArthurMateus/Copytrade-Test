@@ -372,6 +372,12 @@ instances on the same wallet.
 - `invo_link` now also carries `portfolio`, `title`, `live` and, when the trader's exit closed the copy, `closed_by`
   (`confirmed` = in its closed calls, `vanished` = `invo.DELETED`, `unseen` = closed while not watching); later
   `invo_link` events merge fields. The card says "real-money" or "paper" portfolio and its title.
+- Main stop (owner request 2026-10-12, "keep the trades open until the traders close it; the 3% and 8% SL will still
+  work"): `invo.main_stop_pct` (config/invo.toml 0; dataclass default 3 = the old layout, used by the tests). The
+  wallets at that stop keep the plain names (`invo_calls` = cards, followed list, leader pause; `invo_risk_<r>pct`)
+  and decide which calls are copied; the other stops are `<name>_stop3` / `_stop8` / `_trader`. Every risk wallet now
+  has an explicit sizer (same notional at every stop). `/invoreset` also archives `data/wallets/invo_*` dirs of an
+  earlier main stop. Not changed: the Invo search still replays copies with our 3% stop (`copy_edge`).
 
 ## Account value = perp + spot stablecoins (bug found live 2026-10-10)
 - `/hyperadd` scored with the PERP account value only while the daily search used the leaderboard value, so the same
