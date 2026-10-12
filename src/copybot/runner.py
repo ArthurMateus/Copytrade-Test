@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import re
 import datetime as dt
+import math
 import os
 import queue
 import shutil
@@ -25,8 +26,15 @@ from copybot.detector import Detector, Move
 from copybot.invo import PREFIX as INVO, InvoClient, Watcher as InvoWatcher
 from copybot.invo_scorer import InvoScorer, reason_text as invo_reason
 
-EMERGENCY_STOP_PCT = 30.0   # the "trader's exit only" stop test wallet: never reached by a normal trade (a liquidation
-                            # guard at 3x leverage), so the copy lives exactly as long as the trader's call
+EMERGENCY_STOP_PCT = 30.0   # "trader's exit" Invo wallets: the farthest stop, only a guard (a normal trade never gets
+                            # there), lowered for big copies to just before their liquidation (invo_emergency_stop)
+
+
+def invo_emergency_stop(mult: float) -> float:
+    """The stop (%) of a "trader's exit" Invo wallet whose copies are `mult` x its equity: a real position that big
+    needs ceil(mult) leverage and is liquidated about 1/leverage away (maintenance margin of a 20x coin, 5% margin)."""
+    lev = max(1, math.ceil(mult - 1e-9))
+    return min(EMERGENCY_STOP_PCT, (1.0 / lev - 0.025) * 0.95 * 100)
 from copybot.feed import Clock, Feed
 from copybot.ledger import Ledger, now_ms
 from copybot.positions import PositionManager
@@ -114,28 +122,42 @@ class Bot:
         self._invo_close_why: str | None = None      # the trader's close reason while it is being mirrored
         self.invo_baseline_wait: dict[str, list] = {}  # trader -> its first read, held until Hyperliquid's coins load
         if cfg.invo.enabled and cfg.invo_token_file:
+            # every size x every stop (owner request 2026-10-12): the trader-size wallet and the 1-20% risk wallets
+            # at our usual stop (their names and history unchanged), plus the same sizes at each other stop in
+            # invo.stops_pct (0 = the trader's exit). A size's versions copy the same notional: only the exit differs.
+            base = cfg.risk.stop_pct
+            stop_word = lambda s: f"{s:g}% stop" if s > 0 else "trader's exit"
             w = SideWallet(cfg, cfg.invo.limits_pct, self.data, side_broker, self.health, self.mids, self.assets,
                            alts_ok=lambda leader: True, score_of=self.score_of, name="invo_calls",
-                           label="invo calls (posted trades)", sizer=self.invo_size, own_leaders=True,
+                           label=f"trader size · {stop_word(base)}", sizer=self.invo_size, own_leaders=True,
                            notify=self.on_invo_notify, cap=self.invo_cap, pause_leaders=True)
+            w.size_label, w.stop_label = "trader size", stop_word(base)
             self.invo = w
             self.sides.append(w)
+            sizes = [("invo_calls", "trader size", cfg.invo.limits_pct, cfg.invo.max_risk_pct / base, self.invo_size,
+                      self.invo_cap)]
             for r in cfg.invo.risk_wallets_pct:
                 x = SideWallet(cfg, r, self.data, side_broker, self.health, self.mids, self.assets,
                                alts_ok=lambda leader: True, score_of=self.score_of, name=f"invo_risk_{r:g}pct",
-                               label=f"invo {r:g}% risk", own_leaders=True)
+                               label=f"{r:g}% risk · {stop_word(base)}", own_leaders=True)
+                x.size_label, x.stop_label = f"{r:g}% risk", stop_word(base)
                 self.invo_extra.append(x)
                 self.sides.append(x)
-            stop_tests = []
-            for s in cfg.invo.stop_tests_pct:      # stop-loss test wallets (owner request 2026-10-12)
-                name = f"invo_stop_{s:g}pct" if s > 0 else "invo_stop_trader"
-                x = SideWallet(cfg, 20.0, self.data, side_broker, self.health, self.mids, self.assets,
-                               alts_ok=lambda leader: True, score_of=self.score_of, name=name, own_leaders=True,
-                               label=f"invo test: {s:g}% stop" if s > 0 else "invo test: trader's exit only",
-                               sizer=self.invo_test_size)
-                stop_tests.append((x, s))
-                self.invo_extra.append(x)
-                self.sides.append(x)
+                sizes.append((f"invo_risk_{r:g}pct", f"{r:g}% risk", r, r / base,
+                              lambda m, px, eq, r=r: eq * r / base / px if px > 0 else 0.0, None))
+            variants = []
+            for s in [s for s in cfg.invo.stops_pct if s != base]:
+                for name, size_label, risk, mult, sizer, cap in sizes:
+                    stop = s if s > 0 else invo_emergency_stop(mult)
+                    # limits of a wallet risking the same notional at this stop, so they clamp like the base one's
+                    x = SideWallet(cfg, risk * stop / base, self.data, side_broker, self.health, self.mids,
+                                   self.assets, alts_ok=lambda leader: True, score_of=self.score_of,
+                                   name=f"{name}_{f'stop{s:g}' if s > 0 else 'trader'}",
+                                   label=f"{size_label} · {stop_word(s)}", sizer=sizer, cap=cap, own_leaders=True)
+                    x.size_label, x.stop_label = size_label, stop_word(s)
+                    variants.append((x, stop))
+                    self.invo_extra.append(x)
+                    self.sides.append(x)
             for x in self.invo_wallets():
                 # a call is first seen up to a round (poll_s + the reads) after it was posted: entries may be that
                 # old (still fail closed)
@@ -144,12 +166,11 @@ class Bot:
                 # the leader pause compares a trader's copy drawdown with leader_pause_dd_pct of (equity /
                 # max_leaders): set so the limit is invo.pause_dd_pct of the whole wallet
                 x.cfg.risk.leader_pause_dd_pct = cfg.invo.pause_dd_pct * max(1, x.cfg.risk.max_leaders)
-            for x, s in stop_tests:
-                # only the exit differs: our stop at s% (0: the far emergency stop, with the liquidation buffer the
-                # gate needs for it at 3x), every copy stop_test_usd; limits of a 20% wallet so none clamps a copy
-                x.cfg.risk.stop_pct = s if s > 0 else EMERGENCY_STOP_PCT
-                if s <= 0:
-                    x.cfg.risk.liq_buffer_mult = 1.0
+            for x, stop in variants:
+                # its stop; the stop only has to sit before liquidation (a wider stop with the 3x buffer of the
+                # usual one would leave no leverage for the same copy size)
+                x.cfg.risk.stop_pct = stop
+                x.cfg.risk.liq_buffer_mult = 1.0
             # watched: the followed traders AND the unfollowed ones we still hold a copy of (their exits are copied);
             # rebuilt on the trading thread (invo_refresh_watched), read by the watcher thread
             self.invo_watched: frozenset[str] = frozenset()
@@ -547,10 +568,6 @@ class Bot:
         notional = max(min(share * self.cfg.invo.size_mult * equity, self.invo_cap(equity)),
                        self.cfg.risk.min_notional_usd * 1.05)
         return notional / px if px > 0 else 0.0
-
-    def invo_test_size(self, m, px: float, equity: float) -> float:
-        """The stop-loss test wallets: every copy the same notional (invo.stop_test_usd), whatever the stop."""
-        return self.cfg.invo.stop_test_usd / px if px > 0 else 0.0
 
     def invo_cap(self, equity: float) -> float:
         """The most notional one Invo calls copy may hold (also after the trader's adds): invo.max_risk_pct of our
@@ -1317,8 +1334,8 @@ class Bot:
         if key.startswith("invo:") and self.invo is not None:
             w = self.invo
             if key == "invo:wallets":
-                return cardfmt.wallets_card([(x.risk_pct, x.st, False, x.label) for x in self.invo_wallets()], self.mids,
-                                          now, title="🧾 <b>Invo wallets</b> · same Invo calls, different sizing")
+                return cardfmt.invo_wallets_card([(x.size_label, x.stop_label, x.st) for x in self.invo_wallets()],
+                                                 self.mids, now)
             if key == "invo:trades":
                 return cardfmt.trades_card(w.st, self.mids, now, title="🧾 <b>Invo trades</b>")
             if key == "invo:traders":

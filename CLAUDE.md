@@ -294,12 +294,18 @@ instances on the same wallet.
   (blocked + paper floors). `/invofollow` queues a quiet check (`add_q` item `(name, True)`) that says which
   portfolios are copied. Picks show the best portfolio, "real money" and Invo's score.
 
-## Invo stop-loss test wallets (owner request 2026-10-12: "3%, 8% and stop whenever the trader stops")
-- `invo.stop_tests_pct` [3, 8, 0] -> `invo_stop_3pct`, `invo_stop_8pct`, `invo_stop_trader` in `Bot.invo_extra` (same
-  traders and calls as every Invo wallet, /invowallets compares them). Every copy = `invo.stop_test_usd` (60$,
-  `Bot.invo_test_size`) so only the exit differs; limits of a 20% wallet so none clamps. 0 = no stop of ours: the copy
-  closes with the trader's close; `EMERGENCY_STOP_PCT` (30%) with `liq_buffer_mult` 1 (3x leverage) keeps every
-  position stop-protected (ledger/boot_repair need a valid stop). The trader's own stop works through its close.
+## Invo sizes x stops (owner request 2026-10-12: "3%, 8% and stop whenever the trader stops", for every size)
+- `invo.stops_pct` [3, 8, 0] (must include risk.stop_pct): every Invo size (trader size = `invo_calls`, and each
+  `risk_wallets_pct` level) runs once per stop: the 3% ones are the existing wallets (names/history unchanged), the
+  others `<name>_stop8` / `<name>_trader` (18 wallets, all in `Bot.invo_extra` except the primary; same traders and
+  calls). A size's versions copy the same notional (risk wallets: equity x r / 3%, i.e. sized at the usual stop;
+  trader size: `invo_size` + `invo_cap`), so only the exit differs. Variants: `liq_buffer_mult` 1 (the stop only has
+  to sit before liquidation) and limits of a wallet risking that notional at that stop (`risk x stop / 3`).
+- 0 = the trader's exit: no stop of ours but a guard `invo_emergency_stop(mult)` = min(30%, 95% of (1/ceil(mult) -
+  2.5%)): a copy that big (mult = notional / equity) is liquidated about there (20% risk: ~11.2%, 10%: ~21%).
+  Positions always keep a valid stop (ledger/boot_repair).
+- `/invowallets` = `cardfmt.invo_wallets_card`: 3 best + 3 worst combinations (size · stop) and the average result of
+  each stop over all sizes. Copying one call into all 18 takes ~0.1 s (measured in the e2e test env).
 
 ## Account value = perp + spot stablecoins (bug found live 2026-10-10)
 - `/hyperadd` scored with the PERP account value only while the daily search used the leaderboard value, so the same

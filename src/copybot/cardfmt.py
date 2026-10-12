@@ -340,6 +340,45 @@ def wallets_card(wallets: list, mids: dict, now_ms: float,
     return "\n".join(out)
 
 
+def invo_wallets_card(wallets: list, mids: dict, now_ms: float, n: int = 3) -> str:
+    """/invowallets (owner request 2026-10-12): every Invo size x stop combination, but only the `n` best and `n` worst
+    in detail, then the average result of each stop over all sizes. `wallets` = [(size label, stop label, State)]."""
+    from copybot.wallets import max_drop_pct
+    rows = []
+    for size, stop, st in wallets:
+        pnl = st.equity(mids) - st.equity0
+        rows.append((pnl, size, stop, st))
+    rows.sort(key=lambda x: (-x[0], x[1], x[2]))
+    sizes, stops = len({r[1] for r in rows}), len({r[2] for r in rows})
+    out = [f"🧾 <b>Invo wallets</b> · {len(rows)} combinations ({sizes} sizes × {stops} stops) · same calls"]
+
+    def line(i: int, r) -> str:
+        pnl, size, stop, st = r
+        n_closed = len(st.closed)
+        wins = sum(1 for t in st.closed if t["pnl"] > 0)
+        mark = (["🥇", "🥈", "🥉"][i] if i < 3 and abs(pnl) > 0.005 else f"{i + 1}.")
+        flag = " ⏸️" if st.entries_paused or st.uncertain else ""
+        return (f"{mark} <b>{esc(size)} · {esc(stop)}</b>{flag} {dot(pnl)} {money(pnl, st.equity0)}\n"
+                f"{n_closed} trades" + (f" · {wins / n_closed * 100:.0f}% won" if n_closed else "")
+                + f" · {_n(len(st.positions), 'open trade')} · biggest drop −{max_drop_pct(st, mids):.1f}%")
+
+    if len(rows) <= 2 * n:
+        out += ["", *(line(i, r) for i, r in enumerate(rows))]
+    else:
+        out += ["", "🏆 <b>Best</b>", *(line(i, r) for i, r in enumerate(rows[:n]))]
+        out += ["", "🔻 <b>Worst</b>", *(line(len(rows) - n + i, r) for i, r in enumerate(rows[-n:]))]
+    by = {}
+    for pnl, _, stop, st in rows:
+        by.setdefault(stop, []).append(pnl / st.equity0 * 100 if st.equity0 else 0.0)
+    avg = sorted(((sum(v) / len(v), k) for k, v in by.items()), reverse=True)
+    out.append("\n<b>By stop</b> (average of all sizes): " + " · ".join(f"{esc(k)} {fpct(a)}" for a, k in avg))
+    paused = [f"{size} · {stop}" for _, size, stop, st in rows if st.entries_paused or st.uncertain]
+    if paused:
+        out.append("⏸️ paused: " + esc(", ".join(paused)))
+    out.append(updated(now_ms))
+    return "\n".join(out)
+
+
 def positions_text(st: State, mids: dict) -> str:
     if not st.positions:
         return "📭 No open trades."
@@ -406,7 +445,7 @@ def invo_text(st: State, mids: dict, watch, now_ms: float) -> str:
         net = net_pnl(p, mids.get(p.coin))
         lines.append(f"  {dot(net)} {esc(p.coin)} {side_tag(p.side)} from @{esc(p.leader.split(':', 1)[1])} · "
                      f"{fusd(net)} · stop {fpx(p.stop_px)}")
-    lines.append("/invotrades · /invotraders · /invowallets compares the Invo wallets (trader size, 1-20% risk)")
+    lines.append("/invotrades · /invotraders · /invowallets compares the Invo wallets (sizes x stops)")
     if now_ms:
         lines.append(updated(now_ms))
     return "\n".join(lines)
