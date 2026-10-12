@@ -23,7 +23,8 @@ from websockets.sync.client import connect
 
 from copybot import log
 from copybot.config import Config
-from copybot.chat import COMMANDS, PIN_COMMANDS, SLASH_COMMANDS, WALLET_COMMANDS, ChatError, ChatUI, Command, canon
+from copybot.chat import (COMMANDS, FOMO_COMMANDS, INVO_ONLY_COMMANDS, PIN_COMMANDS, SLASH_COMMANDS, WALLET_COMMANDS,
+                          ChatError, ChatUI, Command, canon, invo_name, short_names)
 
 GREEN, RED, ORANGE, BLURPLE = 0x2ECC71, 0xE74C3C, 0xF39C12, 0x5865F2
 MAX_EMBED = 4096
@@ -150,8 +151,15 @@ class DiscordUI(ChatUI):
         self.connected = False
 
     # ---- transport (ChatUI's outbox calls this) -------------------------------------------------
+    @property
+    def invo_only(self) -> bool:
+        """The Hyperliquid book is off: the short command names are Invo's (owner request 2026-10-12)."""
+        return not self.cfg.selection.enabled
+
     def _call(self, method: str, params: dict):
         rows = components(params.get("buttons") or [])
+        if self.invo_only:
+            params = {**params, "text": short_names(params["text"])}
         if method == "sendMessage":
             r = self.api.call("POST", f"/channels/{self.channel}/messages",
                               {"embeds": [embed(params["text"])], "allowed_mentions": {"parse": []},
@@ -235,15 +243,19 @@ class DiscordUI(ChatUI):
         """Guild slash commands appear at once (global ones can take an hour)."""
         guild = self.api.call("GET", f"/channels/{self.channel}")["guild_id"]
         cmds = []
-        for c in SLASH_COMMANDS:
-            # a book that is off shows no commands (owner request 2026-10-12); /hyperflatten stays for leftovers
-            if (c.startswith("/hyper") and not self.cfg.selection.enabled and canon(c) != "/flatten") or \
-                    (c.startswith("/fomo") and not self.cfg.sol.enabled):
+        names = SLASH_COMMANDS
+        if self.invo_only:      # only Invo: its commands without the prefix; /hyperflatten stays for leftovers
+            names = INVO_ONLY_COMMANDS + ("/hyperflatten",) + (FOMO_COMMANDS if self.cfg.sol.enabled else ())
+        for c in names:
+            if c.startswith("/fomo") and not self.cfg.sol.enabled:      # a book that is off shows no commands
                 continue
-            cmd = {"name": c[1:], "description": DESCRIPTIONS.get(c, c[1:]), "type": 1}
-            if canon(c) in PIN_COMMANDS:
+            real = (invo_name(c) if self.invo_only else None) or c
+            full = "/invo" + c[1:] if real != c else c                     # its /invo… name (descriptions)
+            desc = DESCRIPTIONS.get(full, c[1:]).removeprefix("Invo: ")
+            cmd = {"name": c[1:], "description": desc, "type": 1}
+            if canon(real) in PIN_COMMANDS:
                 cmd["options"] = [{"type": 3, "name": "pin", "description": "Your COPYBOT_PIN", "required": True}]
-            elif canon(c) in WALLET_COMMANDS:
+            elif canon(real) in WALLET_COMMANDS:
                 cmd["options"] = [{"type": 3, "name": "wallet", "required": True,
                                    "description": "Wallet address or Invo username (block: username, then portfolio)"}]
             cmds.append(cmd)
@@ -281,10 +293,11 @@ class DiscordUI(ChatUI):
             return self._reply(d, "⛔ Only the owner can command this bot.")
         if name not in COMMANDS:
             return self._reply(d, "❓ Unknown command.")
-        name = canon(name)
+        typed = name
+        name = (invo_name(name) if self.invo_only else None) or canon(name)
         opts = {o["name"]: o.get("value", "") for o in (d.get("data") or {}).get("options") or []}
         log.info("discord_command", cmd=name)     # never the argument (may be the PIN)
-        self._reply(d, f"👍 {name}" + (" (results in the channel)" if name not in ("/pause", "/resume", "/restart", "/fomopause", "/fomoresume", "/invopause", "/invoresume")
+        self._reply(d, f"👍 {typed}" + (" (results in the channel)" if name not in ("/pause", "/resume", "/restart", "/fomopause", "/fomoresume", "/invopause", "/invoresume")
                                         else ""))
         self.on_command(Command(name, str(opts.get("pin") or opts.get("wallet") or "").strip()))
 

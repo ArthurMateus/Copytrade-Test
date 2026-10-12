@@ -12,6 +12,7 @@ owner's request on 2026-10-10).
 from __future__ import annotations
 
 import hmac
+import re
 import queue
 import threading
 import time
@@ -36,6 +37,7 @@ ALIASES.update({"/fomostatus": "/fomo", "/invostatus": "/invo",
                 # older names
                 "/hyperwallet": "/wallets", "/hyperpositions": "/trades", "/hyperleaders": "/traders",
                 "/positions": "/trades", "/leaders": "/traders",
+                "/block": "/invoblock", "/unblock": "/invounblock",     # (only Invo has them)
                 "/fomowallet": "/fomo", "/fomopositions": "/fomotrades", "/fomoleaders": "/fomotraders"})
 COMMANDS = tuple(dict.fromkeys(("/help", "/restart", "/picks", "/fomo", "/invo") + tuple(f"/{v}" for v in VERBS)
                                + tuple(ALIASES) + FOMO_COMMANDS + INVO_COMMANDS + INVO_EXTRA))
@@ -49,6 +51,41 @@ WALLET_COMMANDS = ("/add", "/follow", "/unfollow", "/fomoadd", "/fomofollow", "/
 
 def canon(name: str) -> str:
     return ALIASES.get(name, name)
+
+
+# Only Invo runs (owner request 2026-10-12: "just wallets, traders, etc"): with the Hyperliquid book off, the short
+# names are Invo's (/wallets = /invowallets, /block = /invoblock); the /invo… names keep working (not listed).
+INVO_ONLY_COMMANDS = ("/help", "/restart", "/picks") + tuple(f"/{v}" for v in VERBS) + ("/block", "/unblock")
+_INVO_WORDS = re.compile(r"/invo(" + "|".join(VERBS + ("block", "unblock")) + r")\b")
+
+
+def invo_name(name: str) -> str | None:
+    """A short name typed while only Invo runs -> the Invo command's canonical name (None: not a short book name)."""
+    v = name[1:]
+    if v in VERBS or v in ("block", "unblock"):
+        return canon(f"/invo{v}")
+    return None
+
+
+def short_names(text: str) -> str:
+    """Messages while only Invo runs: "/invofollow x" -> "/follow x" (what the owner types now)."""
+    return _INVO_WORDS.sub(r"/\1", text)
+
+
+INVO_HELP = ("🤖 <b>Copybot (paper)</b> · 🧾 Invo calls (copied on Hyperliquid prices)\n\n"
+             "status – the book at a glance (live)\n"
+             "trades – open trades at live prices (live)\n"
+             "traders – followed traders and what copying them made (live)\n"
+             "wallets – every size × stop combination, best and worst (live)\n"
+             "progress – success metrics\n"
+             "search – look for traders now (asks before changing anything)\n"
+             "add &lt;user&gt; – check it with the strict rules, follow it if it passes\n"
+             "follow &lt;user&gt; – follow it as your pick (never dropped by the search) · unfollow &lt;user&gt;\n"
+             "block · unblock &lt;user&gt; &lt;portfolio&gt; – stop / restart copying one portfolio\n"
+             "pause · resume – new copies (exits and stops always run)\n"
+             "flatten &lt;PIN&gt; – close every trade and pause · reset &lt;PIN&gt; – back to the start, traders kept\n\n"
+             "Examples: /wallets · /follow nicush · /block nicush Kitchen\n"
+             "/picks – the best traders (also daily at 13h) · /restart – restart the bot")
 
 
 class ChatError(Exception):

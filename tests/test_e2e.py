@@ -342,11 +342,21 @@ def test_with_the_hyperliquid_book_off_only_invo_runs(env):
         assert bot.st.entries_paused and not bot.sides and LEADER not in hl.subscribed_users()
         assert wait_for(lambda: dc.commands is not None)
         names = {c["name"] for c in dc.commands}
-        assert "hyperflatten" in names and "invostatus" in names
-        assert not {"hyperstatus", "hyperadd", "fomostatus"} & names
+        # only Invo: its commands lose the prefix (owner request 2026-10-12), /hyperflatten stays for leftovers
+        assert {"hyperflatten", "status", "wallets", "traders", "follow", "block", "unblock", "flatten"} <= names
+        assert not {"hyperstatus", "hyperadd", "fomostatus", "invostatus", "invowallets"} & names
+        flat = next(c for c in dc.commands if c["name"] == "flatten")
+        assert flat["options"][0]["name"] == "pin"
+        follow = next(c for c in dc.commands if c["name"] == "follow")
+        assert follow["options"][0]["name"] == "wallet" and "Invo" not in follow["description"][:5]
         hl.push_fills(LEADER, [leader_fill(hl, "ETH", 50, "B")])
         dc.say("/hyperstatus")
         assert wait_for(lambda: any("Hyperliquid book is off" in m["text"] for m in dc.sent))
+        dc.say("/wallets")                                      # = /invowallets (Invo itself is off here: no token)
+        assert wait_for(lambda: any("Invo is off" in m["text"] for m in dc.sent))
+        assert bot.st.entries_paused                            # never reached the Hyperliquid wallet
+        dc.say("/help")
+        assert wait_for(lambda: any("/follow nicush" in m["text"] for m in dc.sent))
         assert "ETH" not in bot.st.positions and not bot.scorer.scores
     finally:
         stop_bot(bot, th)

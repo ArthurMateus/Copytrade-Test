@@ -43,7 +43,7 @@ from copybot.risk import Health, RiskGate
 from copybot.selection import Plan, Scorer, rebalance, select
 from copybot.discord import DiscordUI
 from copybot.sol.runner import SolBot
-from copybot.chat import HELP
+from copybot.chat import HELP, INVO_HELP
 from copybot.wallets import SideWallet, boot_repair
 
 
@@ -1452,13 +1452,15 @@ class Bot:
             return
         if c.name.startswith("/invo"):
             return self.invo_command(c)
+        if c.name == "/help" and not self.hyper and not self.sol:
+            return self.ui.send(INVO_HELP)
         if c.name == "/help":
             return self.ui.send(HELP + ("" if self.hyper else "\n\n⚡ Hyperliquid is off (enabled = true in "
                                         "config/selection.toml, then restart)")
                                 + ("" if self.sol else ("\n" if not self.hyper else "\n\n") + "🪙 FOMO is off (enabled = true in config/sol.toml, then "
                                    "restart)"))
         if not self.hyper and c.name not in ("/picks", "/restart", "/flatten"):
-            return self.ui.send("⚡ The Hyperliquid book is off: only Invo runs (/invo… commands). To turn it back on: "
+            return self.ui.send("⚡ The Hyperliquid book is off: only Invo runs. To turn it back on: "
                                 "enabled = true in config/selection.toml, then /restart.")
         if c.name in ("/status", "/trades", "/traders", "/wallets"):
             key = c.name[1:]

@@ -195,3 +195,9 @@ def test_full_bot_on_discord(tmp_path):
         bot.shutdown()
         hl.close()
         fake.close()
+
+
+def test_only_invo_messages_use_the_short_command_names():
+    from copybot.chat import invo_name, short_names
+    assert short_names("/invofollow x · /invotraders · /invotrades · /invoblock a b") ==         "/follow x · /traders · /trades · /block a b"
+    assert [invo_name(n) for n in ("/status", "/wallets", "/flatten", "/block", "/hyperflatten")] ==         ["/invo", "/invowallets", "/invoflatten", "/invoblock", None]

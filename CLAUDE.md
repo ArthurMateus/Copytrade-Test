@@ -326,6 +326,11 @@ instances on the same wallet.
   (/fomo… hidden). Hyperliquid still gives every price, book and fill of the Invo copies. Tests turn HL back on in
   `test_e2e.write_config`; `test_with_the_hyperliquid_book_off_only_invo_runs` covers the off mode.
 - `invo.max_traders` 7 -> 10 (owner request 2026-10-12).
+- Short names (owner request 2026-10-12): with the HL book off (`DiscordUI.invo_only`), Discord lists Invo's commands
+  WITHOUT the prefix (`chat.INVO_ONLY_COMMANDS`: /status /wallets /follow ... /block /unblock, + /hyperflatten);
+  `chat.invo_name` maps a typed short name to the Invo command, /invo… names still work, and every outgoing message
+  is rewritten by `chat.short_names` ("/invofollow x" -> "/follow x"). /help = `chat.INVO_HELP`. /block and /unblock
+  are aliases of /invoblock and /invounblock in every mode.
 
 ## Invo: ask before changing, picks, only hard failures skip a portfolio (owner request 2026-10-12)
 - A 3 AM search dropped all 7 followed traders: VERSION bumps re-searched at every restart (each counted as a failed
