@@ -112,6 +112,59 @@ def test_watcher_reports_an_unknown_username_once(fake, tmp_path):
     assert [out.get_nowait() for _ in range(out.qsize())] == [("invo_unknown", "ghost")]
 
 
+def test_a_429_slows_every_invo_reader_and_eases_back(fake, tmp_path, monkeypatch):
+    """Live 2026-10-12: Invo answered 429 to every read and copies came 2 minutes late. A 429 doubles the shared
+    spacing (watcher and search), the search waits while it lasts, and it eases back after CALM_S without one."""
+    tok = tmp_path / "invo.token"
+    tok.write_text("REFRESH0", encoding="utf-8")
+    fake.add_user("aaa")
+    c = invo.InvoClient(fake.url, str(tok), min_interval_s=0.25)
+    fake.throttle = True
+    for want in (0.5, 1.0, 2.0, 3.0, 3.0):
+        with pytest.raises(invo.InvoError):
+            c.user("aaa")
+        assert c.slow == want
+    assert c.throttled()
+    fake.throttle = False
+    monkeypatch.setattr(invo, "CALM_S", 0.0)
+    c._last = 0.0
+    c.user("aaa")
+    assert c.slow == pytest.approx(2.25)                     # x0.75 per calm period ...
+    for _ in range(10):
+        c._last = 0.0
+        c.user("aaa")
+    assert c.slow == 0.0                                     # ... back to request_gap_s
+
+
+def test_a_vanished_call_is_not_closed_while_invo_does_not_answer(fake, tmp_path, monkeypatch):
+    """Live 2026-10-12: during 429s the closed-calls check failed and copies were closed as "deleted by the trader"
+    after VANISH_S. A close now needs Invo's ANSWER (the call closed, or absent from the closed calls)."""
+    monkeypatch.setattr(invo, "VANISH_S", 0.0)
+    monkeypatch.setattr(invo, "SLOW_MAX_S", 0.0)
+    tok = tmp_path / "invo.token"
+    tok.write_text("REFRESH0", encoding="utf-8")
+    pid = fake.add_user("akira")[0]
+    out = queue.Queue()
+    w = invo.Watcher(invo.InvoClient(fake.url, str(tok), min_interval_s=0), out, lambda: {"akira"}, 0, 180,
+                     threading.Event())
+    drain = lambda: [out.get_nowait() for _ in range(out.qsize())]
+    w.round()
+    drain()
+    a = fake.open_call(pid, "ETH")
+    w.round()
+    assert [k for k, *_ in drain()] == ["invo_open"]
+    fake.delete_call(pid, a)
+    fake.throttle_closed = True
+    for _ in range(3):
+        w.round()
+    assert drain() == [] and a in w.known["akira"]            # Invo did not answer: kept
+    fake.throttle_closed = False
+    w.round()
+    got = drain()
+    assert [(k, c.id) for k, _, c in got] == [("invo_close", a)]
+    assert got[0][2].reason_closed == "call deleted by the trader"
+
+
 def test_one_failing_trader_does_not_hold_up_the_others_and_a_refusing_invo_gets_backoff(fake, tmp_path):
     """Owner request 2026-10-11 (copies in < 3 s): no pause between rounds, so a trader whose read fails must not end
     the round for the traders after it, and when Invo refuses every read the watcher waits longer each round."""
@@ -128,8 +181,10 @@ def test_one_failing_trader_does_not_hold_up_the_others_and_a_refusing_invo_gets
     cid = fake.open_call(pid, "ETH")
     assert w.round() == 0                                   # one trader failing is no reason to wait
     assert [(k, c.id) for k, _, c in (out.get_nowait() for _ in range(out.qsize()))] == [("invo_open", cid)]
+    invo.SLOW_MAX_S, slow0 = 0.0, invo.SLOW_MAX_S             # (no extra spacing here: only the round backoff)
     fake.throttle = True                                    # Invo refuses everything: 2 s, 4 s, ... at most 60 s
     assert [w.round() for _ in range(7)] == [2.0, 4.0, 8.0, 16.0, 32.0, 60.0, 60.0]
+    invo.SLOW_MAX_S = slow0
     fake.throttle = False
     fake.broken_users.clear()
     assert w.round() == 0 and w.fails == 0

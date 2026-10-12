@@ -53,6 +53,8 @@ from copybot import log
 
 PREFIX = "invo:"          # leader name of an Invo trader in the ledger: "invo:<username>"
 RESIZE_MIN = 0.02         # a committed size change smaller than 2% is noise, not an add or a trim
+SLOW_MAX_S = 3.0          # Invo answered 429 (too many requests): spacing doubles up to this ...
+CALM_S = 60.0             # ... and eases back (x0.75 per CALM_S without a 429) to invo.request_gap_s
 VANISH_S = 10.0           # a call missing from our reads but not in the trader's closed list is only treated as closed
                           # (deleted) after this long: one incomplete answer must not close a copy (audit 2026-10-11)
 REREAD_MAX = 5            # an open-call list shorter than the portfolio's count is read again this many rounds
@@ -61,6 +63,9 @@ OVERVIEW_S = 300.0        # a live portfolio's numbers (accuracy, return) are re
 
 class InvoAuthError(Exception):
     """The Invo login is gone (refresh token rejected or missing)."""
+
+
+UNREAD = object()          # Watcher.closed_call: Invo did not answer
 
 
 class InvoError(Exception):
@@ -243,6 +248,8 @@ class InvoClient:
         self._lock = threading.Lock()
         self._auth_lock = threading.Lock()     # the watcher and the search share one login: one refresh at a time
         self._last = 0.0
+        self.slow = 0.0                        # extra spacing while Invo says "too many requests" (0 = normal)
+        self.last_429 = 0.0                    # monotonic time of Invo's last 429
         self._access = ""
         self._unsaved = ""                     # a rotated refresh token we could not write to the file yet
         self.save_failed = False               # the watcher reports it (the Invo book goes dark at the next restart)
@@ -322,10 +329,14 @@ class InvoClient:
                     self.refresh()
             used = self._access
             with self._lock:
-                wait = self._last + self.min_interval - time.monotonic()
+                wait = self._last + max(self.min_interval, self.slow) - time.monotonic()
                 if wait > 0:
                     time.sleep(wait)
                 self._last = time.monotonic()
+                if self.slow and self._last - self.last_429 >= CALM_S:          # calm again: ease back
+                    self.last_429 = self._last
+                    self.slow = 0.0 if self.slow * 0.75 <= self.min_interval else self.slow * 0.75
+                    log.info("invo_throttle_eased", gap_s=round(max(self.slow, self.min_interval), 2))
             headers = {"Authorization": "Bearer " + used, "User-Agent": "copybot-paper/1"}
             if data is not None:
                 headers["Content-Type"] = "application/json"
@@ -339,12 +350,32 @@ class InvoClient:
                         if self._access == used:        # already did)
                             self._access = ""
                     continue
+                if e.code == 429:          # too many requests (seen live 2026-10-12): slow every Invo reader down
+                    self.throttle(e.headers.get("Retry-After") if e.headers else None)
                 if e.code in (401, 403) and login_errors:
                     raise InvoAuthError(f"invo refused the login (http {e.code})") from None
                 raise InvoError(e.code, path) from None
             except (urllib.error.URLError, TimeoutError, OSError) as e:
                 raise InvoError(0, f"network: {type(e).__name__}") from None
         raise InvoAuthError("invo refused the login")
+
+    def throttle(self, retry_after=None) -> None:
+        """Invo answered 429: double the spacing of every request (watcher and search share it, up to SLOW_MAX_S)
+        and honour Retry-After (capped at 30 s). It eases back after CALM_S without a 429."""
+        try:
+            pause = min(30.0, max(0.0, float(retry_after or 0)))
+        except ValueError:
+            pause = 0.0
+        with self._lock:
+            now = time.monotonic()
+            self.slow = min(SLOW_MAX_S, max(self.slow * 2, self.min_interval * 2, 0.5))
+            self.last_429 = now
+            self._last = max(self._last, now + pause)
+        log.warn("invo_throttled", gap_s=round(self.slow, 2), retry_after_s=pause)
+
+    def throttled(self) -> bool:
+        """Invo said "too many requests" in the last CALM_S seconds (the search then waits: copies come first)."""
+        return bool(self.slow) and time.monotonic() - self.last_429 < CALM_S
 
     def user(self, username: str) -> tuple[str, str] | None:
         return parse_user(self.post("/users/get_user", {"userId": None, "usersUsername": username}))
@@ -556,11 +587,14 @@ class Watcher:
                     self.out.put(("invo_resize", name, c, new))
                 continue
             done = self.closed_call(c)
-            if done is not None:                            # confirmed: the trader closed it (real price and reason)
+            if done is not None and done is not UNREAD:     # confirmed: the trader closed it (real price and reason)
                 self.missing.pop(cid, None)
                 self.out.put(("invo_close", name, done))
                 continue
             first = self.missing.setdefault(cid, self.now() / 1000)
+            if done is UNREAD:                              # Invo did not answer (429...): never close on that
+                self.known[name][cid] = c
+                continue
             if self.now() / 1000 - first >= VANISH_S:      # gone and never closed: deleted (or hidden) by the trader
                 self.missing.pop(cid, None)
                 log.warn("invo_call_vanished", trader=name, ticker=c.ticker, call=cid)
@@ -583,8 +617,9 @@ class Watcher:
         self.overviews[p.id] = (time.monotonic(), got)
         return got
 
-    def closed_call(self, c: Call) -> Call | None:
-        """The call as it appears in its portfolio's closed calls (newest page), or None (not there, or not readable)."""
+    def closed_call(self, c: Call):
+        """The call as it appears in its portfolio's closed calls (newest page), None (not there) or UNREAD (Invo did
+        not answer: a vanished call is then kept, live 2026-10-12: copies closed as "deleted" while Invo said 429)."""
         try:
             port = self.ports.get(c.portfolio_id)
             if port is not None and port.kind == "live":
@@ -594,7 +629,7 @@ class Watcher:
             raise
         except Exception as e:
             log.warn("invo_close_check_failed", call=c.id, err=f"{type(e).__name__}: {e}"[:120])
-            return None
+            return UNREAD
 
     def forget(self, name: str) -> None:
         self.known.pop(name, None)

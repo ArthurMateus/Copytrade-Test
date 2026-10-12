@@ -179,8 +179,9 @@ class ChatUI:
     def _call(self, method: str, params: dict):
         raise NotImplementedError
 
-    def _write(self, method: str, params: dict):
-        """One rate-limited write. Blocks this worker thread only."""
+    def _write(self, method: str, params: dict, retry: bool = True):
+        """One rate-limited write. Blocks this worker thread only. retry=False (card edits): a 429 raises instead of
+        waiting, so new messages are not stuck behind edits of old cards (Discord limits those hard)."""
         while not self.stop.is_set():
             now = self.clock()
             wait = max(self.blocked_until - now, self.last_write + self.limits.min_send_interval_s - now)
@@ -194,7 +195,8 @@ class ChatUI:
                 if e.code == 429:
                     self.blocked_until = self.clock() + max(1.0, e.retry_after)
                     log.warn(f"{self.name}_429", retry_after=e.retry_after)
-                    continue
+                    if retry:
+                        continue
                 raise
         return None
 
@@ -239,9 +241,13 @@ class ChatUI:
             elif c.final or self.clock() - c.last_edit >= self.limits.edit_min_interval_s:
                 want = c.want
                 try:
-                    self._write("editMessageText", {"message_id": c.msg_id, "text": want, "buttons": c.buttons})
+                    self._write("editMessageText", {"message_id": c.msg_id, "text": want, "buttons": c.buttons},
+                                retry=c.final)
                     c.text = want
                 except ChatError as e:
+                    if e.code == 429:            # this card waits (30 s) and new messages go first
+                        c.last_edit = self.clock() + 30.0
+                        continue
                     if "not modified" in e.desc:
                         c.text = want
                     elif "not found" in e.desc or "can't be edited" in e.desc:

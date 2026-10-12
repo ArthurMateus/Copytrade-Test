@@ -40,6 +40,7 @@ class FakeInvo:
         self.refuse_refresh = False
         self.broken_users: set[str] = set()              # user ids whose portfolio list answers 500
         self.throttle = False                            # every API call answers 429 (rate limited)
+        self.throttle_closed = False                     # only the closed-calls reads answer 429
         self.blank_users: set[str] = set()               # user ids whose portfolio list answers 200 without the list
         self.hidden: set[str] = set()                    # open call ids counted by the portfolio but not listed yet
         # real-money ("live") portfolios: shapes recorded 2026-10-12 from /dex/portfolio/... (read-only views)
@@ -93,7 +94,8 @@ class FakeInvo:
                     return self._send(405, {"detail": "Method Not Allowed"})       # as the real API answers
                 if not fake.valid_access or auth != "Bearer " + fake.valid_access:
                     return self._send(401, {"status": "error", "message": "Missing authorization header"})
-                if fake.throttle:
+                if fake.throttle or (fake.throttle_closed and path == "/investments/get_investments"
+                                     and body.get("isOpen") is False):
                     return self._send(429, {"message": "Too Many Requests"})
                 if path == "/portfolios/v2/get_users_portfolios" and body.get("userId") in fake.broken_users:
                     return self._send(500, {"status": "error", "message": "Internal server error"})

@@ -332,6 +332,15 @@ instances on the same wallet.
   is rewritten by `chat.short_names` ("/invofollow x" -> "/follow x"). /help = `chat.INVO_HELP`. /block and /unblock
   are aliases of /invoblock and /invounblock in every mode.
 
+## Invo 429s (live 2026-10-12: a copy 138 s late)
+- The log showed Invo answering 429 to every read (and Discord 429 every ~6 s). `InvoClient.throttle`: a 429 doubles
+  the shared request spacing (`slow`, up to `invo.SLOW_MAX_S` 3 s, Retry-After honoured up to 30 s), eased x0.75 per
+  `CALM_S` (60 s) without one (logs `invo_throttled` / `invo_throttle_eased`); the search waits while
+  `client.throttled()` (copies first). `Watcher.closed_call` returns `UNREAD` when Invo did not answer: a vanished call
+  is then kept (before, copies were closed as "deleted by the trader" after VANISH_S during 429s).
+- Discord: a card edit answered 429 no longer retries in place (`ChatUI._write(retry=False)`): the card waits 30 s and
+  new messages go first (Discord limits edits of old messages hard; the live cards are old).
+
 ## Invo: ask before changing, picks, only hard failures skip a portfolio (owner request 2026-10-12)
 - A 3 AM search dropped all 7 followed traders: VERSION bumps re-searched at every restart (each counted as a failed
   search), traders not read in that search were dropped too (empty reasons "()"), and /invofollow picks were not kept.

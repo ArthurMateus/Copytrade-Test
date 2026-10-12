@@ -288,6 +288,9 @@ class InvoScorer:
 
     def _gap(self) -> None:
         self.stop.wait(REQ_GAP_S)
+        throttled = getattr(self.client, "throttled", None)
+        while throttled is not None and throttled() and not self.stop.is_set():
+            self.stop.wait(5.0)                 # Invo says "too many requests": the watcher (copies) goes first
 
     def discover(self) -> list[str]:
         found: list[str] = []
