@@ -8,6 +8,7 @@ poll_s = 0.0              # pause between rounds; each round asks every watched 
 request_gap_s = 0.25      # spacing of requests to Invo (7 traders = ~2 s per round; ~3.4 req/s)   [0.2, 5]
 max_call_age_s = 180.0    # calls older than this when first seen are not copied (late entry)      [10, 1800]
 size_mult = 1.0           # our exposure = their size x leverage x this, of our 300$ (at least 10$) [0.1, 10]
+live_size_mult = 10.0     # the same for real-money portfolios (their traders bet ~1% of the account) [0.1, 50]
 max_risk_pct = 2.0        # one copy never risks more than this % of our 300$ at our 3% stop (2% = 200$ max) [0.1, 20]
 limits_pct = 5.0          # the wallet's risk limits = a side wallet at this risk level              [0.5, 20]
 max_traders = 7           #                                                                         [0, 20]

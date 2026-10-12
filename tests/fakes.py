@@ -65,6 +65,7 @@ class FakeHL:
         self.positions: dict[str, dict[str, float]] = {}     # user -> {coin: szi}
         self.fills: dict[str, list[dict]] = {}               # user -> raw fills (any order)
         self.candles: dict[str, list[dict]] = {}             # coin -> raw candles
+        self.funding: dict[str, list[dict]] = {}             # coin -> raw fundingHistory rows
         self.spot_usdc: dict[str, float] = {}                # user -> USDC in its spot wallet
         self.leaderboard = fixture("leaderboard_sample.json")
         self.requests: list[dict] = []
@@ -173,6 +174,10 @@ class FakeHL:
                 return 500, None
             cs = [c for c in self.candles.get(r["coin"], []) if r["startTime"] <= c["t"] <= r["endTime"]]
             return 200, cs[:5000]
+        if t == "fundingHistory":
+            fs = [x for x in self.funding.get(body["coin"], [])
+                  if body["startTime"] <= x["time"] <= body.get("endTime", 1 << 62)]
+            return 200, fs[:500]
         return 200, None
 
     # ---- websocket ------------------------------------------------------------------------------

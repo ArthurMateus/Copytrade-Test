@@ -137,6 +137,24 @@ def test_a_trader_is_judged_on_every_portfolio_and_needs_one_we_would_copy():
     assert (s["portfolios"], s["copyable_portfolios"], s["losing_portfolios"]) == (3, 0, 2)
 
 
+def test_funding_paid_while_a_call_is_held_comes_off_its_result():
+    """Owner request 2026-10-12: calls held for weeks pay funding; the search now charges the real hourly rates."""
+    from copybot import hl
+    rates = hl.parse_funding(fixture("funding_history.json"))
+    assert len(rates) == 4 and rates[0][1] == pytest.approx(0.0000125)
+    assert invo_scorer.funding_paid(rates, 1, rates[0][0], rates[-1][0]) == pytest.approx(4 * 0.0000125)
+    assert invo_scorer.funding_paid(rates, -1, rates[0][0], rates[-1][0]) == pytest.approx(-4 * 0.0000125)
+    hourly = [(NOW - 200 * DAY + h * 3_600_000, 0.0001) for h in range(200 * 24)]     # 0.01%/h: longs pay
+    calls = [call(close=3000.0, start=NOW - 10 * DAY, hours=100.0)]                  # flat price, held 100 h
+    fills = invo_scorer.calls_to_fills([("ETH", c) for c in calls], 0.0, lambda coin: hourly)
+    trip, = scoring.round_trips(fills)
+    assert trip.ret == pytest.approx(-0.01, rel=0.02)                     # 100 h x 0.01% = 1% of the notional
+    s0 = score(history())
+    s1 = invo_scorer.score_trader("t", history(), [], lambda t: t, lambda c, a, b: [], {"ETH": 3000.0}, NOW, PARAMS,
+                                  0.5, 15.0, 14.0, funding_of=lambda coin, a, b: hourly)
+    assert s1["pnl"] < s0["pnl"]
+
+
 # ---- the report (pure) --------------------------------------------------------------------------------------------
 def test_report_compares_with_the_previous_day_and_says_why_one_left(tmp_path):
     st = picks.Store(tmp_path / "picks.json")

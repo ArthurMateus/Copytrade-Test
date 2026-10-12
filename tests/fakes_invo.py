@@ -47,6 +47,7 @@ class FakeInvo:
         self.live_pos: dict[str, list[dict]] = {}        # portfolio id -> raw positions (open and closed), newest first
         self.score_top: list[dict] = []                  # /analytics/score/user/top items
         self.invo_score: dict[str, float] = {}           # portfolio id -> Invo's score (0-10)
+        self.refuse_live = False                         # /dex/ views answer 403 (our account may not see them)
         self._n = itertools.count(1)
         self.lock = threading.Lock()
         fake = self
@@ -70,6 +71,8 @@ class FakeInvo:
                 if path.startswith("/dex/"):
                     if not fake.valid_access or auth != "Bearer " + fake.valid_access:
                         return self._send(401, {"status": "error", "message": "Missing authorization header"})
+                    if fake.refuse_live:
+                        return self._send(403, {"success": False, "error": "forbidden"})
                     return self._send(200, fake.answer_get(path))
                 if path == "/auth/refresh_token":
                     if fake.refuse_refresh or auth != "Bearer " + fake.valid_refresh:

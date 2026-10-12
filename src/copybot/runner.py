@@ -205,7 +205,8 @@ class Bot:
             self.invo_search = InvoScorer(cfg, self.invo_watch.client, self.scorer.params, self.invo_trade_coin,
                                           self.scorer.candles, self.mids,
                                           lambda: {a[len(INVO):] for a in self.invo.st.followed}, self.q,
-                                          self.data / "cache", self.stop, skip=self.invo_floor)
+                                          self.data / "cache", self.stop, skip=self.invo_floor,
+                                          funding_of=self.scorer.funding)
             self.invo_scores = dict(self.invo_search.scores)
             self.invo_reviewed = bool(self.invo_scores)
         self.picks = picks.Store(self.data / "picks.json")
@@ -565,7 +566,9 @@ class Bot:
         clamps it too."""
         c = self._invo_call
         share = c.exposure if c is not None else 0.0
-        notional = max(min(share * self.cfg.invo.size_mult * equity, self.invo_cap(equity)),
+        # real-money traders put far less of their account in one trade than paper callers (often < 1%)
+        mult = self.cfg.invo.live_size_mult if c is not None and c.live else self.cfg.invo.size_mult
+        notional = max(min(share * mult * equity, self.invo_cap(equity)),
                        self.cfg.risk.min_notional_usd * 1.05)
         return notional / px if px > 0 else 0.0
 
@@ -988,6 +991,14 @@ class Bot:
         elif kind == "invo_unknown":
             self.ui.send(f"⚠️ 🧾 No Invo user called @{cardfmt.esc(item[1])}: /invounfollow {cardfmt.esc(item[1])} and "
                          "check the name (as in app.invoapp.com/&lt;username&gt;).")
+        elif kind == "invo_live":
+            name, ok, why = item[1], item[2], item[3]
+            if ok:
+                self.ui.send(f"✅ 🧾 Invo shows @{cardfmt.esc(name)}'s real-money portfolio again: its calls are "
+                             "copied again.")
+            else:
+                self.alert(f"Invo refused to show @{name}'s real-money portfolio ({why}): its new calls are not copied "
+                           "until it works again; open copies keep their stops", key=f"invo_live:{name}", every_s=3600)
         elif kind == "invo_auth":
             if item[1]:
                 self.ui.send("✅ 🧾 Invo login OK again.")

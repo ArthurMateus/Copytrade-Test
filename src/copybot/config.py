@@ -202,6 +202,9 @@ class Invo:
     # cap per copy (owner request 2026-10-09, after a 25% x 5x STRK call became a 375$ copy of a 300$ wallet):
     # a copy never risks more than this % of our equity at our stop (2% at a 3% stop = 200$ on 300$)
     max_risk_pct: float = 2.0
+    # real-money ("live") calls (owner request 2026-10-12): those traders often put < 1% of their account in a trade
+    # (0.5% x 5x = 2.5% exposure = a 7.50$ copy at size_mult 1); x10 makes it ~75$ (still capped by max_risk_pct)
+    live_size_mult: float = 10.0
     max_traders: int = 7
     # fixed-risk Invo wallets next to the trader-size one (owner request 2026-10-09): each copy risks this % of the
     # wallet's own 300$ at our 3% stop, whatever the trader's size
@@ -369,6 +372,7 @@ CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
     ("invo", "request_gap_s"): (0.2, 5.0),
     ("invo", "max_call_age_s"): (10, 1800),
     ("invo", "size_mult"): (0.1, 10.0),
+    ("invo", "live_size_mult"): (0.1, 50.0),
     ("invo", "limits_pct"): (0.5, 20.0),
     ("invo", "max_risk_pct"): (0.1, 20.0),
     ("invo", "trail_after_pct"): (0.0, 50.0),

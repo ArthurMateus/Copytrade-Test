@@ -307,6 +307,16 @@ instances on the same wallet.
 - `/invowallets` = `cardfmt.invo_wallets_card`: 3 best + 3 worst combinations (size · stop) and the average result of
   each stop over all sizes. Copying one call into all 18 takes ~0.1 s (measured in the e2e test env).
 
+## Invo follow-ups (owner request 2026-10-12)
+- A refused real-money read (`/dex/` GETs: 401/403 are `InvoError`, not a lost login, `login_errors=False`) is logged
+  `invo_live_read_failed`, reported once as `("invo_live", user, False, why)` -> Discord alert (and `True` when it works
+  again), keeps the last known calls (never closes a copy) and blocks the trader's first baseline until a real answer.
+- `invo.live_size_mult` (10): real-money calls (`Call.live`) are sized x10 in the trader-size wallet (they bet ~1%
+  of the account), still capped by `max_risk_pct`.
+- Search charges funding (`invo_scorer.VERSION` 4): `Scorer.funding` (fundingHistory, 20-day cached chunks,
+  `hl.parse_funding`, fixture `funding_history.json`) -> `calls_to_fills(..., funding_of)` takes the funding paid while
+  each call was held off its result (and so off the copy edge).
+
 ## Account value = perp + spot stablecoins (bug found live 2026-10-10)
 - `/hyperadd` scored with the PERP account value only while the daily search used the leaderboard value, so the same
   wallet passed the search (3% drop) and failed /hyperadd (max_drawdown>30%): 0x6d73... had 1,481$ in perps and

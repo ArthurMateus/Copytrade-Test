@@ -268,6 +268,51 @@ def test_the_bot_never_calls_an_invo_trading_endpoint():
             assert path.startswith("/dex/portfolio/"), f"{f.name}: {path}"
 
 
+def test_a_refused_real_money_read_alerts_once_and_never_closes_a_copy(fake, tmp_path):
+    """Owner request 2026-10-12: the bot's own Invo account may not be allowed to see real-money portfolios. A refusal
+    is reported once (not as a lost login), keeps what we knew, and the first read waits for a real answer."""
+    tok = tmp_path / "invo.token"
+    tok.write_text("REFRESH0", encoding="utf-8")
+    pid = fake.add_live("realguy")
+    out = queue.Queue()
+    w = invo.Watcher(invo.InvoClient(fake.url, str(tok), min_interval_s=0), out, lambda: {"realguy"}, 0, 180,
+                     threading.Event())
+    drain = lambda: [out.get_nowait() for _ in range(out.qsize())]
+    fake.refuse_live = True
+    w.round()
+    w.round()
+    got = drain()
+    assert [(k, ok) for k, _, ok, _ in got] == [("invo_live", False)] and "403" in got[0][3]   # once, not "auth"
+    assert "realguy" not in w.known and w.auth_ok                         # no baseline from a refused read
+    fake.refuse_live = False
+    w.round()
+    assert [k for k, *_ in drain()] == ["invo_live", "invo_baseline"]
+    cid = fake.live_open(pid, "ETH")
+    w.round()
+    assert [k for k, *_ in drain()] == ["invo_open"]
+    fake.refuse_live = True
+    for _ in range(3):
+        w.round()
+    assert [k for k, *_ in drain()] == ["invo_live"]                       # refused again: no close of the call
+    assert cid in w.known["realguy"]
+
+
+def test_real_money_calls_are_sized_with_their_own_multiplier():
+    """Owner request 2026-10-12: real-money traders bet ~1% of their account; invo.live_size_mult scales those calls."""
+    from types import SimpleNamespace
+    from copybot.runner import Bot
+    cfg = config.load("config", env={})
+    calls, _ = invo.parse_live_positions(fixture("invo_live_positions.json"), "pf")
+    paper = invo.parse_calls(fixture("invo_investments_open.json"))[0]
+    b = SimpleNamespace(cfg=cfg, invo_cap=lambda eq: Bot.invo_cap(b, eq))
+    for call, mult in ((calls[0], cfg.invo.live_size_mult), (paper, cfg.invo.size_mult)):
+        b._invo_call = call
+        want = max(min(call.exposure * mult * 300, 200.0), 10.5)
+        assert Bot.invo_size(b, None, 2.0, 300.0) * 2.0 == pytest.approx(want), call.ticker
+    b._invo_call = calls[0]                                # LDO: 0.445% x 5x = 2.2% exposure, x10 of 300$ = 66.8$
+    assert Bot.invo_size(b, None, 2.0, 300.0) * 2.0 == pytest.approx(66.8, abs=0.1)     # (x1 would be 6.7$ -> 10$)
+
+
 # ---- the bot end to end -----------------------------------------------------------------------------------
 @pytest.fixture
 def invo_env(env, tmp_path):

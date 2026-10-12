@@ -47,8 +47,8 @@ HOUR = 3_600_000
 BASE = 10_000.0          # notional portfolio the calls' shares are applied to (only ratios matter)
 FILTERS = ("trending", "month", "all_time")
 REQ_GAP_S = 1.0          # extra spacing of the search's own requests (the watcher's polls go first)
-VERSION = 3              # Invo-only scoring changes (2: every portfolio, our cost per call, k-coins; 3: per
-                         # portfolio, live portfolios, Invo's score): rescore
+VERSION = 4              # Invo-only scoring changes (2: every portfolio, our cost per call, k-coins; 3: per
+                         # portfolio, live portfolios, Invo's score; 4: funding paid while held): rescore
 
 REASON_TEXT = {"not_on_hyperliquid": "most calls are on coins Hyperliquid does not list",
                "too_fast": "calls too short to copy", "inactive": "no new call lately",
@@ -61,9 +61,20 @@ def key_coin(key: str) -> str:
     return key.split("|", 1)[0]
 
 
-def calls_to_fills(calls: list[tuple[str, Call]], cost_bps: float = 0.0) -> list[Fill]:
+def funding_paid(rates: list[tuple[int, float]], side: int, start_ms: int, end_ms: int) -> float:
+    """Funding a position of notional 1 paid (+) or received (-) while held: positive rates make longs pay."""
+    if not rates:
+        return 0.0
+    ts = [t for t, _ in rates]
+    i, j = bisect.bisect_left(ts, start_ms), bisect.bisect_right(ts, end_ms)
+    return side * sum(r for _, r in rates[i:j])
+
+
+def calls_to_fills(calls: list[tuple[str, Call]], cost_bps: float = 0.0, funding_of=None) -> list[Fill]:
     """[(Hyperliquid coin, closed call)] -> two synthetic fills per call (open, close), each call its own coin key.
-    Each fill pays half of `cost_bps` of its notional as a fee, so a call's net is what a copy would keep."""
+    Each fill pays half of `cost_bps` of its notional as a fee, so a call's net is what a copy would keep; with
+    `funding_of(coin) -> [(hour ms, rate)]` the funding paid while it was held comes off its result too (owner request
+    2026-10-12: calls held for weeks pay real money in funding)."""
     out: list[Fill] = []
     for n, (coin, c) in enumerate(sorted(calls, key=lambda x: (x[1].created_ms, x[1].id))):
         if not c.closed_ms or not c.closing_price or c.closing_price <= 0 or c.entry <= 0:
@@ -73,8 +84,9 @@ def calls_to_fills(calls: list[tuple[str, Call]], cost_bps: float = 0.0) -> list
         if sz <= 0:
             continue
         key = f"{coin}|{n}"
-        pnl = side * sz * (c.closing_price - c.entry)
         close_ms = max(c.closed_ms, c.created_ms + 1)
+        paid = funding_paid(funding_of(coin), side, c.created_ms, close_ms) if funding_of else 0.0
+        pnl = side * sz * (c.closing_price - c.entry) - paid * sz * c.entry
         fee = cost_bps / 2 / 1e4
         out.append(Fill(key, c.entry, sz, "B" if side > 0 else "A", c.created_ms, 0.0, "Open", 0.0,
                         sz * c.entry * fee, True, 2 * n, 2 * n, ""))
@@ -114,16 +126,23 @@ def to_hl(coin_of, c: Call) -> tuple[str | None, Call]:
 
 def score_trader(name: str, closed: list[Call], opened: list[Call], coin_of, candles_of, mids: dict, now_ms: int,
                  params: scoring.ScoreParams, min_hl_share: float, min_hold_min: float,
-                 max_idle_days: float, portfolios: tuple[int, int, int] | None = None) -> dict:
+                 max_idle_days: float, portfolios: tuple[int, int, int] | None = None, funding_of=None) -> dict:
     """Pure (given its inputs): the trader's Score dict (+ Invo fields), eligible only if every rule passes.
     `portfolios` = (read, copyable, losing): no copyable one fails the trader (None = not checked)."""
     hl_closed = [to_hl(coin_of, c) for c in closed]
     on_hl = [(k, c) for k, c in hl_closed if k]
-    fills = calls_to_fills(on_hl, params.cost_bps)
+    start = now_ms - params.blocks * params.block_days * DAY
+    rates: dict[str, list] = {}
+    fund = None
+    if funding_of is not None:
+        def fund(coin: str) -> list:
+            if coin not in rates:
+                rates[coin] = funding_of(coin, start, now_ms)
+            return rates[coin]
+    fills = calls_to_fills(on_hl, params.cost_bps, fund)
     ordered = sorted(on_hl, key=lambda x: (x[1].created_ms, x[1].id))     # the order calls_to_fills numbers them
     cs: dict[str, list[Candle]] = {}
     full: dict[str, list[Candle]] = {}
-    start = now_ms - params.blocks * params.block_days * DAY
     for f in fills:
         if f.coin in cs:
             continue
@@ -169,12 +188,13 @@ class InvoScorer:
 
     def __init__(self, cfg, client, params: scoring.ScoreParams, coin_of, candles_of, mids: dict, followed,
                  out: queue.Queue, cache_dir: str | os.PathLike, stop: threading.Event,
-                 now=lambda: int(time.time() * 1000), skip=lambda name, portfolio: None):
+                 now=lambda: int(time.time() * 1000), skip=lambda name, portfolio: None, funding_of=None):
         """`skip(name, Portfolio)`: why a portfolio's calls would not be copied (a trader needs one that would)."""
         self.cfg, self.c, self.client = cfg, cfg.invo, client
         self.params = replace(params, coins=None)      # every Hyperliquid perp (the Invo wallets copy alts too)
         self.coin_of, self.candles_of, self.mids, self.followed = coin_of, candles_of, mids, followed
         self.out, self.stop, self.now, self.skip = out, stop, now, skip
+        self.funding_of = funding_of           # (coin, start, end) -> hourly funding rates (None: not charged)
         self.dir = Path(cache_dir) / "invo"
         self.dir.mkdir(parents=True, exist_ok=True)
         st = self._load()
@@ -333,6 +353,7 @@ class InvoScorer:
         self._gap()
         args = (self.coin_of, self.candles_of, self.mids, now, self.params, self.c.min_hl_share, self.c.min_hold_min,
                 self.c.max_idle_days)
+        fkw = {"funding_of": self.funding_of}
         full: dict[str, dict] = {}
         per: dict[str, dict] = {}
         all_closed: list[Call] = []
@@ -343,7 +364,7 @@ class InvoScorer:
             all_open += opened
             if not closed and not opened:
                 continue
-            s = full[p.id] = score_trader(f"{name}/{p.title.strip()[:24]}", closed, opened, *args)
+            s = full[p.id] = score_trader(f"{name}/{p.title.strip()[:24]}", closed, opened, *args, **fkw)
             inv = self.invo_score(p) if p.active else {}
             per[p.id] = {"title": p.title.strip(), "kind": p.kind, "active": p.active, "eligible": s["eligible"],
                          "score": s["score"], "reasons": list(s["reasons"]), "trades": s["trades"],
@@ -354,7 +375,7 @@ class InvoScorer:
                          "copy": bool(p.active and s["eligible"] and not self.skip(name, p))}
         overall = score_trader(name, all_closed, all_open, *args,
                                (len(ports), sum(1 for x in per.values() if x["copy"]),
-                                sum(1 for p in ports if p.pnl_pct < 0)))
+                                sum(1 for p in ports if p.pnl_pct < 0)), **fkw)
         return trader_result(overall, full, per)
 
     def read_portfolio(self, p, since: int):

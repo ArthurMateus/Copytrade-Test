@@ -104,6 +104,7 @@ class Call:
                              # or trims; positionSize drifts with the price, e.g. PUMP 4.3% -> 3.2% as it fell)
     added: bool = False      # changes.isAdded
     units: float = 0.0       # live portfolios: the position's size in coins (its % of equity drifts with the price)
+    live: bool = False       # from a real-money portfolio (sized with invo.live_size_mult)
 
     @property
     def committed(self) -> float:
@@ -176,7 +177,8 @@ def parse_live_positions(body: dict, portfolio_id: str, owner: str = "") -> tupl
         out.append(Call(p["id"], portfolio_id, owner, str(p["assetSymbol"]).upper(), p.get("side") == "long",
                         float(p.get("leverage") or 1), share, entry, _f(p.get("takeProfitPx")),
                         _f(p.get("stopLossPx")), created, bool(p.get("isOpen")), _ms(p.get("closedAt")),
-                        _f(p.get("exitPx")), p.get("closeReason"), share, False, _f(size.get("coin")) or 0.0))
+                        _f(p.get("exitPx")), p.get("closeReason"), share, False, _f(size.get("coin")) or 0.0,
+                        live=True))
     return out, d.get("nextCursor") or None
 
 
@@ -310,9 +312,10 @@ class InvoClient:
     def get(self, path: str, params: dict | None = None) -> dict:
         """GET at the API root (read-only /dex/ portfolio views)."""
         q = ("?" + urllib.parse.urlencode(params)) if params else ""
-        return self._call(self.root + path + q, None, path)
+        # a refusal here is about that one view (e.g. our account may not see real-money portfolios), not the login
+        return self._call(self.root + path + q, None, path, login_errors=False)
 
-    def _call(self, url: str, data: bytes | None, path: str) -> dict:
+    def _call(self, url: str, data: bytes | None, path: str, login_errors: bool = True) -> dict:
         for attempt in range(2):
             with self._auth_lock:
                 if not self._access:
@@ -336,7 +339,7 @@ class InvoClient:
                         if self._access == used:        # already did)
                             self._access = ""
                     continue
-                if e.code in (401, 403):
+                if e.code in (401, 403) and login_errors:
                     raise InvoAuthError(f"invo refused the login (http {e.code})") from None
                 raise InvoError(e.code, path) from None
             except (urllib.error.URLError, TimeoutError, OSError) as e:
@@ -418,6 +421,7 @@ class Watcher:
         self.missing: dict[str, float] = {}                # call id -> when it first went missing (not confirmed closed)
         self.rereads: dict[str, int] = {}                  # portfolio id -> reads in a row that returned too few calls
         self.overviews: dict[str, tuple[float, Portfolio]] = {}   # live portfolio id -> (read at, with real numbers)
+        self.live_bad: set[str] = set()                    # live portfolio ids whose positions Invo refuses to show
 
     def start(self) -> None:
         threading.Thread(target=self.run, name="invo", daemon=True).start()
@@ -475,6 +479,7 @@ class Watcher:
                 return
             uid = self.uids[name] = found[0]
         now_open: dict[str, Call] = {}
+        live_failed = False
         ports = [self.live_stats(p) if p.kind == "live" else p for p in self.client.portfolios(uid)]
         self.stats[name] = [p for p in ports if p.active]
         for p in ports:
@@ -482,7 +487,23 @@ class Watcher:
             if not p.active:
                 continue
             if p.kind == "live":                            # real money: its open positions, read every round
-                self.calls[p.id] = {c.id: c for c in self.client.live_calls(p.id, True)[0] if c.is_open}
+                try:
+                    got = self.client.live_calls(p.id, True)[0]
+                except InvoAuthError:
+                    raise
+                except Exception as e:                      # refused / failed: alert once, keep what we knew (a
+                    live_failed = True                      # failed read never closes a copy)
+                    why = f"{type(e).__name__}: {e}"[:120]
+                    log.warn("invo_live_read_failed", trader=name, portfolio=p.id, err=why)
+                    if p.id not in self.live_bad:
+                        self.live_bad.add(p.id)
+                        self.out.put(("invo_live", name, False, why))
+                    now_open.update(self.calls.get(p.id, {}))
+                    continue
+                if p.id in self.live_bad:
+                    self.live_bad.discard(p.id)
+                    self.out.put(("invo_live", name, True, ""))
+                self.calls[p.id] = {c.id: c for c in got if c.is_open}
                 now_open.update(self.calls[p.id])
                 continue
             sig = (p.open_count, tuple(sorted(p.open_assets)), p.updated_ms)     # an edit changes updated_ms
@@ -500,7 +521,8 @@ class Watcher:
             self.sig[p.id] = sig
             now_open.update(self.calls.get(p.id, {}))
         before = self.known.get(name)
-        if before is None and any(0 < self.rereads.get(p.id, 0) < REREAD_MAX for p in ports if p.active):
+        if before is None and (live_failed or any(0 < self.rereads.get(p.id, 0) < REREAD_MAX
+                                                  for p in ports if p.active)):
             return                     # a first read with a short call list: take the baseline once it is complete
         self.known[name] = now_open
         if before is None:                                  # baseline: never copy calls opened before we watched

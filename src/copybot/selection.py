@@ -102,7 +102,7 @@ def rebalance(ranking: list[str], followed: dict[str, int], paused: set[str], dr
 class Cache:
     def __init__(self, root: str | os.PathLike):
         self.root = Path(root)
-        for sub in ("fills", "candles"):
+        for sub in ("fills", "candles", "funding"):
             (self.root / sub).mkdir(parents=True, exist_ok=True)
 
     def get(self, rel: str, default=None):
@@ -301,6 +301,24 @@ class Scorer:
     def candles(self, coin: str, start: int, end: int) -> list[hl.Candle]:
         with self._candles_lock:
             return self._candles(coin, start, end)
+
+    def funding(self, coin: str, start: int, end: int) -> list[tuple[int, float]]:
+        """Hourly funding rates of a coin, cached like the candles (20-day chunks: one answer holds 500 hours)."""
+        with self._candles_lock:
+            out: list[tuple[int, float]] = []
+            for s, e in hl.chunk_ranges(start, end, 20 * DAY):
+                rel = f"funding/{coin}_{s}.json"
+                c = self.cache.get(rel)
+                if c is None or (not c.get("closed") and self.now() - c.get("ts", 0) > HOUR):
+                    try:
+                        rates = self.info.funding(coin, s, e, timeout=30)
+                    except Exception as err:
+                        log.warn("funding_failed", coin=coin, err=f"{type(err).__name__}"[:60])
+                        rates = []
+                    c = {"rates": rates, "closed": e < self.now() - HOUR, "ts": self.now()}
+                    self.cache.put(rel, c)
+                out.extend((int(t), float(r)) for t, r in c["rates"])
+            return sorted(set(out))
 
     def _candles(self, coin: str, start: int, end: int) -> list[hl.Candle]:
         out: list[hl.Candle] = []

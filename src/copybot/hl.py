@@ -103,6 +103,11 @@ class Candle:
     v: float
 
 
+def parse_funding(lst: list | None) -> list[tuple[int, float]]:
+    """fundingHistory -> [(hour ms, hourly rate)] (positive: longs pay shorts). Fixture funding_history.json."""
+    return sorted((int(x["time"]), float(x["fundingRate"])) for x in (lst or []) if x.get("fundingRate") is not None)
+
+
 def parse_candles(lst: list) -> list[Candle]:
     return [Candle(int(c["t"]), float(c["o"]), float(c["h"]), float(c["l"]), float(c["c"]), float(c["v"]))
             for c in lst]
@@ -360,6 +365,11 @@ class Info:
         if end_ms:
             body["endTime"] = int(end_ms)
         return parse_fills(self.post(body, BULK, timeout))
+
+    def funding(self, coin: str, start_ms: int, end_ms: int, timeout: float = 20.0) -> list[tuple[int, float]]:
+        """Hourly funding rates (at most 500 per answer: ask for <= 20 days at a time)."""
+        return parse_funding(self.post({"type": "fundingHistory", "coin": coin, "startTime": int(start_ms),
+                                        "endTime": int(end_ms)}, BULK, timeout))
 
     def candles(self, coin: str, start_ms: int, end_ms: int, interval: str = "1h", timeout: float = 20.0) -> list[Candle]:
         return parse_candles(self.post({"type": "candleSnapshot", "req": {
