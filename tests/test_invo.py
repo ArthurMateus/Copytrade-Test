@@ -303,11 +303,13 @@ def test_bot_copies_an_invo_call_and_closes_it_when_the_trader_does(invo_env, mo
         assert "ETH" not in bot.st.positions                                      # the main wallet never copies it
         assert all("ETH" not in w.st.positions for w in bot.sides if not w.own_leaders)    # HL side wallets: no
         # the fixed-risk Invo wallets copy the same call: r% of their own 300$ at our 3% stop (100$ at 1%, 500$ at 5%)
-        assert {w.name for w in bot.invo_extra} == {f"invo_risk_{r:g}pct" for r in (1, 2, 5, 10, 20)}
+        tests = {"invo_stop_3pct", "invo_stop_8pct", "invo_stop_trader"}            # the stop-loss test wallets
+        assert {w.name for w in bot.invo_extra} == {f"invo_risk_{r:g}pct" for r in (1, 2, 5, 10, 20)} | tests
         assert wait_for(lambda: all("ETH" in w.st.positions for w in bot.invo_extra), timeout=10)
         for w in bot.invo_extra:
             q = w.st.positions["ETH"]
-            assert q.size * q.entry_px == pytest.approx(300 * w.risk_pct / 100 / 0.03, rel=0.05), w.name
+            want = 60.0 if w.name in tests else 300 * w.risk_pct / 100 / 0.03
+            assert q.size * q.entry_px == pytest.approx(want, rel=0.05), w.name
             assert "invo:nicush" in w.st.followed
         dc.say("/invowallets")
         assert wait_for(lambda: any("Invo wallets" in m["text"] and "invo 20% risk" in m["text"]
@@ -724,5 +726,38 @@ def test_one_normal_stop_does_not_drop_an_invo_trader(invo_env, monkeypatch):
         r = bot.invo.cfg.risk
         assert bot.invo.st.equity0 * r.leader_pause_dd_pct / 100 / r.max_leaders == pytest.approx(12.0)
         assert bot.cfg.risk.leader_pause_dd_pct == 10.0                  # the Hyperliquid wallets keep their rule
+    finally:
+        stop_bot(bot, th)
+
+
+def test_the_stop_loss_test_wallets_differ_only_in_their_exit(invo_env, monkeypatch):
+    """Owner request 2026-10-12: 3%, 8% and "stop whenever the trader stops" side by side. Same call, same 60$ copy;
+    a 4% drop stops only the 3% wallet, the trader's close closes the others."""
+    hl, dc, data, cdir, f, tok = invo_env
+    pid = f.add_user("nicush")[0]
+    bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
+    try:
+        dc.say("/invofollow nicush")
+        assert wait_for(lambda: bot.invo_watch.known.get("nicush") is not None, timeout=10)
+        w = {x.name: x for x in bot.invo_extra}
+        s3, s8, tr = w["invo_stop_3pct"], w["invo_stop_8pct"], w["invo_stop_trader"]
+        cid = f.open_call(pid, "ETH", long=True, leverage=10, size=0.05, entry=3000.0)
+        assert wait_for(lambda: all("ETH" in x.st.positions for x in (s3, s8, tr)), timeout=10)
+        e = {x.name: x.st.positions["ETH"].entry_px for x in (s3, s8, tr)}
+        assert s3.st.positions["ETH"].stop_px == pytest.approx(e["invo_stop_3pct"] * 0.97)
+        assert s8.st.positions["ETH"].stop_px == pytest.approx(e["invo_stop_8pct"] * 0.92)
+        assert tr.st.positions["ETH"].stop_px == pytest.approx(e["invo_stop_trader"] * 0.70)    # emergency only
+        assert tr.st.positions["ETH"].leverage == 3
+        hl.mids["ETH"] = 3000.0 * 0.96
+        assert wait_for(lambda: "ETH" not in s3.st.positions, timeout=10)
+        assert s3.st.closed[-1]["reason"] == "stop"
+        time.sleep(1.5)
+        assert "ETH" in s8.st.positions and "ETH" in tr.st.positions
+        f.close_call(pid, cid, price=2880.0)
+        assert wait_for(lambda: "ETH" not in s8.st.positions and "ETH" not in tr.st.positions, timeout=10)
+        assert tr.st.closed[-1]["reason"] == "leader_close"
+        dc.say("/invowallets")
+        assert wait_for(lambda: any("trader's exit only" in m["text"] or "trader&#x27;s exit only" in m["text"]
+                                    for m in dc.sent + dc.edits))
     finally:
         stop_bot(bot, th)

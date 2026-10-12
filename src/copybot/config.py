@@ -215,6 +215,11 @@ class Invo:
     # best (audit 2026-10-11: the shared rule, 10% of equity / 7 = 4.29$, dropped an 80%-win trader on ONE normal
     # stop of a 140$ copy). 4% = two stops of the largest copy (max_risk_pct 2%); 5 losses in a row still drop it
     pause_dd_pct: float = 4.0
+    # stop-loss test wallets (owner request 2026-10-12: "3%, 8% and stop whenever the trader stops"): the same traders
+    # and calls, every copy the same notional, only the exit differs. 0 = no stop of ours: the copy closes when the
+    # trader closes (a far emergency stop, EMERGENCY_STOP_PCT in runner.py, so no position is ever stop-less)
+    stop_tests_pct: list = field(default_factory=lambda: [3.0, 8.0, 0.0])
+    stop_test_usd: float = 60.0
     # Invo ticker -> Hyperliquid coin when the names differ (checked against Hyperliquid's list at each use)
     aliases: dict = field(default_factory=dict)
     # the daily Invo search (copybot/invo_scorer.py): Invo's Discover rankings -> each trader's closed calls ->
@@ -369,6 +374,7 @@ CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
     ("invo", "trail_after_pct"): (0.0, 50.0),
     ("invo", "trail_pct"): (0.2, 20.0),
     ("invo", "pause_dd_pct"): (0.5, 50.0),
+    ("invo", "stop_test_usd"): (10.0, 300.0),
     ("invo", "review_hours"): (1.0, 168.0),
     ("invo", "min_portfolio_win_rate"): (0.0, 1.0),
     ("invo", "min_portfolio_pnl_pct"): (-100.0, 100000.0),
@@ -476,6 +482,10 @@ def validate(cfg: Config) -> None:
             raise ConfigError(f"{sec}.{key}: at most 8 distinct numbers in (0, 50]")
     if cfg.sol.drop_rank <= cfg.sol.join_rank:
         raise ConfigError("sol.drop_rank must be > join_rank")
+    st = cfg.invo.stop_tests_pct
+    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v <= 25 for v in st) \
+            or len(set(st)) != len(st) or len(st) > 5:
+        raise ConfigError("invo.stop_tests_pct: at most 5 distinct stops in [0, 25] (0 = the trader's exit only)")
     if not all(isinstance(k, str) and isinstance(v, str) and v for k, v in cfg.invo.aliases.items()):
         raise ConfigError('invo.aliases: Invo ticker = "Hyperliquid coin", e.g. { MATIC = "POL" }')
 

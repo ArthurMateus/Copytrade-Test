@@ -24,6 +24,9 @@ from copybot.broker import PaperBroker
 from copybot.detector import Detector, Move
 from copybot.invo import PREFIX as INVO, InvoClient, Watcher as InvoWatcher
 from copybot.invo_scorer import InvoScorer, reason_text as invo_reason
+
+EMERGENCY_STOP_PCT = 30.0   # the "trader's exit only" stop test wallet: never reached by a normal trade (a liquidation
+                            # guard at 3x leverage), so the copy lives exactly as long as the trader's call
 from copybot.feed import Clock, Feed
 from copybot.ledger import Ledger, now_ms
 from copybot.positions import PositionManager
@@ -123,6 +126,16 @@ class Bot:
                                label=f"invo {r:g}% risk", own_leaders=True)
                 self.invo_extra.append(x)
                 self.sides.append(x)
+            stop_tests = []
+            for s in cfg.invo.stop_tests_pct:      # stop-loss test wallets (owner request 2026-10-12)
+                name = f"invo_stop_{s:g}pct" if s > 0 else "invo_stop_trader"
+                x = SideWallet(cfg, 20.0, self.data, side_broker, self.health, self.mids, self.assets,
+                               alts_ok=lambda leader: True, score_of=self.score_of, name=name, own_leaders=True,
+                               label=f"invo test: {s:g}% stop" if s > 0 else "invo test: trader's exit only",
+                               sizer=self.invo_test_size)
+                stop_tests.append((x, s))
+                self.invo_extra.append(x)
+                self.sides.append(x)
             for x in self.invo_wallets():
                 # a call is first seen up to a round (poll_s + the reads) after it was posted: entries may be that
                 # old (still fail closed)
@@ -131,6 +144,12 @@ class Bot:
                 # the leader pause compares a trader's copy drawdown with leader_pause_dd_pct of (equity /
                 # max_leaders): set so the limit is invo.pause_dd_pct of the whole wallet
                 x.cfg.risk.leader_pause_dd_pct = cfg.invo.pause_dd_pct * max(1, x.cfg.risk.max_leaders)
+            for x, s in stop_tests:
+                # only the exit differs: our stop at s% (0: the far emergency stop, with the liquidation buffer the
+                # gate needs for it at 3x), every copy stop_test_usd; limits of a 20% wallet so none clamps a copy
+                x.cfg.risk.stop_pct = s if s > 0 else EMERGENCY_STOP_PCT
+                if s <= 0:
+                    x.cfg.risk.liq_buffer_mult = 1.0
             # watched: the followed traders AND the unfollowed ones we still hold a copy of (their exits are copied);
             # rebuilt on the trading thread (invo_refresh_watched), read by the watcher thread
             self.invo_watched: frozenset[str] = frozenset()
@@ -528,6 +547,10 @@ class Bot:
         notional = max(min(share * self.cfg.invo.size_mult * equity, self.invo_cap(equity)),
                        self.cfg.risk.min_notional_usd * 1.05)
         return notional / px if px > 0 else 0.0
+
+    def invo_test_size(self, m, px: float, equity: float) -> float:
+        """The stop-loss test wallets: every copy the same notional (invo.stop_test_usd), whatever the stop."""
+        return self.cfg.invo.stop_test_usd / px if px > 0 else 0.0
 
     def invo_cap(self, equity: float) -> float:
         """The most notional one Invo calls copy may hold (also after the trader's adds): invo.max_risk_pct of our

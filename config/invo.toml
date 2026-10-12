@@ -18,6 +18,11 @@ trail_after_pct = 0.0     # once a copy is this % in profit the stop follows the
 trail_pct = 3.0           # ... this % behind the best price, never below break-even                [0.2, 20]
 pause_dd_pct = 4.0        # drop a trader once its copies lost this % of the wallet from their best [0.5, 50]
                           # (4% = two stops of the biggest copy; 5 losing copies in a row also drop it)
+# Stop-loss test (owner request 2026-10-12): one wallet per stop, same traders and calls, every copy stop_test_usd,
+# only the exit differs (/invowallets compares them). 0 = no stop of ours: the copy closes when the trader closes
+# (a 30% emergency stop at 3x leverage stays, so no position is ever without a stop). [] = no test wallets.
+stop_tests_pct = [3.0, 8.0, 0.0]
+stop_test_usd = 60.0      # notional of every test copy                                            [10, 300]
 aliases = {}              # Invo ticker -> Hyperliquid coin when the names differ, e.g. { MATIC = "POL" }
 # Portfolio filter: the daily search scores EACH portfolio with our rules and only passing ones are copied. A paper
 # portfolio must also have at least this win rate, this % return (Invo's P&L of the portfolio) and this many closed

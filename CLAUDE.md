@@ -294,6 +294,13 @@ instances on the same wallet.
   (blocked + paper floors). `/invofollow` queues a quiet check (`add_q` item `(name, True)`) that says which
   portfolios are copied. Picks show the best portfolio, "real money" and Invo's score.
 
+## Invo stop-loss test wallets (owner request 2026-10-12: "3%, 8% and stop whenever the trader stops")
+- `invo.stop_tests_pct` [3, 8, 0] -> `invo_stop_3pct`, `invo_stop_8pct`, `invo_stop_trader` in `Bot.invo_extra` (same
+  traders and calls as every Invo wallet, /invowallets compares them). Every copy = `invo.stop_test_usd` (60$,
+  `Bot.invo_test_size`) so only the exit differs; limits of a 20% wallet so none clamps. 0 = no stop of ours: the copy
+  closes with the trader's close; `EMERGENCY_STOP_PCT` (30%) with `liq_buffer_mult` 1 (3x leverage) keeps every
+  position stop-protected (ledger/boot_repair need a valid stop). The trader's own stop works through its close.
+
 ## Account value = perp + spot stablecoins (bug found live 2026-10-10)
 - `/hyperadd` scored with the PERP account value only while the daily search used the leaderboard value, so the same
   wallet passed the search (3% drop) and failed /hyperadd (max_drawdown>30%): 0x6d73... had 1,481$ in perps and
