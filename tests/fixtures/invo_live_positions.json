@@ -1,0 +1,92 @@
+{
+ "success": true,
+ "data": {
+  "portfolioId": "3d2338f8-4a38-4d9a-8b5b-0bca6800f7cd",
+  "pnlUnit": "cash",
+  "isOpen": true,
+  "positions": [
+   {
+    "id": "fc6a51d7-c5f9-4f8d-b74f-49c63f1f6345",
+    "shortId": "rmWFfnqf1P",
+    "assetSymbol": "LDO",
+    "side": "long",
+    "leverage": 5,
+    "marginMode": "cross",
+    "entryPx": "0.44520454176686336",
+    "markPx": "0.44279",
+    "exitPx": null,
+    "pnl": {
+     "net": {
+      "pct": "-2.9892215592680302",
+      "cash": "-32.87299399999909"
+     },
+     "gross": {
+      "pct": "-2.7117218495580246",
+      "cash": "-29.82128099999909"
+     },
+     "fees": {
+      "usdc": "3.051713",
+      "coin": {
+       "symbol": "LDO",
+       "value": "6.854631329430744"
+      }
+     }
+    },
+    "holdTimeSeconds": null,
+    "size": {
+     "pct": "0.4454344866726299",
+     "cash": "1093.7532906000001",
+     "coin": "12350.7"
+    },
+    "openedAt": "2026-10-07T22:32:28.183Z",
+    "closedAt": null,
+    "isOpen": true,
+    "closeReason": null,
+    "takeProfitPx": null,
+    "stopLossPx": null
+   },
+   {
+    "id": "964547d2-5ff9-4ea5-bd78-f2a5163fd56e",
+    "shortId": "VCSQSLrkoV",
+    "assetSymbol": "TAO",
+    "side": "long",
+    "leverage": 5,
+    "marginMode": "cross",
+    "entryPx": "292.9660951138758",
+    "markPx": null,
+    "exitPx": "294.96120916587375",
+    "pnl": {
+     "net": {
+      "pct": "2.028842356358625",
+      "cash": "343.603926"
+     },
+     "gross": {
+      "pct": "3.405025505122825",
+      "cash": "402.951142"
+     },
+     "fees": {
+      "usdc": "59.347216",
+      "coin": {
+       "symbol": "TAO",
+       "value": "0.2019870011163172"
+      }
+     }
+    },
+    "holdTimeSeconds": 253,
+    "size": {
+     "pct": "0.6130203055515384",
+     "cash": "1488.0203079999999",
+     "coin": "0"
+    },
+    "openedAt": "2026-10-12T01:10:51.638Z",
+    "closedAt": "2026-10-12T01:15:05.619Z",
+    "isOpen": false,
+    "closeReason": "manual",
+    "takeProfitPx": null,
+    "stopLossPx": null
+   }
+  ],
+  "nextCursor": "2026-10-10T01:06:41.385Z|3800faa6-9ddd-4423-9347-8b2ef80da556",
+  "sync": "ready"
+ }
+}

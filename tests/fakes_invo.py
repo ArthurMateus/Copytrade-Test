@@ -42,6 +42,11 @@ class FakeInvo:
         self.throttle = False                            # every API call answers 429 (rate limited)
         self.blank_users: set[str] = set()               # user ids whose portfolio list answers 200 without the list
         self.hidden: set[str] = set()                    # open call ids counted by the portfolio but not listed yet
+        # real-money ("live") portfolios: shapes recorded 2026-10-12 from /dex/portfolio/... (read-only views)
+        self.live: dict[str, dict] = {}                  # portfolio id -> overview numbers
+        self.live_pos: dict[str, list[dict]] = {}        # portfolio id -> raw positions (open and closed), newest first
+        self.score_top: list[dict] = []                  # /analytics/score/user/top items
+        self.invo_score: dict[str, float] = {}           # portfolio id -> Invo's score (0-10)
         self._n = itertools.count(1)
         self.lock = threading.Lock()
         fake = self
@@ -62,6 +67,10 @@ class FakeInvo:
                 path = self.path.split("/v1_0", 1)[-1]
                 fake.requests.append((path, {}))
                 auth = self.headers.get("Authorization", "")
+                if path.startswith("/dex/"):
+                    if not fake.valid_access or auth != "Bearer " + fake.valid_access:
+                        return self._send(401, {"status": "error", "message": "Missing authorization header"})
+                    return self._send(200, fake.answer_get(path))
                 if path == "/auth/refresh_token":
                     if fake.refuse_refresh or auth != "Bearer " + fake.valid_refresh:
                         return self._send(401, {"status": "error", "message": "invalid refresh token"})
@@ -117,6 +126,11 @@ class FakeInvo:
             out = []
             for pid in self.portfolios.get(body["userId"], []):
                 p = copy.deepcopy(tmpl)
+                if pid in self.live:                     # /v1_0 shows a live portfolio empty
+                    p.update(id=pid, ownerId=body["userId"], type="live", title="Live Portfolio", winRate=0,
+                             closedPositions=0, plSnapshot=0, openTrades={"count": 0, "assets": []})
+                    out.append(p)
+                    continue
                 with self.lock:
                     open_calls = list(self.calls.get(pid, []))
                 p.update(id=pid, ownerId=body["userId"],
@@ -139,6 +153,16 @@ class FakeInvo:
             r = copy.deepcopy(fixture("invo_investments_open.json"))
             r["investmentsTicker"] = calls
             return r
+        if path == "/analytics/score/user/top":
+            return {"currentUser": None, "items": copy.deepcopy(self.score_top)}
+        if path == "/analytics/score/portfolio":
+            sc = self.invo_score.get(body.get("portfolioId"))
+            if sc is None:
+                return {"status": "pending", "detail": None}
+            part = {"score": 10, "scoreCap": 10, "isCapped": False, "capReason": None}
+            return {"status": "complete", "detail": {"portfolioId": body["portfolioId"], "score": sc, "baseScore": sc,
+                                                     "isCapped": False, "profitability": part, "risk": part,
+                                                     "consistency": part, "trackRecord": part}}
         if path in ("/trending/get_portfolios_pl", "/trending/get_users"):
             # rankings: real portfolio objects (as get_users_portfolios returns them), each with its trader as owner
             pg = body.get("params") or body
@@ -152,6 +176,74 @@ class FakeInvo:
                 out.append(q)
             return {"portfolios": out} if path.endswith("portfolios_pl") else {"users": [q["owner"] for q in out]}
         return {"success": False}
+
+    def answer_get(self, path: str) -> dict:
+        from urllib.parse import parse_qs, urlsplit
+        u = urlsplit(path)
+        q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        parts = u.path.strip("/").split("/")          # dex portfolio live <id> overview | dex portfolio position <id> list
+        pid = parts[3] if len(parts) > 3 else ""
+        with self.lock:
+            pos = copy.deepcopy(self.live_pos.get(pid, []))
+            ov = dict(self.live.get(pid, {}))
+        if u.path.endswith("/overview"):
+            op = [p for p in pos if p["isOpen"]]
+            return {"success": True, "data": {"portfolioId": pid, "status": "active", "pnlUnit": "cash",
+                                              "allTimePnl": {"pct": str(ov.get("pnl", 120.0)), "cash": "1000"},
+                                              "equity": {"value": "10000", "unit": "cash"},
+                                              "closedCount": ov.get("closed", 300),
+                                              "accuracyPct": ov.get("accuracy", 75.0),
+                                              "openTrades": {"count": len(op),
+                                                             "assets": sorted({p["assetSymbol"] for p in op})},
+                                              "sync": "ready"}}
+        if u.path.endswith("/list"):
+            want = q.get("isOpen") == "true"
+            sel = [p for p in pos if p["isOpen"] == want]
+            start, limit = int(q.get("cursor") or 0), int(q.get("limit") or 50)
+            page = sel[start: start + limit]
+            nxt = str(start + limit) if start + limit < len(sel) else None
+            return {"success": True, "data": {"portfolioId": pid, "pnlUnit": "cash", "isOpen": want,
+                                              "positions": page, "nextCursor": nxt, "sync": "ready"}}
+        return {"success": False}
+
+    def add_live(self, name: str, **numbers) -> str:
+        """A real-money portfolio for `name` (created if needed): /v1_0 lists it empty, /dex/ serves its trades."""
+        if name not in self.users:
+            self.add_user(name, 0)
+        uid = self.users[name]
+        pid = f"live-{name}-{next(self._n)}"
+        self.portfolios[uid].append(pid)
+        self.live[pid] = numbers
+        self.live_pos[pid] = []
+        return pid
+
+    def live_open(self, pid: str, ticker: str, long: bool = True, leverage: float = 5, pct: float = 2.0,
+                  entry: float = 3000.0, coins: float = 1.0, created_ms: int | None = None) -> str:
+        """A real position opens: size.pct = % of the trader's equity, size.coin = its amount."""
+        cid = f"pos-{next(self._n)}"
+        p = {"id": cid, "shortId": cid, "assetSymbol": ticker, "side": "long" if long else "short",
+             "leverage": leverage, "marginMode": "cross", "entryPx": str(entry), "markPx": str(entry), "exitPx": None,
+             "pnl": {}, "holdTimeSeconds": None, "size": {"pct": str(pct), "cash": "100", "coin": str(coins)},
+             "openedAt": iso(created_ms if created_ms is not None else int(time.time() * 1000)), "closedAt": None,
+             "isOpen": True, "closeReason": None, "takeProfitPx": None, "stopLossPx": None}
+        with self.lock:
+            self.live_pos[pid].insert(0, p)
+        return cid
+
+    def live_set(self, pid: str, cid: str, **kw) -> None:
+        with self.lock:
+            for p in self.live_pos[pid]:
+                if p["id"] == cid:
+                    if "coins" in kw:
+                        p["size"]["coin"] = str(kw.pop("coins"))
+                    if "pct" in kw:
+                        p["size"]["pct"] = str(kw.pop("pct"))
+                    p.update(kw)
+
+    def live_close(self, pid: str, cid: str, price: float, reason: str = "manual",
+                   closed_ms: int | None = None) -> None:
+        self.live_set(pid, cid, isOpen=False, exitPx=str(price), closeReason=reason,
+                      closedAt=iso(closed_ms if closed_ms is not None else int(time.time() * 1000)))
 
     def add_user(self, name: str, n_portfolios: int = 1) -> list[str]:
         uid = f"uid-{name}"

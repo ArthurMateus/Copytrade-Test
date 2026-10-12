@@ -210,6 +210,64 @@ def test_a_rotated_token_that_cannot_be_saved_is_kept_and_saved_later(fake, tmp_
     assert tok.read_text(encoding="utf-8") == fake.valid_refresh
 
 
+# ---- real-money ("live") portfolios and Invo's score (owner request 2026-10-12) -----------------------------------
+def test_live_portfolio_and_score_answers_are_parsed_from_the_recorded_shapes():
+    p = invo.parse_portfolios(fixture("invo_users_portfolios.json"))[0]
+    live = invo.parse_live_overview(fixture("invo_live_overview.json"), invo.Portfolio(**{**p.__dict__, "kind": "live"}))
+    assert (round(live.win_rate, 1), live.closed, round(live.pnl_pct), live.open_count) == (77.9, 656, 1548, 10)
+    calls, cursor = invo.parse_live_positions(fixture("invo_live_positions.json"), "pf")
+    ldo, tao = calls
+    assert (ldo.ticker, ldo.long, ldo.leverage, ldo.is_open, ldo.units) == ("LDO", True, 5.0, True, 12350.7)
+    assert ldo.committed == pytest.approx(0.004454, rel=1e-3)       # size.pct is a % of the trader's equity
+    assert (tao.is_open, tao.closing_price, tao.reason_closed) == (False, pytest.approx(294.9612), "manual")
+    assert cursor.startswith("2026-10-10")
+    top, = invo.parse_score_top(fixture("invo_score_top.json"))
+    assert (top["user"], top["kind"], top["score"]) == ("luxora", "paper", 9.86)
+    assert invo.parse_portfolio_score(fixture("invo_score_portfolio.json")) == {"score": 9.86, "capped": False,
+                                                                               "caps": []}
+    assert invo.parse_portfolio_score({"status": "pending", "detail": None}) == {}
+
+
+def test_watcher_copies_a_real_money_portfolio_and_follows_its_size_by_coins(fake, tmp_path):
+    """Live portfolios are empty in /v1_0: the watcher reads their open positions from the read-only /dex/ view. Their
+    size.pct moves with the price, so adds and trims are seen in the coin amount."""
+    tok = tmp_path / "invo.token"
+    tok.write_text("REFRESH0", encoding="utf-8")
+    pid = fake.add_live("realguy", accuracy=78.0, pnl=1500.0, closed=650)
+    out = queue.Queue()
+    w = invo.Watcher(invo.InvoClient(fake.url, str(tok), min_interval_s=0), out, lambda: {"realguy"}, 0, 180,
+                     threading.Event())
+    drain = lambda: [out.get_nowait() for _ in range(out.qsize())]
+    w.round()
+    assert [k for k, *_ in drain()] == ["invo_baseline"]
+    assert w.stats["realguy"][0].win_rate == 78.0 and w.stats["realguy"][0].closed == 650   # real numbers
+    cid = fake.live_open(pid, "ETH", long=False, leverage=5, pct=2.0, entry=3000.0, coins=1.0)
+    w.round()
+    (k, _, c), = drain()
+    assert (k, c.id, c.long, c.committed) == ("invo_open", cid, False, pytest.approx(0.02))
+    fake.live_set(pid, cid, pct=2.6)                       # the price moved: not a resize
+    w.round()
+    assert drain() == []
+    fake.live_set(pid, cid, coins=1.5, pct=3.9)            # 1.5x the coins: an add
+    w.round()
+    (k, _, old, new), = drain()
+    assert k == "invo_resize" and new.committed == pytest.approx(0.03)
+    fake.live_close(pid, cid, price=2900.0)
+    w.round()
+    (k, _, c), = drain()                                   # confirmed in its closed positions at once
+    assert (k, c.closing_price, c.reason_closed) == ("invo_close", 2900.0, "manual")
+
+
+def test_the_bot_never_calls_an_invo_trading_endpoint():
+    """Invo's /dex/ API also places real trades (/dex/position/create, /dex/mimic/copy ...): only the read-only
+    portfolio views may appear in our code."""
+    import re
+    from pathlib import Path
+    for f in Path("src/copybot").rglob("*.py"):
+        for path in re.findall(r"/dex/[A-Za-z_/]+", f.read_text(encoding="utf-8")):
+            assert path.startswith("/dex/portfolio/"), f"{f.name}: {path}"
+
+
 # ---- the bot end to end -----------------------------------------------------------------------------------
 @pytest.fixture
 def invo_env(env, tmp_path):

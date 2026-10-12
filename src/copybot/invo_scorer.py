@@ -1,12 +1,16 @@
 """The daily Invo search (owner request 2026-10-09): find Invo traders worth copying with the SAME scoring as the
 Hyperliquid wallets.
 
-Candidates: the usernames on Invo's Discover rankings (trending / this month / all time portfolios, trending users),
-plus the followed traders (always re-checked: a followed trader failing the rules `drop_after_fails` searches in a row
-is dropped). For each one: ALL its portfolios (active or not, whatever their own win rate) -> its closed calls of the last
-`history_days` and its open ones. Judging a trader only on the portfolios that already look good selected on the
-outcome: paper portfolios are free, losers can be left open or abandoned (audit 2026-10-11). The portfolio filter
-still decides what is COPIED; a trader with no portfolio passing it fails `no_copyable_portfolio`.
+Candidates: Invo's score leaderboard (/analytics/score/user/top, 2026-10-12) and Discover rankings (trending / this
+month / all time portfolios, trending users), plus the followed traders (always re-checked: a followed trader failing
+the rules `drop_after_fails` searches in a row is dropped).
+
+Per portfolio (owner request 2026-10-12): EACH portfolio of a trader (paper, or "live" = real money on Hyperliquid,
+read from Invo's read-only /dex/ views) is scored on its own calls of the last `history_days`, and Invo's own score of
+it is kept next to ours (shown only: on the top 100 of 2026-10-12 it had no link with what a copy earned). Only
+portfolios passing OUR rules are copied (`by_portfolio[id]["copy"]`; the owner's paper floors still apply to paper
+ones). The trader passes when at least one portfolio is copyable AND all its portfolios together (active or not) did
+not lose: a good-looking portfolio among losing ones is the bait pattern (audit 2026-10-11, `loses_overall`).
 
 Scoring: every closed call becomes one round trip of synthetic fills (`calls_to_fills`): size = the committed share of
 the portfolio x leverage of a notional `BASE` portfolio, P&L = what that call made minus OUR round-trip cost (a +0.01%
@@ -43,12 +47,14 @@ HOUR = 3_600_000
 BASE = 10_000.0          # notional portfolio the calls' shares are applied to (only ratios matter)
 FILTERS = ("trending", "month", "all_time")
 REQ_GAP_S = 1.0          # extra spacing of the search's own requests (the watcher's polls go first)
-VERSION = 2              # Invo-only scoring changes (2: every portfolio, our cost per call, k-coins): rescore
+VERSION = 3              # Invo-only scoring changes (2: every portfolio, our cost per call, k-coins; 3: per
+                         # portfolio, live portfolios, Invo's score): rescore
 
 REASON_TEXT = {"not_on_hyperliquid": "most calls are on coins Hyperliquid does not list",
                "too_fast": "calls too short to copy", "inactive": "no new call lately",
                "no_calls": "no closed calls lately",
-               "no_copyable_portfolio": "no portfolio passes the copy floors (win rate, return, calls)"}
+               "no_copyable_portfolio": "no portfolio passes the rules (and the copy floors)",
+               "loses_overall": "its portfolios together lose money (only some look good)"}
 
 
 def key_coin(key: str) -> str:
@@ -222,12 +228,14 @@ class InvoScorer:
             self.stop.wait(30)
 
     def handle_adds(self) -> None:
-        """/invoadd: score each requested trader now and publish ("invo_added", name, score or None)."""
+        """/invoadd: score each requested trader now and publish ("invo_added", name, score or None, quiet). An item is
+        a name (/invoadd) or (name, True) (/invofollow: report quietly)."""
         while not self.stop.is_set():
             try:
-                name = self.add_q.get_nowait()
+                item = self.add_q.get_nowait()
             except queue.Empty:
                 return
+            name, quiet = item if isinstance(item, tuple) else (item, False)
             try:
                 s = self.score(name)
             except InvoAuthError:
@@ -238,13 +246,20 @@ class InvoScorer:
             if s is not None:
                 self.scores[name] = s
                 self._save()
-            self.out.put(("invo_added", name, s))
+            self.out.put(("invo_added", name, s, quiet))
 
     def _gap(self) -> None:
         self.stop.wait(REQ_GAP_S)
 
     def discover(self) -> list[str]:
         found: list[str] = []
+        try:                                    # Invo's score leaderboard (one portfolio per trader, top 100)
+            found += [x["user"] for x in self.client.score_top() if x["user"] not in found]
+        except InvoAuthError:
+            raise
+        except Exception as e:
+            log.warn("invo_discover_failed", filter="score", err=str(e)[:120])
+        self._gap()
         for flt in FILTERS:
             for page in range(1, self.c.discover_pages + 1):
                 try:
@@ -314,24 +329,101 @@ class InvoScorer:
             return None
         now = self.now()
         since = now - self.c.history_days * DAY
-        closed: list[Call] = []
-        opened: list[Call] = []
         ports = self.client.portfolios(u[0])
         self._gap()
-        copyable = sum(1 for p in ports if p.active and not self.skip(name, p))
+        args = (self.coin_of, self.candles_of, self.mids, now, self.params, self.c.min_hl_share, self.c.min_hold_min,
+                self.c.max_idle_days)
+        full: dict[str, dict] = {}
+        per: dict[str, dict] = {}
+        all_closed: list[Call] = []
+        all_open: list[Call] = []
         for p in ports:                         # every portfolio counts, not only the ones that look good
-            if p.open_count:
-                opened += [c for c in self.client.open_calls(p.id) if c.is_open]
-                self._gap()
-            page = 1
+            p, closed, opened = self.read_portfolio(p, since)
+            all_closed += closed
+            all_open += opened
+            if not closed and not opened:
+                continue
+            s = full[p.id] = score_trader(f"{name}/{p.title.strip()[:24]}", closed, opened, *args)
+            inv = self.invo_score(p) if p.active else {}
+            per[p.id] = {"title": p.title.strip(), "kind": p.kind, "active": p.active, "eligible": s["eligible"],
+                         "score": s["score"], "reasons": list(s["reasons"]), "trades": s["trades"],
+                         "win_rate": s["win_rate"], "profit_factor": s["profit_factor"],
+                         "copy_edge_bps": s.get("copy_edge_bps", 0.0), "pnl": s["pnl"],
+                         "invo_score": inv.get("score"), "invo_capped": inv.get("capped", False),
+                         "invo_caps": inv.get("caps", []),
+                         "copy": bool(p.active and s["eligible"] and not self.skip(name, p))}
+        overall = score_trader(name, all_closed, all_open, *args,
+                               (len(ports), sum(1 for x in per.values() if x["copy"]),
+                                sum(1 for p in ports if p.pnl_pct < 0)))
+        return trader_result(overall, full, per)
+
+    def read_portfolio(self, p, since: int):
+        """(portfolio with its real numbers, closed calls since `since`, open calls) of one portfolio."""
+        closed: list[Call] = []
+        opened: list[Call] = []
+        if p.kind == "live":                    # real money: Invo's read-only position views
+            try:
+                p = self.client.live_overview(p)
+            except InvoAuthError:
+                raise
+            except Exception as e:
+                log.warn("invo_live_overview_failed", portfolio=p.id, err=f"{type(e).__name__}: {e}"[:120])
+            self._gap()
+            opened = [c for c in self.client.live_calls(p.id, True)[0] if c.is_open]
+            self._gap()
+            cursor = None
             while len(closed) < self.c.max_calls and not self.stop.is_set():
-                batch = self.client.closed_calls(p.id, page)
+                batch, cursor = self.client.live_calls(p.id, False, 100, cursor)
                 self._gap()
                 closed += [c for c in batch if c.closed_ms and c.closed_ms >= since]
-                if len(batch) < 50 or min(c.created_ms for c in batch) < since:
+                if not cursor or not batch or min(c.closed_ms or 0 for c in batch) < since:
                     break
-                page += 1
-        closed = closed[: self.c.max_calls]
-        return score_trader(name, closed, opened, self.coin_of, self.candles_of, self.mids, now, self.params,
-                            self.c.min_hl_share, self.c.min_hold_min, self.c.max_idle_days,
-                            (len(ports), copyable, sum(1 for p in ports if p.pnl_pct < 0)))
+            return p, closed[: self.c.max_calls], opened
+        if p.open_count:
+            opened = [c for c in self.client.open_calls(p.id) if c.is_open]
+            self._gap()
+        page = 1
+        while len(closed) < self.c.max_calls and not self.stop.is_set():
+            batch = self.client.closed_calls(p.id, page)
+            self._gap()
+            closed += [c for c in batch if c.closed_ms and c.closed_ms >= since]
+            if len(batch) < 50 or min(c.created_ms for c in batch) < since:
+                break
+            page += 1
+        return p, closed[: self.c.max_calls], opened
+
+    def invo_score(self, p) -> dict:
+        """Invo's own score of the portfolio ({} when unknown); kept for the reports, never decides."""
+        try:
+            return self.client.portfolio_score(p.id)
+        except InvoAuthError:
+            raise
+        except Exception as e:
+            log.warn("invo_score_read_failed", portfolio=p.id, err=f"{type(e).__name__}: {e}"[:120])
+            return {}
+        finally:
+            self._gap()
+
+
+def trader_result(overall: dict, full: dict[str, dict], per: dict[str, dict]) -> dict:
+    """A trader's result from its portfolios' scores: the best COPYABLE portfolio's score (else the best one's, failed),
+    eligible only when one is copyable and its portfolios together did not lose. Pure."""
+    copyable = [pid for pid, x in per.items() if x["copy"]]
+    pool = copyable or list(per)
+    best = max(pool, key=lambda pid: (full[pid]["score"], full[pid]["trades"], pid)) if pool else None
+    res = dict(full[best]) if best else dict(overall)
+    reasons = [] if copyable else list(res.get("reasons", []))
+    if not copyable and "no_copyable_portfolio" not in reasons:
+        reasons.append("no_copyable_portfolio")
+    if overall["trades"] and overall["pnl"] <= 0:
+        reasons.append("loses_overall")
+    res.update(address=overall.get("address", res.get("address")), by_portfolio=per, best_portfolio=best,
+               portfolios=overall.get("portfolios", len(per)), copyable_portfolios=len(copyable),
+               losing_portfolios=overall.get("losing_portfolios", 0), reasons=reasons, iv=VERSION,
+               overall={k: overall[k] for k in ("trades", "pnl", "win_rate", "profit_factor")},
+               calls=overall.get("calls", res.get("calls", 0)), idle_days=overall.get("idle_days", 0.0),
+               open_calls=overall.get("open_calls", 0))
+    res["eligible"] = not reasons
+    if reasons:
+        res["score"] = 0.0
+    return res

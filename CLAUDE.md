@@ -272,6 +272,28 @@ instances on the same wallet.
   `copyable_portfolios`, `losing_portfolios` per score. Not done yet (owner to decide): a walk-forward test of the
   selection, ranking by a shrunk lower bound, skipping calls whose price already moved past the trader's entry.
 
+## Invo per-portfolio scoring, real-money portfolios, Invo's score (owner request 2026-10-12)
+- Study first (top 100 of Invo's new score leaderboard, 180 d of calls replayed on HL 1h candles, 0.11% cost): Invo's
+  score had ~0 rank correlation with copy results (also on the next 30 days); a trader's own results persisted when
+  following its exits (0.45) but much less with our 3% stop (0.15); 18 of 100 were "live" = real money on Hyperliquid
+  through Invo, 9 of the 11 best. Bait seen: 3 calls = 76-87% of the profit, minute-long calls, many weak portfolios.
+- Invo API (base WITHOUT /v1_0, `InvoClient.root`): POST /analytics/score/user/top {"listType":"all"},
+  /analytics/score/portfolio {"portfolioId"}; live portfolios are EMPTY in /v1_0 and read from GET
+  /dex/portfolio/live/<id>/overview and /dex/portfolio/position/<id>/list?isOpen=&limit=&cursor= (fixtures
+  `invo_live_*.json`, `invo_score_*.json`). Other /dex/ endpoints place trades: `test_the_bot_never_calls_an_invo_
+  trading_endpoint` allows only /dex/portfolio/.
+- Live in the watcher: overview every `OVERVIEW_S` (300 s, real accuracy/return/closed as the Portfolio's numbers),
+  open positions every round; `Call.units` (coins) detects adds/trims (size.pct drifts with the price); closes are
+  confirmed in its closed positions. A live call's size is its % of the trader's equity (often < 1%: the trader-size
+  wallet then copies the 10$ minimum; the fixed-risk wallets size normally).
+- Search (`invo_scorer.VERSION` 3): candidates also from the score leaderboard; EACH portfolio scored on its own calls
+  (`score_trader`) with Invo's score kept beside it (`by_portfolio[id]`: kind, eligible, score, invo_score, copy);
+  `trader_result`: score = best copyable portfolio's, eligible only if one is copyable and all portfolios together
+  did not lose (`loses_overall`). `Bot.invo_skip`: blocked; trader loses overall; scored portfolio failing our rules;
+  a scored live one passes; else the owner's floors (`invo_floors`). The scorer's own filter is `invo_floor`
+  (blocked + paper floors). `/invofollow` queues a quiet check (`add_q` item `(name, True)`) that says which
+  portfolios are copied. Picks show the best portfolio, "real money" and Invo's score.
+
 ## Account value = perp + spot stablecoins (bug found live 2026-10-10)
 - `/hyperadd` scored with the PERP account value only while the daily search used the leaderboard value, so the same
   wallet passed the search (3% drop) and failed /hyperadd (max_drawdown>30%): 0x6d73... had 1,481$ in perps and

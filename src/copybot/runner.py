@@ -160,12 +160,14 @@ class Bot:
         # the daily Invo search: the same scoring as the wallets, on the Invo traders' calls (copybot/invo_scorer.py)
         self.invo_search: InvoScorer | None = None
         self.invo_scores: dict = {}
+        self.invo_reviewed = False         # a full Invo search has finished (cached or this run): picks shown daily
         if self.invo is not None and cfg.invo.search:
             self.invo_search = InvoScorer(cfg, self.invo_watch.client, self.scorer.params, self.invo_trade_coin,
                                           self.scorer.candles, self.mids,
                                           lambda: {a[len(INVO):] for a in self.invo.st.followed}, self.q,
-                                          self.data / "cache", self.stop, skip=self.invo_skip)
+                                          self.data / "cache", self.stop, skip=self.invo_floor)
             self.invo_scores = dict(self.invo_search.scores)
+            self.invo_reviewed = bool(self.invo_scores)
         self.picks = picks.Store(self.data / "picks.json")
         self.sol_booted = False
         self.invo_search_pending = False   # /invosearch: re-pick the Invo traders when the search ends
@@ -340,20 +342,48 @@ class Bot:
         out = {}
         for name, ports in list((self.invo_watch.stats if self.invo_watch else {}).items()):
             ok = [p for p in ports if not self.invo_skip(name, p)]
-            rows = [(f"✅ {p.title.strip()[:24] or 'portfolio'}",
-                     f"{p.win_rate:.0f}% win · {p.pnl_pct:+,.0f}% · {p.closed} calls · {p.open_count} open")
-                    for p in ok[:4]]
+            rows = []
+            for p in ok[:4]:
+                ps = self.invo_portfolio_score(name, p.id) or {}
+                extra = (f" · ours {ps['score']:.0f}/100" if ps.get("eligible") else "") + (
+                    f" · Invo {ps['invo_score']:.1f}/10" if ps.get("invo_score") is not None else "")
+                rows.append((f"{'💵' if p.kind == 'live' else '✅'} {p.title.strip()[:24] or 'portfolio'}",
+                             f"{p.win_rate:.0f}% win · {p.pnl_pct:+,.0f}% · {p.closed} calls · {p.open_count} open"
+                             + (" · real money" if p.kind == "live" else "") + extra))
             if not ok and ports:
                 rows = [("Portfolios", f"🚫 none passes the rules yet ({len(ports)} skipped)")]
             out[INVO + name] = rows
         return out
 
+    def invo_portfolio_score(self, name: str, pid: str) -> dict | None:
+        """The daily search's result for one portfolio of `name` (None = not scored per portfolio yet)."""
+        return ((self.invo_scores.get(name.lower()) or {}).get("by_portfolio") or {}).get(pid)
+
     def invo_skip(self, name: str, p) -> str | None:
-        """Why calls in this portfolio of `name` are not copied (None = they are): blocked by the owner, or below
-        the portfolio floors (invo.min_portfolio_win_rate / min_portfolio_pnl_pct / min_portfolio_calls)."""
-        c = self.cfg.invo
+        """Why calls in this portfolio of `name` are not copied (None = they are). Owner request 2026-10-12: a
+        portfolio scored by the search is copied only if it passes OUR rules (per portfolio); a real-money ("live")
+        one that passes needs nothing else, a paper one must also pass the owner's paper floors. Not scored yet:
+        the floors, on its own numbers (a live portfolio's accuracy and real return)."""
         if self.invo is not None and p.id in self.invo.st.blocked.get(INVO + name.lower(), {}):
             return "blocked by you"
+        ps = self.invo_portfolio_score(name, p.id)
+        if ps is not None and "loses_overall" in (self.invo_scores.get(name.lower()) or {}).get("reasons", []):
+            return "its portfolios together lose money"
+        if ps is not None and not ps.get("eligible"):
+            return "fails our rules: " + ", ".join(invo_reason(r) for r in ps.get("reasons", [])[:2])
+        if ps is not None and p.kind == "live":
+            return None
+        return self.invo_floors(p)
+
+    def invo_floor(self, name: str, p) -> str | None:
+        """The search's view of a portfolio before its own score: blocked, or a paper one below the owner's floors."""
+        if self.invo is not None and p.id in self.invo.st.blocked.get(INVO + name.lower(), {}):
+            return "blocked by you"
+        return None if p.kind == "live" else self.invo_floors(p)
+
+    def invo_floors(self, p) -> str | None:
+        """The owner's portfolio floors (invo.min_portfolio_win_rate / min_portfolio_pnl_pct / min_portfolio_calls)."""
+        c = self.cfg.invo
         if p.closed < c.min_portfolio_calls:
             return f"only {p.closed} closed calls"
         if p.win_rate < c.min_portfolio_win_rate * 100:
@@ -450,8 +480,12 @@ class Bot:
                                 "/invounfollow one first.")
         w.rec({"ev": "follow", "leader": leader})
         self.sync_invo_extras()
+        if self.invo_search is not None:           # judge its portfolios one by one now (owner request 2026-10-12)
+            self.invo_search.add_q.put((name.lower(), True))
         self.ui.send(f"➕ 🧾 <b>Following</b> @{cardfmt.esc(name)} on Invo · calls they open from now on are copied in "
-                     "every Invo wallet (/invowallets compares them). Calls already open are not copied.")
+                     "every Invo wallet (/invowallets compares them). Calls already open are not copied."
+                     + (" Checking its portfolios one by one now: only the ones passing the rules are copied."
+                        if self.invo_search is not None else ""))
 
     def invo_block(self, c) -> None:
         """/invoblock <user> <portfolio>: stop copying that portfolio of a followed trader (its open copies still follow
@@ -908,7 +942,7 @@ class Bot:
         elif kind == "invo_drop":
             self.invo_drop(item[1], item[2])
         elif kind == "invo_added":
-            self.on_invo_added(item[1], item[2])
+            self.on_invo_added(*item[1:])
         elif kind == "invo_review":
             self.on_invo_review(*item[1:])
         elif kind == "invo_unknown":
@@ -957,7 +991,7 @@ class Bot:
         sc = self.invo_scores
         rank = [k for _, k in sorted((-v.get("score", 0), k) for k, v in sc.items() if v.get("eligible"))][:n]
         followed = {a[len(INVO):] for a in self.invo.st.followed} if self.invo else set()
-        es = [picks.Entry(k, "@" + k, sc[k]["score"], (
+        es = [picks.Entry(k, "@" + k, sc[k]["score"], self.invo_best_text(sc[k]) + (
             f"{sc[k].get('win_rate', 0) * 100:.0f}% win · PF {min(sc[k].get('profit_factor', 0), 99):.1f} · "
             f"{sc[k].get('trades', 0)} calls · typical bet {sc[k].get('exposure', 0) * 100:.0f}% of their "
             f"portfolio (leverage included) · median hold {sc[k].get('median_hold_min', 0) / 60:.1f} h"),
@@ -976,6 +1010,17 @@ class Bot:
         else:
             status = f"{len(sc)} traders checked · {n_el} pass every rule"
         return picks.Book("invo", "🧾 Invo", es, status, gone)
+
+    @staticmethod
+    def invo_best_text(s: dict) -> str:
+        """"portfolio X (real money, Invo 9.5/10) · 2 of 3 copied · " for a per-portfolio search result."""
+        best = (s.get("by_portfolio") or {}).get(s.get("best_portfolio") or "")
+        if not best:
+            return ""
+        tags = (["real money"] if best.get("kind") == "live" else []) + (
+            [f"Invo {best['invo_score']:.1f}/10"] if best.get("invo_score") is not None else [])
+        return (f"{cardfmt.esc(best.get('title') or 'portfolio')}" + (f" ({', '.join(tags)})" if tags else "")
+                + f" · {s.get('copyable_portfolios', 0)} of {len(s['by_portfolio'])} portfolios copied · ")
 
     def send_picks(self, daily: bool) -> None:
         """The picks report, one message per book. Daily: it becomes the baseline the next report compares with."""
@@ -996,7 +1041,8 @@ class Bot:
     def on_invo_review(self, n_cands: int, scores: dict, fails: dict) -> None:
         """An Invo search ended: followed traders failing the rules `drop_after_fails` searches in a row leave
         (not a blacklist: /invofollow brings one back)."""
-        first = not self.invo_scores
+        first = not self.invo_reviewed       # (a /invofollow check may have scored one trader already)
+        self.invo_reviewed = True
         self.invo_scores = scores
         w = self.invo
         if w is None:
@@ -1021,9 +1067,20 @@ class Bot:
             self.invo_search_pending = False
             self.invo_repick(n_cands)
 
-    def on_invo_added(self, name: str, s: dict | None) -> None:
-        """/invoadd result: follow at once if it passes every rule and a slot is free, else say why not."""
+    def on_invo_added(self, name: str, s: dict | None, quiet: bool = False) -> None:
+        """/invoadd result: follow at once if it passes every rule and a slot is free, else say why not. `quiet`
+        (after /invofollow): only record it and say which of its portfolios are copied."""
         w, who = self.invo, f"@{cardfmt.esc(name)}"
+        if quiet:
+            if s is not None:
+                self.invo_scores = {**self.invo_scores, name: s}
+                per = s.get("by_portfolio") or {}
+                yes = [x["title"] or "portfolio" for x in per.values() if x.get("copy")]
+                return self.ui.send(f"🧾 {who}: " + (f"copying {', '.join(cardfmt.esc(t) for t in yes)}" if yes else
+                                    "no portfolio passes the rules, so nothing is copied for now")
+                                    + f" ({len(per)} with calls checked).")
+            return
+
         if s is None:
             return self.ui.send(f"⚠️ 🧾 /invoadd {who}: no Invo user by that name, or its calls could not be read.")
         self.invo_scores = {**self.invo_scores, name: s}

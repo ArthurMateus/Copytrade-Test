@@ -18,6 +18,19 @@ API (recorded from the web app 2026-10-09, tests/fixtures/invo_*.json), all POST
   /v1_0/trending/get_portfolios_pl       {"filter": "trending"|"month"|"all_time", "params": {"page", "size"}}
   /v1_0/trending/get_users               {"page", "size"}       (the Discover rankings; the daily Invo search reads
                                          only the usernames in them: `usernames`)
+Invo score and real-money portfolios (read 2026-10-12 from the app's code and answers; base WITHOUT /v1_0):
+  POST /analytics/score/user/top        {"listType": "all"} -> {"items": [{"rank", "user": {"id", "username"},
+                                         "topPortfolio": {"id", "title", "type", "score" (0-10), "percentPnl"}}]}
+  POST /analytics/score/portfolio       {"portfolioId"} -> {"detail": {"score", "profitability"/"risk"/"consistency"/
+                                         "trackRecord": {"score", "capReason"}, "isCapped", "netReturn30d"...}}
+  "live" portfolios trade real money on Hyperliquid through Invo; /v1_0 shows them empty (0 calls, 0% win), their
+  trades are only in (GET, read only; the other /dex/ endpoints place trades and are never called):
+  GET /dex/portfolio/live/<id>/overview  -> {"data": {"accuracyPct", "allTimePnl": {"pct"}, "closedCount",
+                                         "openTrades": {"count", "assets"}, "equity"}}
+  GET /dex/portfolio/position/<id>/list?isOpen=true|false&limit=&cursor= -> {"data": {"positions": [{"id",
+                                         "assetSymbol", "side", "leverage", "entryPx", "exitPx", "size": {"pct" (% of
+                                         equity), "coin"}, "openedAt", "closedAt", "closeReason", "takeProfitPx",
+                                         "stopLossPx"}], "nextCursor"}}
 Auth (from the app's code): requests carry "Authorization: Bearer <access token>"; GET /v1_0/auth/refresh_token with
 "Authorization: Bearer <refresh token>" answers {"accessToken", "refreshToken", "success", "error"}. Every refresh
 hands out a NEW refresh token (written back to INVO_TOKEN_FILE), which is why the bot needs its own account: two
@@ -30,6 +43,7 @@ import os
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -42,6 +56,7 @@ RESIZE_MIN = 0.02         # a committed size change smaller than 2% is noise, no
 VANISH_S = 10.0           # a call missing from our reads but not in the trader's closed list is only treated as closed
                           # (deleted) after this long: one incomplete answer must not close a copy (audit 2026-10-11)
 REREAD_MAX = 5            # an open-call list shorter than the portfolio's count is read again this many rounds
+OVERVIEW_S = 300.0        # a live portfolio's numbers (accuracy, return) are re-read this often; its positions every round
 
 
 class InvoAuthError(Exception):
@@ -88,6 +103,7 @@ class Call:
     entry_size: float = 0.0  # entrySize / 100: the share of the portfolio the trader COMMITTED (fixed unless it adds
                              # or trims; positionSize drifts with the price, e.g. PUMP 4.3% -> 3.2% as it fell)
     added: bool = False      # changes.isAdded
+    units: float = 0.0       # live portfolios: the position's size in coins (its % of equity drifts with the price)
 
     @property
     def committed(self) -> float:
@@ -147,6 +163,53 @@ def parse_portfolios(body: dict) -> list[Portfolio]:
     return out
 
 
+def parse_live_positions(body: dict, portfolio_id: str, owner: str = "") -> tuple[list[Call], str | None]:
+    """A live (real-money) portfolio's positions as Calls (size.pct is a % of the trader's equity) + the next cursor."""
+    d = (body or {}).get("data") or {}
+    out = []
+    for p in d.get("positions") or []:
+        entry, created = _f(p.get("entryPx")), _ms(p.get("openedAt"))
+        if not p.get("id") or not p.get("assetSymbol") or not entry or entry <= 0 or created is None:
+            continue
+        size = p.get("size") or {}
+        share = (_f(size.get("pct")) or 0.0) / 100
+        out.append(Call(p["id"], portfolio_id, owner, str(p["assetSymbol"]).upper(), p.get("side") == "long",
+                        float(p.get("leverage") or 1), share, entry, _f(p.get("takeProfitPx")),
+                        _f(p.get("stopLossPx")), created, bool(p.get("isOpen")), _ms(p.get("closedAt")),
+                        _f(p.get("exitPx")), p.get("closeReason"), share, False, _f(size.get("coin")) or 0.0))
+    return out, d.get("nextCursor") or None
+
+
+def parse_live_overview(body: dict, p: Portfolio) -> Portfolio:
+    """A live portfolio with its real numbers (accuracy, % return, closed trades, open trades) instead of /v1_0's zeros."""
+    d = (body or {}).get("data") or {}
+    ot = d.get("openTrades") or {}
+    return replace(p, win_rate=_f(d.get("accuracyPct")) or 0.0, closed=int(d.get("closedCount") or 0),
+                   pnl_pct=_f((d.get("allTimePnl") or {}).get("pct")) or 0.0, open_count=int(ot.get("count") or 0),
+                   open_assets=tuple(ot.get("assets") or ()))
+
+
+def parse_score_top(body: dict) -> list[dict]:
+    """Invo's score leaderboard: [{"user", "portfolio", "title", "kind", "score"}] (one portfolio per trader)."""
+    out = []
+    for it in (body or {}).get("items") or []:
+        u, p = it.get("user") or {}, it.get("topPortfolio") or {}
+        if u.get("username") and p.get("id"):
+            out.append({"user": str(u["username"]).lower(), "portfolio": p["id"], "title": p.get("title") or "",
+                        "kind": p.get("type") or "", "score": _f(p.get("score"))})
+    return out
+
+
+def parse_portfolio_score(body: dict) -> dict:
+    """Invo's score of one portfolio: {"score", "capped", "caps": [reasons]} ({} when not computed)."""
+    d = (body or {}).get("detail") or {}
+    if d.get("score") is None:
+        return {}
+    caps = [str((d.get(k) or {}).get("capReason")) for k in ("profitability", "risk", "consistency", "trackRecord")
+            if (d.get(k) or {}).get("capReason")]
+    return {"score": float(d["score"]), "capped": bool(d.get("isCapped")), "caps": caps}
+
+
 def parse_calls(body: dict) -> list[Call]:
     """Crypto ticker calls only (Invo also has business/property/material investments: ignored)."""
     out = []
@@ -172,6 +235,8 @@ class InvoClient:
 
     def __init__(self, base: str, token_file: str, min_interval_s: float = 1.0, timeout_s: float = 20.0):
         self.base, self.token_file = base.rstrip("/"), token_file
+        # the score and live-portfolio endpoints live at the API root, without /v1_0
+        self.root = self.base[: -len("/v1_0")] if self.base.endswith("/v1_0") else self.base
         self.min_interval, self.timeout = min_interval_s, timeout_s
         self._lock = threading.Lock()
         self._auth_lock = threading.Lock()     # the watcher and the search share one login: one refresh at a time
@@ -239,7 +304,15 @@ class InvoClient:
         return True
 
     # ---- requests ------------------------------------------------------------------------------------
-    def post(self, path: str, body: dict) -> dict:
+    def post(self, path: str, body: dict, root: bool = False) -> dict:
+        return self._call((self.root if root else self.base) + path, json.dumps(body).encode(), path)
+
+    def get(self, path: str, params: dict | None = None) -> dict:
+        """GET at the API root (read-only /dex/ portfolio views)."""
+        q = ("?" + urllib.parse.urlencode(params)) if params else ""
+        return self._call(self.root + path + q, None, path)
+
+    def _call(self, url: str, data: bytes | None, path: str) -> dict:
         for attempt in range(2):
             with self._auth_lock:
                 if not self._access:
@@ -250,9 +323,10 @@ class InvoClient:
                 if wait > 0:
                     time.sleep(wait)
                 self._last = time.monotonic()
-            req = urllib.request.Request(self.base + path, json.dumps(body).encode(),
-                                         {"Authorization": "Bearer " + used,
-                                          "Content-Type": "application/json", "User-Agent": "copybot-paper/1"})
+            headers = {"Authorization": "Bearer " + used, "User-Agent": "copybot-paper/1"}
+            if data is not None:
+                headers["Content-Type"] = "application/json"
+            req = urllib.request.Request(url, data, headers, method="POST" if data is not None else "GET")
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as r:
                     return json.loads(r.read())
@@ -288,6 +362,22 @@ class InvoClient:
         return parse_calls(self.post("/investments/get_investments",
                                      {"portfolioId": portfolio_id, "isOpen": False,
                                       "params": {"page": page, "size": size}}))
+
+    def live_overview(self, p: Portfolio) -> Portfolio:
+        return parse_live_overview(self.get(f"/dex/portfolio/live/{p.id}/overview"), p)
+
+    def live_calls(self, portfolio_id: str, is_open: bool, limit: int = 50,
+                   cursor: str | None = None) -> tuple[list[Call], str | None]:
+        params = {"isOpen": "true" if is_open else "false", "limit": limit}
+        if cursor:
+            params["cursor"] = cursor
+        return parse_live_positions(self.get(f"/dex/portfolio/position/{portfolio_id}/list", params), portfolio_id)
+
+    def score_top(self) -> list[dict]:
+        return parse_score_top(self.post("/analytics/score/user/top", {"listType": "all"}, root=True))
+
+    def portfolio_score(self, portfolio_id: str) -> dict:
+        return parse_portfolio_score(self.post("/analytics/score/portfolio", {"portfolioId": portfolio_id}, root=True))
 
     def ranking(self, flt: str, page: int, size: int = 20) -> list[str]:
         """Usernames on one page of a Discover portfolio ranking ("trending", "month", "all_time")."""
@@ -327,6 +417,7 @@ class Watcher:
         self.ports: dict[str, Portfolio] = {}              # portfolio id -> its last read
         self.missing: dict[str, float] = {}                # call id -> when it first went missing (not confirmed closed)
         self.rereads: dict[str, int] = {}                  # portfolio id -> reads in a row that returned too few calls
+        self.overviews: dict[str, tuple[float, Portfolio]] = {}   # live portfolio id -> (read at, with real numbers)
 
     def start(self) -> None:
         threading.Thread(target=self.run, name="invo", daemon=True).start()
@@ -384,11 +475,15 @@ class Watcher:
                 return
             uid = self.uids[name] = found[0]
         now_open: dict[str, Call] = {}
-        ports = self.client.portfolios(uid)
+        ports = [self.live_stats(p) if p.kind == "live" else p for p in self.client.portfolios(uid)]
         self.stats[name] = [p for p in ports if p.active]
         for p in ports:
             self.ports[p.id] = p
             if not p.active:
+                continue
+            if p.kind == "live":                            # real money: its open positions, read every round
+                self.calls[p.id] = {c.id: c for c in self.client.live_calls(p.id, True)[0] if c.is_open}
+                now_open.update(self.calls[p.id])
                 continue
             sig = (p.open_count, tuple(sorted(p.open_assets)), p.updated_ms)     # an edit changes updated_ms
             if p.open_count and (self.sig.get(p.id) != sig or p.id not in self.calls):
@@ -428,8 +523,15 @@ class Watcher:
         for cid, c in before.items():
             if cid in now_open:
                 self.missing.pop(cid, None)
-                if c.exposure > 0 and abs(now_open[cid].exposure - c.exposure) / c.exposure > RESIZE_MIN:
-                    self.out.put(("invo_resize", name, c, now_open[cid]))
+                new = now_open[cid]
+                if c.units > 0 and new.units > 0:           # live: the coin amount says if it was added to / trimmed
+                    if abs(new.units - c.units) / c.units > RESIZE_MIN:
+                        new = now_open[cid] = replace(new, entry_size=c.committed * new.units / c.units)
+                        self.out.put(("invo_resize", name, c, new))
+                    else:                                   # unchanged: keep the size committed at the start
+                        now_open[cid] = replace(new, entry_size=c.entry_size, size=c.size)
+                elif c.exposure > 0 and abs(new.exposure - c.exposure) / c.exposure > RESIZE_MIN:
+                    self.out.put(("invo_resize", name, c, new))
                 continue
             done = self.closed_call(c)
             if done is not None:                            # confirmed: the trader closed it (real price and reason)
@@ -444,9 +546,27 @@ class Watcher:
             else:                                           # maybe one incomplete answer: keep it, look again
                 self.known[name][cid] = c
 
+    def live_stats(self, p: Portfolio) -> Portfolio:
+        """A live portfolio with its real numbers (read at most every OVERVIEW_S; a failed read keeps the last)."""
+        at, seen = self.overviews.get(p.id, (0.0, None))
+        if seen is not None and time.monotonic() - at < OVERVIEW_S:
+            return replace(seen, active=p.active, title=p.title)
+        try:
+            got = self.client.live_overview(p)
+        except InvoAuthError:
+            raise
+        except Exception as e:
+            log.warn("invo_live_overview_failed", portfolio=p.id, err=f"{type(e).__name__}: {e}"[:120])
+            return seen or p
+        self.overviews[p.id] = (time.monotonic(), got)
+        return got
+
     def closed_call(self, c: Call) -> Call | None:
         """The call as it appears in its portfolio's closed calls (newest page), or None (not there, or not readable)."""
         try:
+            port = self.ports.get(c.portfolio_id)
+            if port is not None and port.kind == "live":
+                return next((x for x in self.client.live_calls(c.portfolio_id, False)[0] if x.id == c.id), None)
             return next((x for x in self.client.closed_calls(c.portfolio_id, 1) if x.id == c.id), None)
         except InvoAuthError:
             raise

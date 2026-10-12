@@ -19,8 +19,10 @@ trail_pct = 3.0           # ... this % behind the best price, never below break-
 pause_dd_pct = 4.0        # drop a trader once its copies lost this % of the wallet from their best [0.5, 50]
                           # (4% = two stops of the biggest copy; 5 losing copies in a row also drop it)
 aliases = {}              # Invo ticker -> Hyperliquid coin when the names differ, e.g. { MATIC = "POL" }
-# Portfolio filter: a trader's calls are only copied from its portfolios with at least this win rate, this % return
-# (Invo's P&L of the portfolio) and this many closed calls. /invoblock <user> <portfolio> blocks one by hand.
+# Portfolio filter: the daily search scores EACH portfolio with our rules and only passing ones are copied. A paper
+# portfolio must also have at least this win rate, this % return (Invo's P&L of the portfolio) and this many closed
+# calls; a real-money ("live") one that passes our rules does not. Not scored yet: these floors on its own numbers.
+# /invoblock <user> <portfolio> blocks one by hand.
 min_portfolio_win_rate = 0.80   # 0.80 = 80%                                                          [0, 1]
 min_portfolio_pnl_pct = 100.0   # the portfolio's total return on Invo, % (100 = doubled)                          [-100, 100000]
 min_portfolio_calls = 20        # fewer closed calls: too new to judge, skipped                         [0, 10000]

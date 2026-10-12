@@ -1,0 +1,38 @@
+{
+ "success": true,
+ "data": {
+  "portfolioId": "3d2338f8-4a38-4d9a-8b5b-0bca6800f7cd",
+  "status": "active",
+  "pnlUnit": "cash",
+  "pnl24h": {
+   "pct": "20.17872995084628",
+   "cash": "12275.051719999885"
+  },
+  "allTimePnl": {
+   "pct": "1548.2768862430132567",
+   "cash": "307472.30683900000264"
+  },
+  "equity": {
+   "value": "245654.5716402199",
+   "unit": "cash"
+  },
+  "avgPnl": {
+   "pct": "9.0747053650736",
+   "cash": "466.58008425"
+  },
+  "avgHoldTime": {
+   "seconds": 105767
+  },
+  "closedCount": 656,
+  "accuracyPct": 77.89634146341463,
+  "openTrades": {
+   "count": 10,
+   "assets": [
+    "LDO",
+    "PUMP",
+    "HYPE"
+   ]
+  },
+  "sync": "ready"
+ }
+}

@@ -262,3 +262,61 @@ def test_invoadd_checks_a_trader_now_and_follows_it_if_it_passes(search_env, mon
         assert wait_for(lambda: all("invo:steady" in w.st.followed for w in bot.invo_extra))
     finally:
         stop_bot(bot, th)
+
+
+def test_each_portfolio_is_scored_and_only_passing_ones_are_copied():
+    """Owner request 2026-10-12: a trader is judged per portfolio. Its best COPYABLE portfolio gives its score; a
+    trader whose portfolios together lose fails even when one looks good (the bait pattern)."""
+    good = invo_scorer.score_trader("t/A", history(), [], lambda t: t, lambda c, a, b: [], {"ETH": 3000.0}, NOW,
+                                    PARAMS, 0.5, 15.0, 14.0)
+    bad = invo_scorer.score_trader("t/B", history(win=0.004, loss=-0.02), [], lambda t: t, lambda c, a, b: [],
+                                   {"ETH": 3000.0}, NOW, PARAMS, 0.5, 15.0, 14.0)
+    per = {"A": {"copy": True, "title": "A"}, "B": {"copy": False, "title": "B"}}
+    overall = {"trades": 120, "pnl": 10.0, "win_rate": 0.6, "profit_factor": 1.5, "address": "t"}
+    r = invo_scorer.trader_result(overall, {"A": good, "B": bad}, per)
+    assert r["eligible"] and r["best_portfolio"] == "A" and r["score"] == good["score"] and r["address"] == "t"
+    assert r["copyable_portfolios"] == 1 and r["by_portfolio"] is per
+    lost = invo_scorer.trader_result({**overall, "pnl": -5.0}, {"A": good, "B": bad}, per)
+    assert not lost["eligible"] and lost["reasons"] == ["loses_overall"] and lost["score"] == 0.0
+    none = invo_scorer.trader_result(overall, {"A": good, "B": bad}, {**per, "A": {"copy": False}})
+    assert not none["eligible"] and "no_copyable_portfolio" in none["reasons"]
+
+
+def test_a_real_money_portfolio_is_found_on_invos_leaderboard_scored_and_copied_alone(search_env, monkeypatch):
+    """End to end: Invo's score leaderboard brings a trader with a paper portfolio that fails our rules and a real-money
+    one that passes; /invofollow copies the real-money portfolio only."""
+    hl, dc, data, cdir, f, tok = search_env
+    paper = f.add_user("realguy")[0]
+    live = f.add_live("realguy", accuracy=70.0, pnl=900.0, closed=400)
+    now = int(time.time() * 1000)
+    for i in range(45):
+        start = now - 150 * DAY + int(i * 145 * DAY / 45)
+        f.add_closed(paper, "ETH", True, 2, 0.01, 3000.0, 3000.0 * (0.985 if i % 2 else 1.004), start,
+                     start + 4 * 3_600_000)
+        cid = f.live_open(live, "ETH", True, 5, 10.0, 3000.0, 1.0, created_ms=start)
+        f.live_close(live, cid, 3000.0 * (0.99 if i % 3 == 2 else 1.02), closed_ms=start + 4 * 3_600_000)
+    f.score_top = [{"rank": 1, "user": {"id": f.users["realguy"], "username": "realguy"},
+                    "topPortfolio": {"id": live, "title": "Live Portfolio", "type": "live", "score": 9.1}}]
+    f.invo_score[live] = 9.1
+    monkeypatch.setenv("INVO_TOKEN_FILE", str(tok))
+    monkeypatch.setattr(invo_scorer, "REQ_GAP_S", 0.0)
+    bot, th = start_bot((hl, dc, data, cdir))
+    text = lambda: " ".join(m["text"] for m in dc.sent + dc.edits)
+    try:
+        assert wait_for(lambda: "realguy" in bot.invo_scores, timeout=60)
+        s = bot.invo_scores["realguy"]
+        assert s["eligible"], s["reasons"]
+        assert s["best_portfolio"] == live and s["by_portfolio"][live]["copy"]
+        assert s["by_portfolio"][live]["invo_score"] == 9.1 and s["by_portfolio"][live]["kind"] == "live"
+        assert not s["by_portfolio"][paper]["copy"]
+        assert wait_for(lambda: "real money, Invo 9.1/10" in text(), timeout=30)     # in the picks
+        dc.say("/invofollow realguy")
+        assert wait_for(lambda: "copying Live Portfolio" in text(), timeout=60)
+        assert wait_for(lambda: bot.invo_watch.known.get("realguy") is not None, timeout=10)
+        f.open_call(paper, "SOL", long=True, leverage=5, size=0.05, entry=150.0)   # fails our rules: not copied
+        f.live_open(live, "ETH", True, 5, 10.0, 3000.0, 1.0)
+        assert wait_for(lambda: "ETH" in bot.invo.st.positions, timeout=10)
+        time.sleep(2)
+        assert "SOL" not in bot.invo.st.positions
+    finally:
+        stop_bot(bot, th)

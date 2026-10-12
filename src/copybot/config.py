@@ -221,7 +221,8 @@ class Invo:
     # the SAME scoring as Hyperliquid wallets (scoring.full_score) plus Invo gates; results in the daily picks
     # portfolio filter (owner request 2026-10-10): a followed trader's calls are only copied from its portfolios with
     # at least this win rate, this % return (Invo's plSnapshot) and this many closed calls; /invoblock adds manual
-    # blocks. The search scores EVERY portfolio of a trader (2026-10-11) and only needs one passing these
+    # blocks. Since 2026-10-12 the search scores each portfolio with our rules: a scored portfolio is copied only if
+    # it passes them; these floors then still apply to PAPER portfolios (real-money "live" ones skip them)
     min_portfolio_win_rate: float = 0.80     # owner 2026-10-10: at least 80% wins ...
     min_portfolio_pnl_pct: float = 100.0     # ... and at least doubled (+100%)
     min_portfolio_calls: int = 20
