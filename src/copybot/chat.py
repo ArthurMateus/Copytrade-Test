@@ -65,6 +65,7 @@ class Card:
     want: str = ""            # text we want shown
     last_edit: float = 0.0
     final: bool = False
+    buttons: list = field(default_factory=list)   # [(custom id, label, style)]: a question (Discord buttons)
 
 
 @dataclass
@@ -103,9 +104,10 @@ class ChatUI:
         with self.lock:
             self.cards[key] = Card(key, msg_id)
 
-    def set_card(self, key: str, text: str, new: bool = False) -> None:
+    def set_card(self, key: str, text: str, new: bool = False, buttons: list | None = None) -> None:
         """Show `text` in the card `key`; creates the message if needed. new=True posts a fresh message
-        (e.g. a new /status request) and abandons the old one."""
+        (e.g. a new /status request) and abandons the old one. `buttons` [(custom id, label, style)] makes it a
+        question; a click comes back to on_command as Command("/button", custom id)."""
         if not self.enabled:
             return
         with self.lock:
@@ -113,6 +115,8 @@ class ChatUI:
             if c is None or new:
                 c = self.cards[key] = Card(key, None)
             c.want = text
+            if buttons is not None:
+                c.buttons = list(buttons)
         self.wake.set()
 
     def final_card(self, key: str, text: str) -> None:
@@ -121,7 +125,7 @@ class ChatUI:
         with self.lock:
             c = self.cards.get(key) or Card(key, None)
             self.cards[key] = c
-            c.want, c.final = text, True
+            c.want, c.final, c.buttons = text, True, []      # a final card never keeps its buttons
         self.wake.set()
 
     def has_card(self, key: str) -> bool:
@@ -189,7 +193,7 @@ class ChatUI:
                 continue
             if c.msg_id is None:
                 try:
-                    res = self._write("sendMessage", {"text": c.want})
+                    res = self._write("sendMessage", {"text": c.want, "buttons": c.buttons})
                 except ChatError as e:
                     log.error(f"{self.name}_send_failed", err=e.desc, card=c.key)
                     continue
@@ -198,7 +202,7 @@ class ChatUI:
             elif c.final or self.clock() - c.last_edit >= self.limits.edit_min_interval_s:
                 want = c.want
                 try:
-                    self._write("editMessageText", {"message_id": c.msg_id, "text": want})
+                    self._write("editMessageText", {"message_id": c.msg_id, "text": want, "buttons": c.buttons})
                     c.text = want
                 except ChatError as e:
                     if "not modified" in e.desc:

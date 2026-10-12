@@ -282,6 +282,10 @@ def md_to_card(md: str) -> str:
     return "".join(out)
 
 
+def _buttons(rows) -> list:
+    return [(b["custom_id"], b["label"]) for r in rows or [] for b in r.get("components", [])]
+
+
 class FakeDiscord:
     """Loopback Discord: REST (/api/v10/...) and a Gateway websocket that says hello, accepts identify, answers
     heartbeats and can push slash-command interactions."""
@@ -290,6 +294,7 @@ class FakeDiscord:
                  app="1110001"):
         self.token, self.channel, self.owner, self.guild, self.app = token, channel, owner, guild, app
         self.messages: dict[int, dict] = {}     # id -> embed
+        self.buttons: dict[int, list] = {}      # id -> [(custom id, label)] of the message's buttons now
         self.sent: list[dict] = []
         self.edits: list[dict] = []
         self.replies: list[dict] = []           # interaction callbacks
@@ -376,7 +381,8 @@ class FakeDiscord:
                 mid = self.next_id
                 self.next_id += 1
                 self.messages[mid] = body["embeds"][0]
-                self.sent.append({**body["embeds"][0], "id": mid, "message_id": mid,
+                self.buttons[mid] = _buttons(body.get("components"))
+                self.sent.append({**body["embeds"][0], "id": mid, "message_id": mid, "buttons": self.buttons[mid],
                                   "text": md_to_card(body["embeds"][0]["description"])})
                 return 200, {"id": str(mid), "channel_id": self.channel}
             if verb == "PATCH" and p.startswith(f"/channels/{self.channel}/messages/"):
@@ -384,7 +390,10 @@ class FakeDiscord:
                 if mid not in self.messages:
                     return 404, {"message": "Unknown Message", "code": 10008}
                 self.messages[mid] = body["embeds"][0]
+                if "components" in body:
+                    self.buttons[mid] = _buttons(body["components"])
                 self.edits.append({**body["embeds"][0], "id": mid, "message_id": mid,
+                                   "buttons": self.buttons.get(mid, []),
                                    "text": md_to_card(body["embeds"][0]["description"])})
                 return 200, {"id": str(mid)}
         return 404, {"message": "404: Not Found", "code": 0}
@@ -442,6 +451,26 @@ class FakeDiscord:
             conns = self._conns[-1:]          # like Discord: only the newest session gets the interaction
         for c in conns:
             c.send(msg)
+
+    def click(self, mid: int, label_start: str, user=None) -> None:
+        """The owner clicks the button of message `mid` whose label starts with `label_start`."""
+        cid = next(c for c, label in self.buttons[mid] if label.startswith(label_start))
+        d = {"id": f"i{self._next()}", "token": "itoken", "type": 3, "channel_id": self.channel,
+             "member": {"user": {"id": user or self.owner}}, "message": {"id": str(mid)},
+             "data": {"custom_id": cid, "component_type": 2}}
+        msg = json.dumps({"op": 0, "t": "INTERACTION_CREATE", "s": self._next(), "d": d})
+        with self.lock:
+            conns = self._conns[-1:]
+        for c in conns:
+            c.send(msg)
+
+    def asked(self, words: str) -> int | None:
+        """The id of the newest message containing `words` that still shows buttons."""
+        with self.lock:
+            for mid in sorted(self.messages, reverse=True):
+                if words in md_to_card(self.messages[mid]["description"]) and self.buttons.get(mid):
+                    return mid
+        return None
 
     def drop(self):
         with self.lock:

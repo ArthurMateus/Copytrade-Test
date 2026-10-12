@@ -262,6 +262,17 @@ def test_agreement_adds_a_boost_and_records_the_backer(rig):
     assert st2.positions["BTC"].backers == p.backers and st2.positions["BTC"].size == p.size and not st2.uncertain
 
 
+def test_a_boost_stays_within_the_copy_cap(rig):
+    """Invo trader-size wallet: its boost (consensus risk scaled x5) could make a copy far bigger than invo_cap."""
+    rig.leader_trades(LEADER, rig.fill(LEADER, "BTC", 1, "B"))
+    p = rig.st.positions["BTC"]
+    s0 = p.size
+    rig.pm.cap = lambda eq: s0 * p.entry_px * 1.5             # room for half a copy more
+    rig.leader_trades(OTHER, rig.fill(OTHER, "BTC", 2, "B"))
+    p = rig.st.positions["BTC"]
+    assert set(p.backers) == {OTHER} and p.size == pytest.approx(s0 * 1.5, rel=0.02)
+
+
 def test_agreement_without_room_still_records_the_backer(rig):
     rig.cfg.risk.consensus_risk_pct = 0.0
     rig.leader_trades(LEADER, rig.fill(LEADER, "ETH", 10, "B"))

@@ -124,6 +124,8 @@ class PositionManager:
         px = self.mids.get(m.coin) or m.px
         eq = self.st.equity(self.mids)
         want = eq * self.cfg.risk.consensus_risk_pct / 100 / max(abs(px - pos.stop_px), 1e-12)
+        if self.cap is not None:   # a capped wallet (Invo trader size): the boost stays within one copy's cap
+            want = min(want, max(self.cap(eq) / px - pos.size, 0.0) if px > 0 else 0.0)
         d = self.gate.check(Order("boost", m.coin, pos.side, want, px, leader=m.leader, fill_time_ms=m.time_ms),
                             self.st, h, self.mids, self.assets.get(m.coin))
         back = {"ev": "back", "coin": m.coin, "pos_id": pos.pos_id, "leader": m.leader, "lpos": abs(m.end_pos),

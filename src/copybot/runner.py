@@ -18,13 +18,14 @@ import sys
 import threading
 import time
 import traceback
+import uuid
 from pathlib import Path
 
 from copybot import config, hl, log, picks, cardfmt
 from copybot.broker import PaperBroker
 from copybot.detector import Detector, Move
 from copybot.invo import PREFIX as INVO, InvoClient, Watcher as InvoWatcher
-from copybot.invo_scorer import InvoScorer, reason_text as invo_reason
+from copybot.invo_scorer import InvoScorer, copy_blockers, reason_text as invo_reason
 
 EMERGENCY_STOP_PCT = 30.0   # "trader's exit" Invo wallets: the farthest stop, only a guard (a normal trade never gets
                             # there), lowered for big copies to just before their liquidation (invo_emergency_stop)
@@ -212,6 +213,9 @@ class Bot:
         self.picks = picks.Store(self.data / "picks.json")
         self.sol_booted = False
         self.invo_search_pending = False   # /invosearch: re-pick the Invo traders when the search ends
+        # questions waiting for the owner's button (owner request 2026-10-12: "ask to drop and make the changes"):
+        # id -> {"kind": "drop" | "repick", ...}; in memory only (after a restart the next search asks again)
+        self.asks: dict[str, dict] = {}
         self.started_s = time.time()     # the daily report waits a few minutes after a start (rankings load first)
         self.ranks: dict[str, int] = {}
         self.ranking: list[str] = []
@@ -408,12 +412,12 @@ class Bot:
         if self.invo is not None and p.id in self.invo.st.blocked.get(INVO + name.lower(), {}):
             return "blocked by you"
         ps = self.invo_portfolio_score(name, p.id)
-        if ps is not None and "loses_overall" in (self.invo_scores.get(name.lower()) or {}).get("reasons", []):
-            return "its portfolios together lose money"
-        if ps is not None and not ps.get("eligible"):
-            return "fails our rules: " + ", ".join(invo_reason(r) for r in ps.get("reasons", [])[:2])
-        if ps is not None and p.kind == "live":
-            return None
+        if ps is not None:              # owner request 2026-10-12: only a loss after our costs or bait stops it
+            hard = copy_blockers(ps.get("reasons"))
+            if hard:
+                return "fails our rules: " + ", ".join(invo_reason(r) for r in hard[:2])
+            if p.kind == "live":
+                return None
         return self.invo_floors(p)
 
     def invo_floor(self, name: str, p) -> str | None:
@@ -515,17 +519,22 @@ class Bot:
             return self.ui.send(f"➖ 🧾 <b>Unfollowed</b> @{cardfmt.esc(name)}"
                                 + (f" · {held} open copy still managed until its stop or its close" if held else ""))
         if leader in w.st.followed:
-            return self.ui.send(f"✅ 🧾 @{cardfmt.esc(name)} is already followed.")
+            if leader not in w.st.picked:
+                w.rec({"ev": "pick", "leader": leader})
+                return self.ui.send(f"✅ 🧾 @{cardfmt.esc(name)} is already followed, and is now your pick: the search "
+                                    "will not drop it.")
+            return self.ui.send(f"✅ 🧾 @{cardfmt.esc(name)} is already followed (your pick).")
         if len(w.st.followed) >= self.cfg.invo.max_traders:
             return self.ui.send(f"⛔ 🧾 Already following {len(w.st.followed)} Invo traders (the maximum): "
                                 "/invounfollow one first.")
-        w.rec({"ev": "follow", "leader": leader})
+        w.rec({"ev": "follow", "leader": leader, "picked": True})   # the owner's pick: the search never drops it
         self.sync_invo_extras()
         if self.invo_search is not None:           # judge its portfolios one by one now (owner request 2026-10-12)
             self.invo_search.add_q.put((name.lower(), True))
-        self.ui.send(f"➕ 🧾 <b>Following</b> @{cardfmt.esc(name)} on Invo · calls they open from now on are copied in "
-                     "every Invo wallet (/invowallets compares them). Calls already open are not copied."
-                     + (" Checking its portfolios one by one now: only the ones passing the rules are copied."
+        self.ui.send(f"➕ 🧾 <b>Following</b> @{cardfmt.esc(name)} on Invo (your pick: the search never drops it) · "
+                     "calls they open from now on are copied in every Invo wallet (/invowallets compares them). "
+                     "Calls already open are not copied."
+                     + (" Checking its portfolios one by one now: only losing or bait portfolios are skipped."
                         if self.invo_search is not None else ""))
 
     def invo_block(self, c) -> None:
@@ -1089,9 +1098,10 @@ class Bot:
             self.picks.save_day(day, books)
         log.info("picks_sent", daily=daily, **{b.key: len(b.entries) for b in books})
 
-    def on_invo_review(self, n_cands: int, scores: dict, fails: dict) -> None:
-        """An Invo search ended: followed traders failing the rules `drop_after_fails` searches in a row leave
-        (not a blacklist: /invofollow brings one back)."""
+    def on_invo_review(self, n_cands: int, scores: dict, fails: dict, scored: list | None = None) -> None:
+        """An Invo search ended. A followed trader read in THIS search whose portfolios have been all skipped
+        `drop_after_fails` searches in a row is proposed for a drop: the owner answers with a button (owner request
+        2026-10-12, after a search dropped every trader). The owner's picks (/invofollow, Keep) are never proposed."""
         first = not self.invo_reviewed       # (a /invofollow check may have scored one trader already)
         self.invo_reviewed = True
         self.invo_scores = scores
@@ -1102,18 +1112,17 @@ class Bot:
             day = picks.local_day(time.time(), self.cfg.discord.utc_offset_hours)
             self.ui.send(picks.render(self.invo_book(self.cfg.picks.top_n), self.picks.prev("invo"), day,
                                       self.cfg.picks.top_n))
+        asked = {a.get("name") for a in self.asks.values() if a["kind"] == "drop"}
         for leader in list(w.st.followed):
             name = leader[len(INVO):]
+            if leader in w.st.picked or name in asked or name not in (scored if scored is not None else scores):
+                continue
             if fails.get(name, 0) >= self.cfg.invo.drop_after_fails:
-                why = ", ".join(invo_reason(r) for r in (scores.get(name) or {}).get("reasons", [])[:3])
-                held = sum(1 for p in w.st.positions.values() if p.leader == leader)
-                w.rec({"ev": "unfollow", "leader": leader,
-                       "reason": f"fails the rules {fails[name]} searches in a row"})
-                self.sync_invo_extras()
-                self.invo_watch.forget(name)
-                self.ui.send(f"➖ 🧾 <b>Dropped</b> @{cardfmt.esc(name)} · fails the rules {fails[name]} searches in a "
-                             f"row ({cardfmt.esc(why)})" + (f" · {held} open copy still managed" if held else "")
-                             + f" · /invofollow {cardfmt.esc(name)} brings it back")
+                why = self.invo_none_copied(scores.get(name) or {})
+                self.ask({"kind": "drop", "name": name},
+                         f"❓ 🧾 <b>Drop @{cardfmt.esc(name)}?</b> None of its portfolios would be copied, "
+                         f"{fails[name]} searches in a row: {cardfmt.esc(why)}. Its open copies keep running either way.",
+                         [("yes", "🗑️ Drop", 4), ("no", "✅ Keep (my pick)", 3)])
         if self.invo_search_pending:
             self.invo_search_pending = False
             self.invo_repick(n_cands)
@@ -1155,6 +1164,62 @@ class Bot:
                      f"{s.get('win_rate', 0) * 100:.0f}% win, PF {min(s.get('profit_factor', 0), 99):.1f}, "
                      f"{s.get('trades', 0)} calls). Calls it opens from now on are copied.")
 
+    def invo_none_copied(self, s: dict) -> str:
+        """Why none of a trader's portfolios is copied, in a few words per portfolio."""
+        out = []
+        for x in (s.get("by_portfolio") or {}).values():
+            hard = copy_blockers(x.get("reasons"))
+            why = (", ".join(invo_reason(r) for r in hard[:2]) if hard else
+                   "not active" if not x.get("active") else "below your floors or blocked")
+            out.append(f"{(x.get('title') or 'portfolio')[:24]}: {why}")
+        return "; ".join(out[:4]) or "no portfolio with calls"
+
+    # ---- questions answered with a button ----------------------------------------------------------
+    def ask(self, what: dict, text: str, buttons: list[tuple[str, str, int]]) -> None:
+        """Post a question with buttons (answer id, label, Discord style); the click comes back as /button."""
+        aid = uuid.uuid4().hex[:10]
+        self.asks[aid] = {**what, "text": text}
+        self.ui.set_card(f"ask:{aid}", text, buttons=[(f"ask:{aid}:{a}", label, st) for a, label, st in buttons])
+
+    def on_button(self, cid: str) -> None:
+        _, aid, ans = (cid.split(":") + ["", ""])[:3]
+        a = self.asks.pop(aid, None)
+        if a is None:
+            return self.ui.send("⌛ That question is no longer open (answered already, or the bot restarted since); "
+                                "the next search asks again if it still applies.")
+        key = f"ask:{aid}"
+        w = self.invo
+        if a["kind"] == "drop":
+            name, leader = a["name"], INVO + a["name"]
+            if w is None or leader not in w.st.followed:
+                return self.ui.final_card(key, a["text"] + "\n➖ Not followed any more: nothing to do.")
+            if ans == "yes":
+                held = sum(1 for p in w.st.positions.values() if p.leader == leader)
+                w.rec({"ev": "unfollow", "leader": leader, "reason": "dropped by you after failed searches"})
+                self.sync_invo_extras()
+                self.invo_watch.forget(name)
+                return self.ui.final_card(key, a["text"] + f"\n➖ <b>Dropped</b> @{cardfmt.esc(name)}"
+                                          + (f" · {held} open copy still managed" if held else "")
+                                          + f" · /invofollow {cardfmt.esc(name)} brings it back")
+            w.rec({"ev": "pick", "leader": leader})
+            return self.ui.final_card(key, a["text"] + f"\n✅ <b>Kept</b> @{cardfmt.esc(name)} as your pick: the search "
+                                      "will not ask about it again (/invounfollow drops it).")
+        if a["kind"] == "repick":
+            if ans != "yes":
+                return self.ui.final_card(key, a["text"] + "\n❌ Kept your Invo traders as they are.")
+            joins = [n for n in a["joins"] if INVO + n not in w.st.followed]
+            drops = [n for n in a["drops"] if INVO + n in w.st.followed and INVO + n not in w.st.picked]
+            for name in drops:
+                w.rec({"ev": "unfollow", "leader": INVO + name, "reason": "not in the best of /invosearch"})
+                self.invo_watch.forget(name)
+            room = self.cfg.invo.max_traders - len(w.st.followed)
+            for name in joins[:max(room, 0)]:
+                w.rec({"ev": "follow", "leader": INVO + name})
+            self.sync_invo_extras()
+            return self.ui.final_card(key, a["text"] + "\n✅ <b>Done</b>: " + (
+                ", ".join([f"➕ @{cardfmt.esc(n)}" for n in joins[:max(room, 0)]]
+                          + [f"➖ @{cardfmt.esc(n)}" for n in drops]) or "nothing left to change"))
+
     def invo_drop(self, leader: str, why: str) -> None:
         """The Invo wallet's copies of this trader hit the leader pause rules (copy drawdown or losing streak, as for
         wallets): drop it at once. Not a blacklist: /invofollow brings it back."""
@@ -1171,27 +1236,27 @@ class Bot:
                      + f" · /invofollow {cardfmt.esc(name)} brings it back")
 
     def invo_repick(self, n_cands: int) -> None:
-        """/invosearch finished: follow the best `invo.max_traders` that pass every rule, drop followed ones outside
-        them (their open copies keep running until they close). Nobody passing changes nothing."""
+        """/invosearch finished: PROPOSE following the best that pass every rule (up to `invo.max_traders` with the
+        owner's picks, which always stay) and dropping the other followed ones; the owner applies it with a button
+        (owner request 2026-10-12). Their open copies keep running until they close. Nobody passing changes nothing."""
         w, sc = self.invo, self.invo_scores
+        picks_ = {a[len(INVO):] for a in w.st.picked if a in w.st.followed}
         best = [k for _, k in sorted((-v.get("score", 0), k) for k, v in sc.items() if v.get("eligible"))]
-        best = best[: self.cfg.invo.max_traders]
+        best = [k for k in best if k not in picks_][: max(self.cfg.invo.max_traders - len(picks_), 0)]
         if not best:
             return self.ui.send(f"🔎 🧾 <b>Invo search finished</b> · {n_cands} traders checked, nobody passes every "
                                 "rule: keeping your current Invo traders.")
         now = {a[len(INVO):] for a in w.st.followed}
-        drops, joins = sorted(now - set(best)), [k for k in best if k not in now]
-        for name in drops:
-            w.rec({"ev": "unfollow", "leader": INVO + name, "reason": "not in the best of /invosearch"})
-            self.invo_watch.forget(name)
-        for name in joins:
-            w.rec({"ev": "follow", "leader": INVO + name})
-        self.sync_invo_extras()
-        self.ui.send(f"🔎 🧾 <b>Invo search finished</b> · {n_cands} traders checked · following the best "
-                     f"{len(best)}: " + ", ".join(f"@{cardfmt.esc(k)} ({sc[k]['score']:.0f})" for k in best)
-                     + (f"\n➕ new: {', '.join('@' + cardfmt.esc(k) for k in joins)}" if joins else "")
-                     + (f"\n➖ dropped: {', '.join('@' + cardfmt.esc(k) for k in drops)} (open copies run until they "
-                        "close)" if drops else ""))
+        drops, joins = sorted(now - set(best) - picks_), [k for k in best if k not in now]
+        head = (f"🔎 🧾 <b>Invo search finished</b> · {n_cands} traders checked · the best that pass every rule: "
+                + ", ".join(f"@{cardfmt.esc(k)} ({sc[k]['score']:.0f})" for k in best))
+        if not joins and not drops:
+            return self.ui.send(head + "\nYou already follow them: nothing to change.")
+        self.ask({"kind": "repick", "joins": joins, "drops": drops},
+                 head + (f"\n➕ follow: {', '.join('@' + cardfmt.esc(k) for k in joins)}" if joins else "")
+                 + (f"\n➖ drop: {', '.join('@' + cardfmt.esc(k) for k in drops)} (open copies run until they close)"
+                    if drops else "") + ("\nYour picks stay." if picks_ else "") + "\n<b>Apply?</b>",
+                 [("yes", "✅ Apply", 3), ("no", "❌ Keep as is", 2)])
 
     # ---- selection ----------------------------------------------------------------------------------
     def on_ranking(self, ranking: list[str], n_scored: int, scores: dict) -> None:
@@ -1368,6 +1433,8 @@ class Bot:
     # ---- commands ------------------------------------------------------------------------------------
     def command(self, c) -> None:
         now = now_ms()
+        if c.name == "/button":               # a click on a question's button (DiscordUI, owner only)
+            return self.on_button(c.arg)
         if c.name.startswith("/fomo"):
             if self.sol:
                 self.sol.q.put(("cmd", c))
@@ -1502,7 +1569,7 @@ class Bot:
         d.mkdir(parents=True, exist_ok=True)
         lg = Ledger(d / "ledger.jsonl")
         for a, t in follows.items():
-            lg.append({"ev": "follow", "leader": a, "ts": t})
+            lg.append({"ev": "follow", "leader": a, "ts": t, **({"picked": True} if a in self.invo.st.picked else {})})
         lg.close()
         log.info("invo_reset", archive=arch.parent.as_posix(), followed=len(follows))
         return arch.parent.as_posix()

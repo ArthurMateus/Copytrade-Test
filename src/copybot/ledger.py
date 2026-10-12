@@ -295,6 +295,11 @@ class State:
         if ev.get("picked"):
             self.picked.add(ev["leader"])
 
+    def _ev_pick(self, ev):
+        """The owner keeps a followed trader whatever the rules say (Invo: the Keep button of a drop question)."""
+        if ev["leader"] in self.followed:
+            self.picked.add(ev["leader"])
+
     def _ev_unfollow(self, ev):
         self.followed.pop(ev["leader"], None)
         self.picked.discard(ev["leader"])

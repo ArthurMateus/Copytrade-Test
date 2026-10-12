@@ -47,14 +47,28 @@ HOUR = 3_600_000
 BASE = 10_000.0          # notional portfolio the calls' shares are applied to (only ratios matter)
 FILTERS = ("trending", "month", "all_time")
 REQ_GAP_S = 1.0          # extra spacing of the search's own requests (the watcher's polls go first)
-VERSION = 4              # Invo-only scoring changes (2: every portfolio, our cost per call, k-coins; 3: per
-                         # portfolio, live portfolios, Invo's score; 4: funding paid while held): rescore
+VERSION = 5              # Invo-only scoring changes (2: every portfolio, our cost per call, k-coins; 3: per
+                         # portfolio, live portfolios, Invo's score; 4: funding paid while held; 5: only hard
+                         # failures stop a portfolio's copies): rescore
+
+# Owner request 2026-10-12 ("it skipped a bunch of portfolios that were good"): a portfolio's calls are NOT copied only
+# when our replay says copying it loses money, or it is bait (one call makes the profit, minute-long calls). Quality
+# points (score < 70, profit factor < 2, win rate ...) only rank traders in the search; the owner's floors decide the rest.
+HARD = ("pnl<=0", "profit_factor<=1", "copy_edge<=0", "too_fast", "one_trade>")
+FAIL_GAP_MS = 20 * 3_600_000   # a trader's failed searches count at most once per this (restarts re-search at once)
+
+
+def copy_blockers(reasons) -> list[str]:
+    """The reasons of a portfolio's score that stop its calls from being copied (see HARD)."""
+    return [r for r in reasons or [] if r.startswith(HARD)]
 
 REASON_TEXT = {"not_on_hyperliquid": "most calls are on coins Hyperliquid does not list",
                "too_fast": "calls too short to copy", "inactive": "no new call lately",
                "no_calls": "no closed calls lately",
                "no_copyable_portfolio": "no portfolio passes the rules (and the copy floors)",
-               "loses_overall": "its portfolios together lose money (only some look good)"}
+               "loses_overall": "its portfolios together lose money (only some look good)",
+               "pnl<=0": "copying it loses money after costs", "copy_edge<=0": "a copy loses money after costs",
+               "profit_factor<=1": "its losses outweigh its wins"}
 
 
 def key_coin(key: str) -> str:
@@ -180,6 +194,8 @@ def score_trader(name: str, closed: list[Call], opened: list[Call], coin_of, can
 
 
 def reason_text(r: str) -> str:
+    if r.startswith("one_trade>"):
+        return "one call made most of the profit (bait)"
     return REASON_TEXT.get(r, r.replace("_", " "))
 
 
@@ -202,6 +218,7 @@ class InvoScorer:
                              if v.get("v") == scoring.VERSION and v.get("rules") == self.params.rules()
                              and v.get("iv") == VERSION}
         self.fails: dict = st.get("fails", {})
+        self.fail_at: dict = st.get("fail_at", {})     # trader -> when its fail count last went up (ms)
         self.last = int(st.get("last", 0)) if self.scores else 0     # rules changed (or first start): search now
         self.progress: dict = {"phase": "idle", "todo": 0, "done": 0}
         self.req = threading.Event()
@@ -216,7 +233,8 @@ class InvoScorer:
     def _save(self) -> None:
         p = self.dir / "scores.json"
         tmp = p.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"scores": self.scores, "fails": self.fails, "last": self.last},
+        tmp.write_text(json.dumps({"scores": self.scores, "fails": self.fails, "fail_at": self.fail_at,
+                                   "last": self.last},
                                   separators=(",", ":")), encoding="utf-8")
         os.replace(tmp, p)
 
@@ -314,6 +332,7 @@ class InvoScorer:
         found = self.discover() if self.c.search else []
         cands = followed + [n for n in found if n not in followed][: self.c.max_candidates]
         self.progress = {"phase": "scoring", "todo": len(cands), "done": 0}
+        scored: list[str] = []                  # traders actually read this time (only they can be dropped)
         for i, name in enumerate(cands):
             if self.stop.is_set():
                 return
@@ -327,7 +346,8 @@ class InvoScorer:
                 s = None
             if s is not None:
                 self.scores[name] = s
-                self.fails[name] = 0 if s["eligible"] else self.fails.get(name, 0) + 1
+                scored.append(name)
+                self.count_fail(name, s)
                 log.info("invo_scored", trader=name, eligible=s["eligible"], score=round(s["score"], 1),
                          trades=s["trades"], win=round(s["win_rate"], 3), pf=round(s["profit_factor"], 2),
                          why=",".join(s["reasons"]))
@@ -339,7 +359,18 @@ class InvoScorer:
         self.progress = {"phase": "idle", "todo": 0, "done": 0}
         n_el = sum(1 for n in cands if self.scores.get(n, {}).get("eligible"))
         log.info("invo_review_done", candidates=len(cands), eligible=n_el)
-        self.out.put(("invo_review", len(cands), dict(self.scores), dict(self.fails)))
+        self.out.put(("invo_review", len(cands), dict(self.scores), dict(self.fails), scored))
+
+    def count_fail(self, name: str, s: dict) -> None:
+        """A followed trader is proposed for a drop when NONE of its portfolios would be copied for
+        `drop_after_fails` searches in a row; several searches within FAIL_GAP_MS (restarts) count once."""
+        if s.get("copyable_portfolios", 0) > 0:
+            self.fails[name] = 0
+            return
+        now = self.now()
+        if not self.fails.get(name) or now - int(self.fail_at.get(name, 0)) >= FAIL_GAP_MS:
+            self.fails[name] = self.fails.get(name, 0) + 1
+            self.fail_at[name] = now
 
     def score(self, name: str) -> dict | None:
         """None when the trader does not exist or could not be read (its old result is kept)."""
@@ -372,7 +403,7 @@ class InvoScorer:
                          "copy_edge_bps": s.get("copy_edge_bps", 0.0), "pnl": s["pnl"],
                          "invo_score": inv.get("score"), "invo_capped": inv.get("capped", False),
                          "invo_caps": inv.get("caps", []),
-                         "copy": bool(p.active and s["eligible"] and not self.skip(name, p))}
+                         "copy": bool(p.active and not copy_blockers(s["reasons"]) and not self.skip(name, p))}
         overall = score_trader(name, all_closed, all_open, *args,
                                (len(ports), sum(1 for x in per.values() if x["copy"]),
                                 sum(1 for p in ports if p.pnl_pct < 0)), **fkw)
@@ -427,13 +458,16 @@ class InvoScorer:
 
 
 def trader_result(overall: dict, full: dict[str, dict], per: dict[str, dict]) -> dict:
-    """A trader's result from its portfolios' scores: the best COPYABLE portfolio's score (else the best one's, failed),
-    eligible only when one is copyable and its portfolios together did not lose. Pure."""
+    """A trader's result from its portfolios' scores: the best copied portfolio passing EVERY rule gives its score
+    (else the best copied one's, failed; else the best one's). Eligible (picked by the search) only when a copied
+    portfolio passes every rule and its portfolios together did not lose. `copyable_portfolios` counts the portfolios
+    whose calls are copied (no hard failure, owner's floors): a followed trader with none is proposed for a drop. Pure."""
     copyable = [pid for pid, x in per.items() if x["copy"]]
-    pool = copyable or list(per)
+    strict = [pid for pid in copyable if full[pid].get("eligible")]
+    pool = strict or copyable or list(per)
     best = max(pool, key=lambda pid: (full[pid]["score"], full[pid]["trades"], pid)) if pool else None
     res = dict(full[best]) if best else dict(overall)
-    reasons = [] if copyable else list(res.get("reasons", []))
+    reasons = [] if strict else list(res.get("reasons", []))
     if not copyable and "no_copyable_portfolio" not in reasons:
         reasons.append("no_copyable_portfolio")
     if overall["trades"] and overall["pnl"] <= 0:

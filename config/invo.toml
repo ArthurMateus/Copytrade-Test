@@ -44,4 +44,4 @@ max_calls = 600           # closed calls read per trader at most                
 min_hl_share = 0.5        # at least this share of its calls on coins Hyperliquid lists             [0, 1]
 min_hold_min = 15.0       # median call at least this long (shorter cannot be copied)               [0, 1440]
 max_idle_days = 14.0      # its newest call at most this old                                        [1, 90]
-drop_after_fails = 2      # a followed trader failing the rules this many searches in a row leaves  [1, 10]   # fixed-risk Invo wallets next to the trader-size one (/invowallets)
+drop_after_fails = 2      # none of a followed trader's portfolios copied this many daily searches in a row: Discord asks you to drop it (buttons); /invofollow picks are never asked  [1, 10]   # fixed-risk Invo wallets next to the trader-size one (/invowallets)

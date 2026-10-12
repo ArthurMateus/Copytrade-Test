@@ -195,69 +195,76 @@ def search_env(env, tmp_path):
     f.close()
 
 
-def add_trader(f: FakeInvo, name: str, good: bool) -> None:
+def add_trader(f: FakeInvo, name: str, good: bool) -> str:
     pid = f.add_user(name)[0]
     now = int(time.time() * 1000)
     for i in range(45):
         start = now - 150 * DAY + int(i * 145 * DAY / 45)
         move = (-0.01 if i % 3 == 2 else 0.02) if good else (-0.02 if i % 2 else 0.01)
         f.add_closed(pid, "ETH", True, 5, 0.03, 3000.0, 3000.0 * (1 + move), start, start + 4 * 3_600_000)
+    return pid
 
 
-def test_the_search_finds_a_good_trader_reports_it_and_drops_a_followed_one_that_keeps_failing(search_env,
-                                                                                              monkeypatch):
+def test_the_search_asks_before_changing_anything_and_never_drops_a_pick(search_env, monkeypatch):
+    """Owner request 2026-10-12 (a 3 AM search dropped every followed trader): /invosearch PROPOSES its changes and a
+    followed trader whose portfolios are all skipped is PROPOSED for a drop; the owner answers with a button. A
+    /invofollow pick is never proposed. Failed searches count only for traders read in that search."""
     hl, dc, data, cdir, f, tok = search_env
-    add_trader(f, "steady", good=True)
+    pid = add_trader(f, "steady", good=True)
     add_trader(f, "coinflip", good=False)
     f.ranked = ["steady", "coinflip"]
     monkeypatch.setenv("INVO_TOKEN_FILE", str(tok))
     monkeypatch.setattr(invo_scorer, "REQ_GAP_S", 0.0)
+    monkeypatch.setattr(invo_scorer, "FAIL_GAP_MS", 0)
     bot, th = start_bot((hl, dc, data, cdir))
     text = lambda: " ".join(m["text"] for m in dc.sent + dc.edits)
     try:
         assert bot.invo_search is not None
         dc.say("/invofollow coinflip")
         assert wait_for(lambda: "invo:coinflip" in bot.invo.st.followed)
-        # the first search (at start) is shown as soon as it ends
+        assert "invo:coinflip" in bot.invo.st.picked                          # the owner's pick
+        # the first search (at start) is shown as soon as it ends; it only reports
         assert wait_for(lambda: "Daily picks · 🧾 Invo" in text(), timeout=60)
         assert bot.invo_scores["steady"]["eligible"], bot.invo_scores["steady"]["reasons"]
         assert not bot.invo_scores["coinflip"]["eligible"]
-        assert "<code>/invofollow steady</code>" in text() and "@steady" in text()
-        assert "invo:steady" not in bot.invo.st.followed                       # it only reports
-        assert "invo:coinflip" in bot.invo.st.followed                         # 1 failed search: kept
-        bot.invo_search.req.set()                                              # a second search
-        assert wait_for(lambda: "invo:coinflip" not in bot.invo.st.followed, timeout=60)
-        assert wait_for(lambda: "fails the rules 2 searches in a row" in text()
-                        and "/invofollow coinflip brings it back" in text())
+        assert "<code>/invofollow steady</code>" in text() and "invo:steady" not in bot.invo.st.followed
+        dc.say("/invosearch")
+        assert wait_for(lambda: dc.asked("Apply?"), timeout=90)
+        q = dc.asked("Apply?")
+        assert "➕ follow: @steady" in dc.text(q) and "drop" not in dc.text(q)  # the pick stays
+        assert "invo:steady" not in bot.invo.st.followed                       # nothing changes before the answer
+        dc.click(q, "✅ Apply")
+        assert wait_for(lambda: "invo:steady" in bot.invo.st.followed)
+        assert wait_for(lambda: all("invo:steady" in w.st.followed for w in bot.invo_extra))
+        assert wait_for(lambda: "Done" in dc.text(q) and not dc.buttons[q])   # the question shows the answer
+        assert "invo:coinflip" in bot.invo.st.followed
+        # steady starts losing: after drop_after_fails (2) searches with nothing copyable, the owner is asked
+        f.closed[pid] = []
+        now = int(time.time() * 1000)
+        for i in range(45):
+            start = now - 150 * DAY + int(i * 145 * DAY / 45)
+            f.add_closed(pid, "ETH", True, 5, 0.03, 3000.0, 3000.0 * (0.98 if i % 2 else 1.01), start,
+                         start + 4 * 3_600_000)
+        for n in (1, 2):
+            bot.invo_search.req.set()
+            assert wait_for(lambda: bot.invo_search.fails.get("steady") == n, timeout=90)
+        assert wait_for(lambda: dc.asked("Drop @steady?"), timeout=30)
+        q = dc.asked("Drop @steady?")
+        assert "invo:steady" in bot.invo.st.followed and dc.asked("Drop @coinflip?") is None
+        dc.click(q, "🗑", user="12345")              # not the owner: refused
+        assert wait_for(lambda: any("Only the owner" in r.get("data", {}).get("content", "") for r in dc.replies))
+        assert "invo:steady" in bot.invo.st.followed
+        dc.click(q, "🗑")
+        assert wait_for(lambda: "invo:steady" not in bot.invo.st.followed)
+        assert wait_for(lambda: "Dropped" in dc.text(q) and not dc.buttons[q])
+        assert "invo:coinflip" in bot.invo.st.followed
         n = len(dc.sent)
         dc.say("/picks")
-        assert wait_for(lambda: any("Daily picks · 🔷 Hyperliquid" in m["text"] for m in dc.sent[n:]))
         assert wait_for(lambda: any("Daily picks · 🧾 Invo" in m["text"] for m in dc.sent[n:]))
         assert not (data / "picks.json").exists()                              # /picks never replaces the baseline
-        dc.say("/invofollow coinflip")                                          # no blacklist: it can come back
-        assert wait_for(lambda: "invo:coinflip" in bot.invo.st.followed)
+        dc.say("/invofollow steady")                                            # no blacklist: it can come back
+        assert wait_for(lambda: "invo:steady" in bot.invo.st.followed)
         assert "REFRESH" not in text()
-    finally:
-        stop_bot(bot, th)
-
-
-def test_invosearch_searches_now_and_follows_the_best(search_env, monkeypatch):
-    hl, dc, data, cdir, f, tok = search_env
-    add_trader(f, "steady", good=True)
-    add_trader(f, "coinflip", good=False)
-    f.ranked = ["steady", "coinflip"]
-    monkeypatch.setenv("INVO_TOKEN_FILE", str(tok))
-    monkeypatch.setattr(invo_scorer, "REQ_GAP_S", 0.0)
-    bot, th = start_bot((hl, dc, data, cdir))
-    text = lambda: " ".join(m["text"] for m in dc.sent + dc.edits)
-    try:
-        dc.say("/invofollow coinflip")
-        assert wait_for(lambda: "invo:coinflip" in bot.invo.st.followed)
-        dc.say("/invosearch")
-        assert wait_for(lambda: "Invo search finished" in text(), timeout=90)
-        assert "invo:steady" in bot.invo.st.followed and "invo:coinflip" not in bot.invo.st.followed
-        assert wait_for(lambda: "@steady" in text() and "➖ dropped: @coinflip" in text())
-        assert wait_for(lambda: all("invo:steady" in w.st.followed for w in bot.invo_extra))
     finally:
         stop_bot(bot, th)
 
@@ -298,6 +305,48 @@ def test_each_portfolio_is_scored_and_only_passing_ones_are_copied():
     assert not lost["eligible"] and lost["reasons"] == ["loses_overall"] and lost["score"] == 0.0
     none = invo_scorer.trader_result(overall, {"A": good, "B": bad}, {**per, "A": {"copy": False}})
     assert not none["eligible"] and "no_copyable_portfolio" in none["reasons"]
+    # copied (no hard failure) but below the quality points: kept and copied, not picked by the search
+    weak = invo_scorer.trader_result(overall, {"A": {**good, "eligible": False, "score": 0.0,
+                                                     "reasons": ["profit_factor<2", "score<70"]}, "B": bad}, per)
+    assert not weak["eligible"] and weak["copyable_portfolios"] == 1
+    assert weak["reasons"] == ["profit_factor<2", "score<70"]
+
+
+def test_only_a_loss_after_costs_or_bait_stops_a_portfolios_copies():
+    """Owner request 2026-10-12 ("it skipped a bunch of portfolios that were good"): quality points no longer block a
+    portfolio; losing after our costs, one call making the profit or minute-long calls still do."""
+    from types import SimpleNamespace
+    from copybot.runner import Bot
+    assert invo_scorer.copy_blockers(["profit_factor<2", "score<70", "win_rate<45%"]) == []
+    assert invo_scorer.copy_blockers(["copy_edge<=0", "one_trade>30%_of_profit", "too_fast", "trades<30"]) == \
+        ["copy_edge<=0", "one_trade>30%_of_profit", "too_fast"]
+    cfg = config.load("config", env={})
+    per = {"good": {"reasons": ["profit_factor<2", "score<70"]}, "bait": {"reasons": ["one_trade>30%_of_profit"]},
+           "live": {"reasons": ["score<70"]}}
+    b = SimpleNamespace(cfg=cfg, invo=None, invo_scores={"t": {"by_portfolio": per, "reasons": ["loses_overall"]}})
+    b.invo_portfolio_score = lambda n, pid: Bot.invo_portfolio_score(b, n, pid)
+    b.invo_floors = lambda p: Bot.invo_floors(b, p)
+    port = lambda pid, kind="paper", win=90.0: SimpleNamespace(id=pid, kind=kind, closed=100, win_rate=win,
+                                                               pnl_pct=300.0)
+    assert Bot.invo_skip(b, "t", port("good")) is None
+    assert "one call made most of the profit" in Bot.invo_skip(b, "t", port("bait"))
+    assert Bot.invo_skip(b, "t", port("live", "live", win=10.0)) is None      # a live one that passes: no floors
+    assert "win rate" in Bot.invo_skip(b, "t", port("new", win=50.0))         # not scored yet: the owner's floors
+
+
+def test_failed_searches_count_once_a_day_and_reset_when_something_is_copied():
+    from types import SimpleNamespace
+    t = [1_000_000_000]
+    sc = SimpleNamespace(fails={}, fail_at={}, now=lambda: t[0])
+    none, some = {"copyable_portfolios": 0}, {"copyable_portfolios": 1}
+    for _ in range(3):                                        # three restarts re-searching within the hour
+        invo_scorer.InvoScorer.count_fail(sc, "x", none)
+    assert sc.fails["x"] == 1
+    t[0] += invo_scorer.FAIL_GAP_MS
+    invo_scorer.InvoScorer.count_fail(sc, "x", none)
+    assert sc.fails["x"] == 2
+    invo_scorer.InvoScorer.count_fail(sc, "x", some)
+    assert sc.fails["x"] == 0
 
 
 def test_a_real_money_portfolio_is_found_on_invos_leaderboard_scored_and_copied_alone(search_env, monkeypatch):

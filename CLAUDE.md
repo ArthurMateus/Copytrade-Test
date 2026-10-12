@@ -317,6 +317,23 @@ instances on the same wallet.
   `hl.parse_funding`, fixture `funding_history.json`) -> `calls_to_fills(..., funding_of)` takes the funding paid while
   each call was held off its result (and so off the copy edge).
 
+## Invo: ask before changing, picks, only hard failures skip a portfolio (owner request 2026-10-12)
+- A 3 AM search dropped all 7 followed traders: VERSION bumps re-searched at every restart (each counted as a failed
+  search), traders not read in that search were dropped too (empty reasons "()"), and /invofollow picks were not kept.
+- Now: `/invofollow` = the owner's pick (`follow` with `picked: true`; an already-followed trader gets a `pick` event).
+  The search never proposes dropping a pick. A followed trader READ in the search whose portfolios are ALL skipped
+  (`copyable_portfolios` 0) for `drop_after_fails` searches (`InvoScorer.count_fail`: at most once per `FAIL_GAP_MS`
+  20 h) is PROPOSED for a drop: `Bot.ask` posts a card with Discord buttons (🗑️ Drop / ✅ Keep = becomes a pick);
+  `/invosearch` proposes its follows/drops (✅ Apply / ❌ Keep as is). Clicks: `DiscordUI._button` (INTERACTION_CREATE
+  type 3, owner only, ack type 6) -> `Command("/button", custom_id)` -> `Bot.on_button`. Questions live in memory
+  (`Bot.asks`): after a restart a click says it expired and the next search asks again. Loss pauses
+  (`invo_drop`) stay immediate.
+- Copy gate (`invo_scorer.VERSION` 5): a scored portfolio is skipped only for `invo_scorer.HARD` reasons (loses after
+  our costs, losses > wins, one call = most of the profit, too fast); quality points (score < 70, PF < 2...) only rank
+  the search (`eligible` = a copied portfolio passing EVERY rule). `loses_overall` no longer blocks copies.
+- Agreement (two followed traders, same coin and side) already boosted Invo copies; in a capped wallet (trader
+  size) the boost now stays within `invo_cap` (it was consensus_risk_pct x5 = ~250$ on a ~60$ copy).
+
 ## Account value = perp + spot stablecoins (bug found live 2026-10-10)
 - `/hyperadd` scored with the PERP account value only while the daily search used the leaderboard value, so the same
   wallet passed the search (3% drop) and failed /hyperadd (max_drawdown>30%): 0x6d73... had 1,481$ in perps and

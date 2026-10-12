@@ -93,6 +93,14 @@ def embed(text: str) -> dict:
     return {"description": md, "color": color_for(text)}
 
 
+def components(buttons: list) -> list:
+    """[(custom id, label, style)] -> one Discord action row of buttons (style 1 blue, 2 grey, 3 green, 4 red)."""
+    if not buttons:
+        return []
+    return [{"type": 1, "components": [{"type": 2, "style": st, "label": label[:80], "custom_id": cid[:100]}
+                                       for cid, label, st in buttons[:5]]}]
+
+
 class DiscordApi:
     def __init__(self, base: str, token: str):
         self.base = base.rstrip("/")
@@ -143,14 +151,15 @@ class DiscordUI(ChatUI):
 
     # ---- transport (ChatUI's outbox calls this) -------------------------------------------------
     def _call(self, method: str, params: dict):
+        rows = components(params.get("buttons") or [])
         if method == "sendMessage":
             r = self.api.call("POST", f"/channels/{self.channel}/messages",
-                              {"embeds": [embed(params["text"])], "allowed_mentions": {"parse": []}},
-                              on_limit=self._bucket_empty)
+                              {"embeds": [embed(params["text"])], "allowed_mentions": {"parse": []},
+                               **({"components": rows} if rows else {})}, on_limit=self._bucket_empty)
             return {"message_id": int(r["id"])}
         if method == "editMessageText":
             self.api.call("PATCH", f"/channels/{self.channel}/messages/{params['message_id']}",
-                          {"embeds": [embed(params["text"])]}, on_limit=self._bucket_empty)
+                          {"embeds": [embed(params["text"])], "components": rows}, on_limit=self._bucket_empty)
             return {"message_id": params["message_id"]}
         raise ValueError(method)
 
@@ -219,6 +228,8 @@ class DiscordUI(ChatUI):
                 self._register(d["application"]["id"])
         elif t == "INTERACTION_CREATE" and d.get("type") == 2:
             self._interaction(d)
+        elif t == "INTERACTION_CREATE" and d.get("type") == 3:
+            self._button(d)
 
     def _register(self, app_id: str) -> None:
         """Guild slash commands appear at once (global ones can take an hour)."""
@@ -243,6 +254,20 @@ class DiscordUI(ChatUI):
                           {"type": 4, "data": {"content": text, "flags": 64}})
         except ChatError as e:
             log.warn("discord_reply_failed", err=e.desc)
+
+    def _button(self, d: dict) -> None:
+        """A click on a question's button: owner only; acknowledged at once (the bot edits the question itself)."""
+        user = ((d.get("member") or {}).get("user") or d.get("user") or {}).get("id", "")
+        cid = str((d.get("data") or {}).get("custom_id", ""))
+        if str(user) != self.owner:
+            log.warn("discord_unauthorized", user=user, cmd="button")
+            return self._reply(d, "⛔ Only the owner can answer.")
+        try:
+            self.api.call("POST", f"/interactions/{d['id']}/{d['token']}/callback", {"type": 6})
+        except ChatError as e:
+            log.warn("discord_reply_failed", err=e.desc)
+        log.info("discord_button", id=cid)
+        self.on_command(Command("/button", cid))
 
     def _interaction(self, d: dict) -> None:
         user = ((d.get("member") or {}).get("user") or d.get("user") or {}).get("id", "")
