@@ -427,6 +427,8 @@ class Bot:
         the floors, on its own numbers (a live portfolio's accuracy and real return)."""
         if self.invo is not None and p.id in self.invo.st.blocked.get(INVO + name.lower(), {}):
             return "blocked by you"
+        if name.lower() in {u.strip().lstrip("@").lower() for u in self.cfg.invo.always_copy}:
+            return None                 # owner request 2026-10-13: copied whatever the floors and rules say
         ps = self.invo_portfolio_score(name, p.id)
         if ps is not None:              # owner request 2026-10-12: only a loss after our costs or bait stops it
             hard = copy_blockers(ps.get("reasons"))

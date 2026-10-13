@@ -241,6 +241,9 @@ class Invo:
     min_portfolio_win_rate: float = 0.80     # owner 2026-10-10: at least 80% wins ...
     min_portfolio_pnl_pct: float = 100.0     # ... and at least doubled (+100%)
     min_portfolio_calls: int = 20
+    # owner request 2026-10-13: these traders' portfolios are copied without the floors above or our rules (only
+    # /invoblock still stops one)
+    always_copy: list = field(default_factory=list)
     search: bool = True
     review_hours: float = 24.0            # one search per this many hours
     discover_pages: int = 3               # pages of 20 read from each Discover ranking (trending, month, all time)
@@ -501,6 +504,8 @@ def validate(cfg: Config) -> None:
         raise ConfigError(f"invo.main_stop_pct: one of invo.stops_pct ({', '.join(f'{v:g}' for v in st)})")
     if not all(isinstance(k, str) and isinstance(v, str) and v for k, v in cfg.invo.aliases.items()):
         raise ConfigError('invo.aliases: Invo ticker = "Hyperliquid coin", e.g. { MATIC = "POL" }')
+    if not all(isinstance(v, str) and v.strip() for v in cfg.invo.always_copy):
+        raise ConfigError('invo.always_copy: Invo usernames, e.g. ["bluespire", "solarflare"]')
 
 
 def scaled(cfg: Config, risk_pct: float) -> Config:

@@ -336,6 +336,10 @@ def test_only_a_loss_after_costs_bait_or_a_low_profit_factor_stops_a_portfolios_
     assert "profit factor<2" in Bot.invo_skip(b, "t", port("weak"))
     assert Bot.invo_skip(b, "t", port("live", "live", win=10.0)) is None      # a live one that passes: no floors
     assert "win rate" in Bot.invo_skip(b, "t", port("new", win=50.0))         # not scored yet: the owner's floors
+    # owner request 2026-10-13: an always_copy trader skips the floors and our rules
+    b.cfg.invo.always_copy = ["@T"]
+    assert Bot.invo_skip(b, "t", port("weak")) is None
+    assert Bot.invo_skip(b, "t", port("new", win=50.0)) is None
 
 
 def test_failed_searches_count_once_a_day_and_reset_when_something_is_copied():

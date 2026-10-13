@@ -379,6 +379,10 @@ instances on the same wallet.
   has an explicit sizer (same notional at every stop). `/invoreset` also archives `data/wallets/invo_*` dirs of an
   earlier main stop. Not changed: the Invo search still replays copies with our 3% stop (`copy_edge`).
 
+## Invo always_copy (owner request 2026-10-13)
+- `invo.always_copy` (config/invo.toml: bluespire, solarflare, two real-money traders the checks skipped): those
+  traders' portfolios are copied without the owner's floors or our rules (`Bot.invo_skip`); only `/invoblock` stops one.
+
 ## Account value = perp + spot stablecoins (bug found live 2026-10-10)
 - `/hyperadd` scored with the PERP account value only while the daily search used the leaderboard value, so the same
   wallet passed the search (3% drop) and failed /hyperadd (max_drawdown>30%): 0x6d73... had 1,481$ in perps and

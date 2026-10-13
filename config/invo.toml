@@ -39,6 +39,8 @@ aliases = {}              # Invo ticker -> Hyperliquid coin when the names diffe
 min_portfolio_win_rate = 0.80   # 0.80 = 80%                                                          [0, 1]
 min_portfolio_pnl_pct = 100.0   # the portfolio's total return on Invo, % (100 = doubled)                          [-100, 100000]
 min_portfolio_calls = 20        # fewer closed calls: too new to judge, skipped                         [0, 10000]
+# Traders whose portfolios are ALWAYS copied, skipping the floors above and our rules (/block still works).
+always_copy = ["bluespire", "solarflare"]
 # The daily Invo search: Invo's Discover rankings -> each trader's closed calls -> the SAME scoring as Hyperliquid
 # wallets (win rate, profit factor, no single trade > 30% of profit, drawdowns, score >= 70 ...), shown in the
 # daily picks (13h, /picks). It only reports: you follow with /invofollow.
