@@ -492,9 +492,11 @@ def test_bot_copies_an_invo_call_and_closes_it_when_the_trader_does(invo_env, mo
         for w in bot.invo_extra:
             q = w.st.positions["ETH"]
             base = w.name.rsplit("_", 1)[0] if w.name.endswith(("_stop8", "_trader")) else w.name
-            r = 0.05 * 10 * 100 if base == "invo_calls" else float(base.split("_")[2][:-3])  # % of equity at 3%
-            want = 150.0 if base == "invo_calls" else 300 * r / 100 / 0.03
-            assert q.size * q.entry_px == pytest.approx(want, rel=0.12), w.name          # same size, any stop
+            # trader size: the same copy at every stop; r% risk: r% of the wallet lost at ITS stop (owner request
+            # 2026-10-13, "A"): 3% -> 300 x r / 3%, 8% -> 300 x r / 8%, trader's exit -> at its 30% guard (>= 10.5$)
+            stop = 8.0 if w.name.endswith("_stop8") else 30.0 if w.name.endswith("_trader") else 3.0
+            want = 150.0 if base == "invo_calls" else max(300 * float(base.split("_")[2][:-3]) / stop, 10.5)
+            assert q.size * q.entry_px == pytest.approx(want, rel=0.12), w.name
             assert "invo:nicush" in w.st.followed
         dc.say("/invowallets")
         assert wait_for(lambda: any("Invo wallets" in m["text"] and "18 combinations" in m["text"]
@@ -996,8 +998,9 @@ def test_one_normal_stop_does_not_drop_an_invo_trader(invo_env, monkeypatch):
 
 
 def test_every_size_runs_with_every_stop_and_only_the_exit_differs(invo_env, monkeypatch):
-    """Owner request 2026-10-12: 3%, 8% and "stop whenever the trader stops" for every size. Same call, same copy
-    size; a 4% drop stops only the 3% version, the trader's close closes the others."""
+    """Owner request 2026-10-12: 3%, 8% and "stop whenever the trader stops" for every size, on the same call; a 4%
+    drop stops only the 3% version, the trader's close closes the others. Since 2026-10-13 ("A") an r% wallet loses
+    r% of itself at ITS stop, so the wider the stop the smaller the copy."""
     from copybot import runner
     monkeypatch.setattr(invo, "VANISH_S", 10.0)              # (the deleted call below, without a 2-minute wait)
     hl, dc, data, cdir, f, tok = invo_env
@@ -1014,12 +1017,14 @@ def test_every_size_runs_with_every_stop_and_only_the_exit_differs(invo_env, mon
         assert s3.st.positions["ETH"].stop_px == pytest.approx(e["invo_risk_1pct"] * 0.97)
         assert s8.st.positions["ETH"].stop_px == pytest.approx(e["invo_risk_1pct_stop8"] * 0.92)
         assert tr.st.positions["ETH"].stop_px == pytest.approx(e["invo_risk_1pct_trader"] * 0.70)  # a guard only
-        sizes = [x.st.positions["ETH"].size for x in (s3, s8, tr)]
-        assert max(sizes) == pytest.approx(min(sizes), rel=0.02)                  # same copy, only the exit differs
+        loss = [x.st.positions["ETH"].size * abs(x.st.positions["ETH"].entry_px - x.st.positions["ETH"].stop_px)
+                for x in (s3, s8)]
+        assert loss[0] == pytest.approx(3.0, rel=0.05) and loss[1] == pytest.approx(3.0, rel=0.05)   # 1% of 300$
         assert wait_for(lambda: "ETH" in w["invo_risk_20pct_trader"].st.positions, timeout=10)
-        big = w["invo_risk_20pct_trader"].st.positions["ETH"]                     # 6.7x the wallet: its guard sits
-        assert big.stop_px == pytest.approx(big.entry_px * (1 - runner.invo_emergency_stop(20 / 3) / 100))
-        assert runner.invo_emergency_stop(20 / 3) == pytest.approx(11.2, abs=0.1)   # just before liquidation
+        big = w["invo_risk_20pct_trader"].st.positions["ETH"]                     # 20% at its 30% guard: 200$
+        assert big.size * big.entry_px == pytest.approx(200.0, rel=0.05)
+        assert big.stop_px == pytest.approx(big.entry_px * 0.70)
+        assert runner.invo_emergency_stop(20 / 3) == pytest.approx(11.2, abs=0.1)   # (trader size: before liquidation)
         hl.mids["ETH"] = 3000.0 * 0.96
         assert wait_for(lambda: "ETH" not in s3.st.positions, timeout=10)
         assert s3.st.closed[-1]["reason"] == "stop"

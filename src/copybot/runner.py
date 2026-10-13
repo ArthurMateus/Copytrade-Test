@@ -128,8 +128,10 @@ class Bot:
         self.invo_baseline_wait: dict[str, list] = {}  # trader -> its first read, held until Hyperliquid's coins load
         if cfg.invo.enabled and cfg.invo_token_file:
             # every size x every stop (owner request 2026-10-12): the trader-size wallet and the 1-20% risk wallets,
-            # each once per stop in invo.stops_pct (0 = the trader's exit). A size's versions copy the same notional:
-            # only the exit differs. The versions at invo.main_stop_pct keep the plain names (invo_calls,
+            # each once per stop in invo.stops_pct (0 = the trader's exit). A risk wallet risks its r% at ITS OWN stop
+            # (owner request 2026-10-13, "A": copies of r% x equity / stop; the trader's exit at its 30% guard), so a
+            # "20% risk" wallet never loses more than ~20% on one copy at any stop; it used to copy the 3%-stop
+            # notional at every stop (8% stop = 53% of the wallet). The trader-size versions keep one notional. The versions at invo.main_stop_pct keep the plain names (invo_calls,
             # invo_risk_<r>pct), decide which calls are copied, and invo_calls posts the cards and owns the followed
             # list; the others are named <name>_stop<s> / <name>_trader (owner request 2026-10-12: "keep the trades
             # open until the traders close them", main_stop_pct 0; it was our 3% stop)
@@ -138,16 +140,22 @@ class Bot:
             suffix = lambda s: "" if s == main else f"_stop{s:g}" if s > 0 else "_trader"
             sizes = [("invo_calls", "trader size", cfg.invo.limits_pct, cfg.invo.max_risk_pct / base, self.invo_size,
                       self.invo_cap)]
-            sizes += [(f"invo_risk_{r:g}pct", f"{r:g}% risk", r, r / base,
-                       lambda m, px, eq, r=r: eq * r / base / px if px > 0 else 0.0, None)
-                      for r in cfg.invo.risk_wallets_pct]
+            sizes += [(f"invo_risk_{r:g}pct", f"{r:g}% risk", r, None, None, None) for r in cfg.invo.risk_wallets_pct]
             variants = []
             for s in [main, *[s for s in cfg.invo.stops_pct if s != main]]:      # the deciding versions first
                 for name, size_label, risk, mult, sizer, cap in sizes:
-                    stop = s if s > 0 else invo_emergency_stop(mult)
+                    if sizer is None:                # a risk wallet: r% of equity lost if its own stop is hit
+                        stop = s if s > 0 else invo_emergency_stop(risk / EMERGENCY_STOP_PCT)
+                        # (lifted to the minimum notional: 1% at the 30% guard is ~10$, a smaller copy would be skipped)
+                        sizer = lambda m, px, eq, r=risk, st=stop: max(
+                            eq * r / st, cfg.risk.min_notional_usd * 1.05) / px if px > 0 else 0.0
+                        # its limits: r% (at least room for a minimum copy at this stop: 1% at the 30% guard is ~10$)
+                        level = max(risk, 120 * cfg.risk.min_notional_usd * stop / 100 / cfg.risk.start_equity)
+                    else:                            # trader size: the same notional at every stop, and the limits
+                        stop = s if s > 0 else invo_emergency_stop(mult)   # of a wallet risking it at this stop
+                        level = risk * stop / base
                     primary = s == main and name == "invo_calls"
-                    # limits of a wallet risking the same notional at this stop, so they clamp alike at every stop
-                    x = SideWallet(cfg, risk * stop / base, self.data, side_broker, self.health, self.mids,
+                    x = SideWallet(cfg, level, self.data, side_broker, self.health, self.mids,
                                    self.assets, alts_ok=lambda leader: True, score_of=self.score_of,
                                    name=name + suffix(s), label=f"{size_label} · {stop_word(s)}", sizer=sizer,
                                    cap=cap, own_leaders=True,

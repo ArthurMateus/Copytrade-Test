@@ -298,11 +298,15 @@ instances on the same wallet.
 - `invo.stops_pct` [3, 8, 0] (must include risk.stop_pct): every Invo size (trader size = `invo_calls`, and each
   `risk_wallets_pct` level) runs once per stop: the 3% ones are the existing wallets (names/history unchanged), the
   others `<name>_stop8` / `<name>_trader` (18 wallets, all in `Bot.invo_extra` except the primary; same traders and
-  calls). A size's versions copy the same notional (risk wallets: equity x r / 3%, i.e. sized at the usual stop;
-  trader size: `invo_size` + `invo_cap`), so only the exit differs. Variants: `liq_buffer_mult` 1 (the stop only has
-  to sit before liquidation) and limits of a wallet risking that notional at that stop (`risk x stop / 3`).
+  calls). Trader-size versions copy the same notional (`invo_size` + `invo_cap`) with limits of a wallet risking it
+  at that stop (`risk x stop / 3`). Risk wallets (owner choice "A", 2026-10-13; they used to copy the 3%-stop
+  notional at every stop, so "20% risk" at the 8% stop lost 53% of the wallet per stop hit and the 10%/20% x wide-stop
+  wallets lost 50-70% on one or two calls): an r% wallet loses r% of itself at ITS stop: copy = equity x r / stop
+  (3%: 300 x r/3, 8%: r/8, trader's exit: at the 30% guard, r/30), lifted to 1.05 x min_notional, limits of level
+  max(r, room for a minimum copy). Variants: `liq_buffer_mult` 1 (the stop only has to sit before liquidation).
 - 0 = the trader's exit: no stop of ours but a guard `invo_emergency_stop(mult)` = min(30%, 95% of (1/ceil(mult) -
-  2.5%)): a copy that big (mult = notional / equity) is liquidated about there (20% risk: ~11.2%, 10%: ~21%).
+  2.5%)): a copy that big (mult = notional / equity) is liquidated about there (trader size; the risk wallets' copies
+  are <= 0.67x equity at the trader's exit, so their guard is the full 30%).
   Positions always keep a valid stop (ledger/boot_repair).
 - `/invowallets` = `cardfmt.invo_wallets_card`: 3 best + 3 worst combinations (size · stop) and the average result of
   each stop over all sizes. Copying one call into all 18 takes ~0.1 s (measured in the e2e test env).
