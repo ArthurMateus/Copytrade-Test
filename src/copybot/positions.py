@@ -46,6 +46,7 @@ class PositionManager:
         self.pause_leaders = pause_leaders   # False for side wallets: they follow the main wallet's pauses
         self.sizer = sizer   # (move, price, our equity) -> wanted size; None = fixed risk (the gate still clamps)
         self.cap = cap       # our equity -> the most notional one copy may hold (opens and adds); None = no cap
+        self.handover = True  # the owner's exit hands the copy to a backer; False (Invo): it closes the copy
 
     # ---- ledger helpers -----------------------------------------------------------------------
     def _rec(self, ev: dict) -> dict:
@@ -175,7 +176,7 @@ class PositionManager:
         pos = self.st.positions.get(coin)
         if pos is None:
             return
-        if not pos.backers:
+        if not pos.backers or not self.handover:
             return self.close(coin, reason, move=move)
         new = max(pos.backers, key=lambda a: (self.score_of(a), a))
         prev = pos.leader

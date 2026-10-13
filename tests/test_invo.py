@@ -796,6 +796,57 @@ def test_a_copy_follows_its_call_when_invo_gives_it_a_new_id(invo_env, monkeypat
         stop_bot(bot, th)
 
 
+def test_a_second_trader_on_the_same_coin_and_side_adds_size(invo_env, monkeypatch):
+    """Owner request 2026-10-13 ("B"): when another followed trader calls the coin and side we already hold, the
+    copy gets extra size; its close takes it off; the first trader's exit closes everything (no hand-over); the
+    opposite side is still skipped; a second trader's close while the bot is off is caught at the restart."""
+    hl, dc, data, cdir, f, tok = invo_env
+    pa, pb = f.add_user("aaa")[0], f.add_user("bbb")[0]
+    bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
+    try:
+        dc.say("/invofollow aaa")
+        dc.say("/invofollow bbb")
+        assert wait_for(lambda: all(bot.invo_watch.known.get(n) is not None for n in ("aaa", "bbb")), timeout=10)
+        risk = next(w for w in bot.invo_extra if w.name == "invo_risk_5pct")
+        a1 = f.open_call(pa, "ETH", long=True, leverage=5, size=0.04, entry=3000.0)
+        assert wait_for(lambda: "ETH" in bot.invo.st.positions and "ETH" in risk.st.positions, timeout=10)
+        s0, r0 = bot.invo.st.positions["ETH"].size, risk.st.positions["ETH"].size
+        f.open_call(pb, "ETH", long=False, leverage=5, size=0.04, entry=3000.0)          # the other side: skipped
+        time.sleep(2)
+        assert bot.invo.st.positions["ETH"].size == s0 and bot.invo.st.positions["ETH"].side == 1
+        b1 = f.open_call(pb, "ETH", long=True, leverage=5, size=0.04, entry=3010.0)      # agrees: extra size
+        assert wait_for(lambda: risk.st.positions["ETH"].size > r0 * 1.3, timeout=10)
+        assert risk.st.positions["ETH"].size == pytest.approx(r0 * 1.5, rel=0.05)      # half a copy more
+        assert "invo:bbb" in risk.st.positions["ETH"].backers
+        assert wait_for(lambda: bot.invo.st.positions["ETH"].size > s0 * 1.05, timeout=10)
+        text = lambda: " ".join(m["text"] for m in dc.sent + dc.edits)
+        assert wait_for(lambda: "@bbb also called it" in text())
+        f.close_call(pb, b1)                                                              # bbb out: extra size off
+        assert wait_for(lambda: risk.st.positions["ETH"].size < r0 * 1.05, timeout=10)
+        assert risk.st.positions["ETH"].size == pytest.approx(r0, rel=0.05)
+        assert "invo:bbb" not in risk.st.positions["ETH"].backers
+        b2 = f.open_call(pb, "ETH", long=True, leverage=5, size=0.04, entry=3005.0)      # agrees again
+        assert wait_for(lambda: "invo:bbb" in risk.st.positions["ETH"].backers, timeout=10)
+    finally:
+        stop_bot(bot, th)
+        bot.lock.f.close()
+    f.close_call(pb, b2)                                                                  # while the bot is off
+    bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
+    try:
+        risk = next(w for w in bot.invo_extra if w.name == "invo_risk_5pct")
+        assert wait_for(lambda: "invo:bbb" not in risk.st.positions["ETH"].backers, timeout=10)
+        assert risk.st.positions["ETH"].size == pytest.approx(r0, rel=0.05)
+        b3 = f.open_call(pb, "ETH", long=True, leverage=5, size=0.04, entry=3005.0)
+        assert wait_for(lambda: "invo:bbb" in risk.st.positions["ETH"].backers, timeout=10)
+        f.close_call(pa, a1)                                                              # aaa out: all closed
+        assert wait_for(lambda: all("ETH" not in w.st.positions for w in bot.invo_wallets()), timeout=10)
+        f.close_call(pb, b3)
+        time.sleep(1.5)
+        assert all("ETH" not in w.st.positions for w in bot.invo_wallets())
+    finally:
+        stop_bot(bot, th)
+
+
 def test_each_book_controls_only_its_own_wallets(invo_env, monkeypatch):
     """Owner request 2026-10-10: /invopause, /invoresume, /invoflatten, /invoreset act on the Invo wallets only, and the
     /hyper ones no longer touch them."""
