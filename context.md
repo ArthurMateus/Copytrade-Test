@@ -4,11 +4,37 @@ Start here, then read CLAUDE.md (design, decisions, hard rules; the source of tr
 it). Repo: https://github.com/ArthurMateus/Copytrade-Test (branch `main`). Everything is **PAPER ONLY**: no keys, no
 signing, no order endpoints (`tests/test_safety.py` enforces it). Tests: `uv run pytest` (~320 tests, ~5.5 min).
 
+## Where we left off (2026-10-12 evening): read this first
+- Only the Invo book runs (`selection.enabled` / `sol.enabled` false). Commands on Discord have no prefix: /status,
+  /wallets, /traders, /follow, /unfollow, /flatten, /reset <PIN>, /picks, /block ...
+- Today: the first 96 Invo copies were analysed (CLAUDE.md "Invo fixes after the first 96 copies"; data in
+  `reports/trades-2026-10-12/`, git-ignored). Shipped: commits `2078b3a` (PF < 2 skips a portfolio, Invo reads 0.5 s
+  apart, copy cap 1% = 100$, the stop versions copy the same calls, copies record portfolio + how they closed) and
+  `459332e` (`invo.main_stop_pct = 0`: the main Invo wallets keep a copy open until the trader closes it; the 3% and
+  8% versions run as `<name>_stop3` / `_stop8`).
+- **Unverified:** after the owner's pull / flatten / reset, a BTC card (prateek) still showed a 3% stop (79,098.8 on
+  an 81,545.2 entry, 9x). With `459332e` the main wallet's stop is a ~30% guard at ~3x. Ask the owner to run
+  `git log --oneline -1` on the bot PC (must start with 459332e); if older: `git pull`, `/restart`, `/flatten`,
+  `/reset <PIN>`. /wallets must list `_stop3` names.
+- **Next task the owner asked for:** check the best Invo traders right now. Options: (1) the owner's Chrome via Claude
+  in Chrome (start Claude Code with `claude --chrome`; `/chrome` in the old session showed no tools): the OWNER signs
+  in to app.invoapp.com himself; Claude only reads pages on screen (leaderboard, profiles, portfolios), NEVER types a
+  password, NEVER reads or uses the login token or storage; (2) `/picks` in Discord pasted into the chat; (3) the bot
+  PC's `data\cache\invo` zipped and put in Downloads (the search's per-portfolio scores). Judge traders with today's
+  findings: copies need ~71% wins because average loss (-2.3%) > average win (+0.95%); profit factor counting
+  losing OPEN calls >= 2; beware many open calls (holding losers), tiny targets (below 3%), one call = most profit,
+  minute-long calls. nicush was best for us (+10.93$, mostly one STRK trade), profitales steady (+5.01$), limpan96
+  bad (3 of 11, owner told to unfollow).
+- Open ideas (owner to decide): the Invo search still replays copies with our 3% stop, not the trader's exit; skip
+  calls whose target is closer than our stop; a wallet for traders "missed by one rule".
+- On the Claude PC run tests with `uv run python -m pytest` (the `pytest` trampoline fails there); about 8.5 min,
+  353 tests.
+
 ## The owner and how to work with them
 - Not a Python developer. Windows 11, Brazilian Portuguese locale (Windows errors come out in Portuguese), PowerShell.
   Give exact commands, ONE per code block, and explain results in plain words.
 - Two PCs: **the bot PC** `C:\Users\gedeo\Copytrade-test` runs the bot 24/7 in a PowerShell restart loop
-  `while ($true) { uv run copybot; Start-Sleep 10 }`; **the Claude PC** (`C:\My stuff\Copytrade Test`) is where
+  `while ($true) { uv run copybot; Start-Sleep 10 }`; **the Claude PC** (`C:\projects\My stuff\Copytrade Test`) is where
   Claude edits, tests and pushes. To ship a change: commit + push here, then the owner runs in a SECOND PowerShell
   window on the bot PC `cd C:\Users\gedeo\Copytrade-test` then `git pull`, and sends `/restart` in Discord (no
   Ctrl+C needed: the loop restarts it with the new code).
