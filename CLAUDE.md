@@ -359,8 +359,10 @@ instances on the same wallet.
 - Copy gate (`invo_scorer.VERSION` 5): a scored portfolio is skipped only for `invo_scorer.HARD` reasons (loses after
   our costs, losses > wins, one call = most of the profit, too fast); quality points (score < 70, PF < 2...) only rank
   the search (`eligible` = a copied portfolio passing EVERY rule). `loses_overall` no longer blocks copies.
-- Agreement (two followed traders, same coin and side) already boosted Invo copies; in a capped wallet (trader
-  size) the boost now stays within `invo_cap` (it was consensus_risk_pct x5 = ~250$ on a ~60$ copy).
+- Correction 2026-10-13: Invo copies are NOT boosted by agreement. `Bot.invo_one` skips any new call on a coin the
+  wallet already holds (log `invo_skip why="coin already held"`, any trader, any side) before PositionManager, so
+  there are no Invo backers: the first trader's call alone opens, resizes and closes the copy. The `invo_cap` limit
+  on a boost (2026-10-12) only matters if that skip is ever lifted.
 
 ## Invo fixes after the first 96 copies (owner request 2026-10-12)
 - Analysis of the live ledgers (invo_calls: 96 closed copies, 60% won, -16.64$; avg win +0.95% vs avg loss -2.3% of the
