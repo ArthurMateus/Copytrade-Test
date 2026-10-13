@@ -214,11 +214,11 @@ def test_a_call_missing_from_one_read_is_closed_only_when_invo_confirms_it(fake,
     assert drain() == [] and w.known["akira"].keys() == {a, b}
     fake.blank_users.clear()
     fake.delete_call(pid, a)                                 # gone, never closed
-    for dt in (0, 5_000):
+    for dt in (0, 60_000):
         t[0] += dt
         w.round()
         assert drain() == []                                 # not yet: maybe Invo answered incompletely
-    t[0] += 6_000
+    t[0] += 61_000
     w.round()
     (k, _, c), = drain()
     assert (k, c.id, c.reason_closed) == ("invo_close", a, "call deleted by the trader")
@@ -226,6 +226,47 @@ def test_a_call_missing_from_one_read_is_closed_only_when_invo_confirms_it(fake,
     w.round()
     (k, _, c), = drain()                                     # confirmed: at once, with Invo's numbers
     assert (k, c.id, c.closing_price, c.reason_closed, c.is_open) == ("invo_close", b, 161.5, "target_hit", False)
+
+
+def test_open_calls_past_the_first_page_and_unread_portfolios_never_look_deleted(fake, tmp_path):
+    """Live 2026-10-13: a prateek BTC short (Casino portfolio, 1% calls) was closed as "deleted by the trader" while
+    the call was still open (he closed it an hour later, in profit). Only the first page of open calls (50) and of
+    portfolios (20) was read, and 10 s missing was enough. Now every page is read, and a call whose portfolio was not
+    fully read waits VANISH_UNREAD_S."""
+    tok = tmp_path / "invo.token"
+    tok.write_text("REFRESH0", encoding="utf-8")
+    pids = fake.add_user("prateek", n_portfolios=22)
+    pid, far = pids[0], pids[21]                             # far: on the second page of portfolios
+    t = [time.time() * 1000]
+    out = queue.Queue()
+    w = invo.Watcher(invo.InvoClient(fake.url, str(tok), min_interval_s=0), out, lambda: {"prateek"}, 0, 180,
+                     threading.Event(), now=lambda: t[0])
+    drain = lambda: [out.get_nowait() for _ in range(out.qsize())]
+    w.round()
+    drain()
+    btc = fake.open_call(pid, "BTC", long=False, created_ms=int(t[0]))
+    eth = fake.open_call(far, "ETH", created_ms=int(t[0]))
+    w.round()
+    assert sorted(c.id for k, _, c in drain() if k == "invo_open") == sorted([btc, eth])
+    for i in range(55):                                      # BTC falls to the second page of open calls
+        fake.open_call(pid, "SOL", created_ms=int(t[0]))
+    for _ in range(3):
+        t[0] += 100_000
+        w.round()
+    assert [k for k, *_ in drain() if k == "invo_close"] == [] and btc in w.known["prateek"]
+    fake.port_meta[far] = {"active": False}                  # a portfolio we cannot read for a while
+    fake.delete_call(far, eth)
+    for _ in range(3):
+        t[0] += 300_000
+        w.round()
+    assert drain() == [] and eth in w.known["prateek"]
+    t[0] += invo.VANISH_UNREAD_S * 1000
+    w.round()
+    assert [(k, c.id, c.reason_closed) for k, _, c in drain()] == [("invo_close", eth, invo.DELETED)]
+    fake.close_call(pid, btc, price=83435.0, reason="stop_loss_hit")
+    w.round()
+    (k, _, c), = drain()
+    assert (k, c.id, c.closing_price, c.reason_closed) == ("invo_close", btc, 83435.0, "stop_loss_hit")
 
 
 def test_a_call_counted_before_it_is_listed_is_still_copied(fake, tmp_path):
@@ -840,6 +881,7 @@ def test_every_size_runs_with_every_stop_and_only_the_exit_differs(invo_env, mon
     """Owner request 2026-10-12: 3%, 8% and "stop whenever the trader stops" for every size. Same call, same copy
     size; a 4% drop stops only the 3% version, the trader's close closes the others."""
     from copybot import runner
+    monkeypatch.setattr(invo, "VANISH_S", 10.0)              # (the deleted call below, without a 2-minute wait)
     hl, dc, data, cdir, f, tok = invo_env
     pid = f.add_user("nicush")[0]
     bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)

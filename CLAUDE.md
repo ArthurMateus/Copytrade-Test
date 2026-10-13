@@ -383,6 +383,16 @@ instances on the same wallet.
 - `invo.always_copy` (config/invo.toml: bluespire, solarflare, two real-money traders the checks skipped): those
   traders' portfolios are copied without the owner's floors or our rules (`Bot.invo_skip`); only `/invoblock` stops one.
 
+## Invo false "deleted" closes (live 2026-10-13)
+- A prateek BTC short (Casino portfolio, 1% x 40x calls) was closed after 20 min as "call deleted by the trader" at
+  84,017 while the call was still open: BTC only reached his close (83,435, +25% on Invo) about an hour later (HL 1m
+  candles). The watcher read only page 1 of open calls (50) and of portfolios (20), and 10 s missing was enough.
+- Now `InvoClient.portfolios` / `open_calls` / `live_open_calls` read every page (up to `invo.PAGES_MAX`) while a page
+  is full; `VANISH_S` 10 -> 120 s; a call whose portfolio was not fully read this poll (missing from the list,
+  inactive, fewer calls listed than counted) waits `VANISH_UNREAD_S` (1 h). A confirmed close (in the closed list) is
+  still immediate. Log `invo_call_missing` (once per call: portfolio_read, listed, active, open_count, read) shows why
+  a call went missing. The fake Invo pages both lists like Invo.
+
 ## Account value = perp + spot stablecoins (bug found live 2026-10-10)
 - `/hyperadd` scored with the PERP account value only while the daily search used the leaderboard value, so the same
   wallet passed the search (3% drop) and failed /hyperadd (max_drawdown>30%): 0x6d73... had 1,481$ in perps and

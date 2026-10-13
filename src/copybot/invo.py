@@ -56,8 +56,12 @@ RESIZE_MIN = 0.02         # a committed size change smaller than 2% is noise, no
 SLOW_MAX_S = 3.0          # Invo answered 429 (too many requests): spacing doubles up to this ...
 CALM_S = 60.0             # ... and eases back (x0.75 per CALM_S without a 429) to invo.request_gap_s
 DELETED = "call deleted by the trader"   # reason_closed of a call that vanished without showing in the closed list
-VANISH_S = 10.0           # a call missing from our reads but not in the trader's closed list is only treated as closed
-                          # (deleted) after this long: one incomplete answer must not close a copy (audit 2026-10-11)
+VANISH_S = 120.0          # a call missing from our reads but not in the trader's closed list is only treated as closed
+                          # (deleted) after this long: one incomplete answer must not close a copy (audit 2026-10-11;
+                          # 10 s until 2026-10-13, when a prateek BTC copy closed as "deleted" an hour before he did)
+VANISH_UNREAD_S = 3600.0  # ... and after this long when its portfolio was not fully read (missing from the list,
+                          # inactive, fewer calls listed than counted): a deleted portfolio still closes its copies
+PAGES_MAX = 10            # pages read of one list (portfolios 20 a page, open calls 50 a page)
 REREAD_MAX = 5            # an open-call list shorter than the portfolio's count is read again this many rounds
 OVERVIEW_S = 300.0        # a live portfolio's numbers (accuracy, return) are re-read this often; its positions every round
 
@@ -381,17 +385,44 @@ class InvoClient:
     def user(self, username: str) -> tuple[str, str] | None:
         return parse_user(self.post("/users/get_user", {"userId": None, "usersUsername": username}))
 
-    def portfolios(self, user_id: str) -> list[Portfolio]:
-        body = self.post("/portfolios/v2/get_users_portfolios",
-                         {"userId": user_id, "params": {"isDeleted": False, "page": 1, "size": 20}})
-        if not isinstance(body, dict) or not isinstance(body.get("portfolios"), list):
-            # an answer without the list is a failed read, not "no portfolios" (that would close every copy)
-            raise InvoError(200, "portfolio list missing in the answer")
-        return parse_portfolios(body)
+    def portfolios(self, user_id: str, size: int = 20) -> list[Portfolio]:
+        """Every portfolio of the trader: the next page is read while a page comes back full (2026-10-13: only the
+        first 20 were read, so a trader's other portfolios and their calls were invisible)."""
+        out: dict[str, Portfolio] = {}
+        for page in range(1, PAGES_MAX + 1):
+            body = self.post("/portfolios/v2/get_users_portfolios",
+                             {"userId": user_id, "params": {"isDeleted": False, "page": page, "size": size}})
+            if not isinstance(body, dict) or not isinstance(body.get("portfolios"), list):
+                # an answer without the list is a failed read, not "no portfolios" (that would close every copy)
+                raise InvoError(200, "portfolio list missing in the answer")
+            got = parse_portfolios(body)
+            out.update((p.id, p) for p in got)
+            if len(body["portfolios"]) < size:
+                break
+        return list(out.values())
 
-    def open_calls(self, portfolio_id: str) -> list[Call]:
-        return parse_calls(self.post("/investments/get_investments",
-                                     {"portfolioId": portfolio_id, "isOpen": True, "params": {"page": 1, "size": 50}}))
+    def open_calls(self, portfolio_id: str, size: int = 50) -> list[Call]:
+        """Every open call of the portfolio, page by page while a page is full (2026-10-13: only the first 50 were
+        read; in a portfolio with more open calls the others looked deleted and their copies were closed)."""
+        out: dict[str, Call] = {}
+        for page in range(1, PAGES_MAX + 1):
+            body = self.post("/investments/get_investments",
+                             {"portfolioId": portfolio_id, "isOpen": True, "params": {"page": page, "size": size}})
+            out.update((c.id, c) for c in parse_calls(body))
+            if len((body or {}).get("investmentsTicker") or []) < size:
+                break
+        return list(out.values())
+
+    def live_open_calls(self, portfolio_id: str) -> list[Call]:
+        """Every open position of a live portfolio (following the cursor)."""
+        out: dict[str, Call] = {}
+        cursor = None
+        for _ in range(PAGES_MAX):
+            got, cursor = self.live_calls(portfolio_id, True, cursor=cursor)
+            out.update((c.id, c) for c in got)
+            if not cursor or not got:
+                break
+        return list(out.values())
 
     def closed_calls(self, portfolio_id: str, page: int, size: int = 50) -> list[Call]:
         return parse_calls(self.post("/investments/get_investments",
@@ -431,7 +462,9 @@ class Watcher:
     ("invo_baseline", username, [open Calls]) so copies whose call closed meanwhile can be closed. One portfolio-list request per
     trader per poll; open calls are only read for portfolios whose open-trade list changed. A call that disappears is
     only reported closed once it shows in its portfolio's closed calls (with Invo's closing price and reason), or after
-    VANISH_S if it never does (deleted): one incomplete answer must not close a copy (audit 2026-10-11)."""
+    VANISH_S if it never does (deleted): one incomplete answer must not close a copy (audit 2026-10-11). A call whose
+    portfolio was not fully read (missing from the list, inactive, fewer calls listed than counted) waits
+    VANISH_UNREAD_S instead: its absence was not seen (2026-10-13)."""
 
     def __init__(self, client: InvoClient, out, traders, poll_s: float, max_age_s: float, stop: threading.Event,
                  now=lambda: int(time.time() * 1000), skip=lambda name, portfolio: None):
@@ -452,6 +485,7 @@ class Watcher:
         self.ports: dict[str, Portfolio] = {}              # portfolio id -> its last read
         self.missing: dict[str, float] = {}                # call id -> when it first went missing (not confirmed closed)
         self.rereads: dict[str, int] = {}                  # portfolio id -> reads in a row that returned too few calls
+        self.missing_logged: set[str] = set()              # call ids already logged as missing
         self.overviews: dict[str, tuple[float, Portfolio]] = {}   # live portfolio id -> (read at, with real numbers)
         self.live_bad: set[str] = set()                    # live portfolio ids whose positions Invo refuses to show
 
@@ -512,6 +546,7 @@ class Watcher:
             uid = self.uids[name] = found[0]
         now_open: dict[str, Call] = {}
         live_failed = False
+        full: set[str] = set()      # active portfolios whose open calls we have in full: only there a missing call
         ports = [self.live_stats(p) if p.kind == "live" else p for p in self.client.portfolios(uid)]
         self.stats[name] = [p for p in ports if p.active]
         for p in ports:
@@ -520,7 +555,7 @@ class Watcher:
                 continue
             if p.kind == "live":                            # real money: its open positions, read every round
                 try:
-                    got = self.client.live_calls(p.id, True)[0]
+                    got = self.client.live_open_calls(p.id)
                 except InvoAuthError:
                     raise
                 except Exception as e:                      # refused / failed: alert once, keep what we knew (a
@@ -537,6 +572,7 @@ class Watcher:
                     self.out.put(("invo_live", name, True, ""))
                 self.calls[p.id] = {c.id: c for c in got if c.is_open}
                 now_open.update(self.calls[p.id])
+                full.add(p.id)
                 continue
             sig = (p.open_count, tuple(sorted(p.open_assets)), p.updated_ms)     # an edit changes updated_ms
             if p.open_count and (self.sig.get(p.id) != sig or p.id not in self.calls):
@@ -552,6 +588,8 @@ class Watcher:
                 self.calls[p.id] = {}
             self.sig[p.id] = sig
             now_open.update(self.calls.get(p.id, {}))
+            if len(self.calls.get(p.id, {})) >= p.open_count:
+                full.add(p.id)
         before = self.known.get(name)
         if before is None and (live_failed or any(0 < self.rereads.get(p.id, 0) < REREAD_MAX
                                                   for p in ports if p.active)):
@@ -596,11 +634,22 @@ class Watcher:
             if done is UNREAD:                              # Invo did not answer (429...): never close on that
                 self.known[name][cid] = c
                 continue
-            if self.now() / 1000 - first >= VANISH_S:      # gone and never closed: deleted (or hidden) by the trader
+            # its portfolio missing from the list, inactive or listing fewer calls than it counts: we did not see the
+            # call's absence, only that it was not in what we read (2026-10-13: a still-open prateek call closed)
+            wait = VANISH_S if c.portfolio_id in full else VANISH_UNREAD_S
+            if self.now() / 1000 - first >= wait:          # gone and never closed: deleted (or hidden) by the trader
                 self.missing.pop(cid, None)
-                log.warn("invo_call_vanished", trader=name, ticker=c.ticker, call=cid)
+                log.warn("invo_call_vanished", trader=name, ticker=c.ticker, call=cid,
+                         missing_s=round(self.now() / 1000 - first), portfolio_read=c.portfolio_id in full)
                 self.out.put(("invo_close", name, replace(c, reason_closed=DELETED)))
             else:                                           # maybe one incomplete answer: keep it, look again
+                if cid not in self.missing_logged:
+                    self.missing_logged.add(cid)
+                    port = self.ports.get(c.portfolio_id)
+                    log.info("invo_call_missing", trader=name, ticker=c.ticker, call=cid,
+                             portfolio_read=c.portfolio_id in full, listed=port is not None,
+                             active=port.active if port else None, open_count=port.open_count if port else None,
+                             read=len(self.calls.get(c.portfolio_id, {})))
                 self.known[name][cid] = c
 
     def live_stats(self, p: Portfolio) -> Portfolio:

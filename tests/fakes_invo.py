@@ -145,14 +145,16 @@ class FakeInvo:
                 p.update({"winRate": 95.0, "plSnapshot": 150.0})   # a portfolio good enough to copy, unless a test says
                 p.update(self.port_meta.get(pid, {}))
                 out.append(p)
-            return {"portfolios": out}
+            pg = body.get("params") or {}                # paged like Invo (20 a page)
+            page, size = int(pg.get("page", 1)), int(pg.get("size", 20))
+            return {"portfolios": out[(page - 1) * size: page * size]}
         if path == "/investments/get_investments":
             pg = body.get("params") or {}
             page, size = int(pg.get("page", 1)), int(pg.get("size", 50))
             with self.lock:
                 if body.get("isOpen"):
-                    calls = [copy.deepcopy(c) for c in self.calls.get(body["portfolioId"], [])
-                             if c["id"] not in self.hidden]
+                    calls = [copy.deepcopy(c) for c in reversed(self.calls.get(body["portfolioId"], []))
+                             if c["id"] not in self.hidden][(page - 1) * size: page * size]   # newest first, paged
                 else:
                     calls = copy.deepcopy(self.closed.get(body["portfolioId"], [])[(page - 1) * size: page * size])
             r = copy.deepcopy(fixture("invo_investments_open.json"))
