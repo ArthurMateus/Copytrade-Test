@@ -18,7 +18,7 @@ signing, no order endpoints (`tests/test_safety.py` enforces it). Tests: `uv run
   `/reset <PIN>`. /wallets must list `_stop3` names.
 - **Next task the owner asked for:** check the best Invo traders right now. Options: (1) the owner's Chrome via Claude
   in Chrome (start Claude Code with `claude --chrome`; `/chrome` in the old session showed no tools): the OWNER signs
-  in to app.invoapp.com himself; Claude only reads pages on screen (leaderboard, profiles, portfolios), NEVER types a
+  in to app.invoapp.com themselves; Claude only reads pages on screen (leaderboard, profiles, portfolios), NEVER types a
   password, NEVER reads or uses the login token or storage; (2) `/picks` in Discord pasted into the chat; (3) the bot
   PC's `data\cache\invo` zipped and put in Downloads (the search's per-portfolio scores). Judge traders with today's
   findings: copies need ~71% wins because average loss (-2.3%) > average win (+0.95%); profit factor counting
