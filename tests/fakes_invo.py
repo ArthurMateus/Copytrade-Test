@@ -297,6 +297,17 @@ class FakeInvo:
                     c.update(entrySize=size * 100, positionSize=size, changes={"isAdded": True})
             self.updated[pid] = int(time.time() * 1000)
 
+    def reid_call(self, pid: str, cid: str, **fields) -> str:
+        """The trader edits an open call (stop, target, size) and Invo lists it under a NEW id with the same creation
+        time; the old id leaves the open list and never shows in the closed list (live 2026-10-13, prateek)."""
+        new = f"call-{next(self._n)}"
+        with self.lock:
+            for c in self.calls.get(pid, []):
+                if c["id"] == cid:
+                    c.update(id=new, **fields)
+            self.updated[pid] = int(time.time() * 1000)
+        return new
+
     def close_call(self, pid: str, cid: str, price: float | None = None, reason: str = "manual") -> None:
         """The trader closes the call: it leaves the open list and is first in the closed list (as on Invo)."""
         with self.lock:

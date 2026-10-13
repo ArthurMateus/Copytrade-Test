@@ -383,15 +383,25 @@ instances on the same wallet.
 - `invo.always_copy` (config/invo.toml: bluespire, solarflare, two real-money traders the checks skipped): those
   traders' portfolios are copied without the owner's floors or our rules (`Bot.invo_skip`); only `/invoblock` stops one.
 
-## Invo false "deleted" closes (live 2026-10-13)
-- A prateek BTC short (Casino portfolio, 1% x 40x calls) was closed after 20 min as "call deleted by the trader" at
-  84,017 while the call was still open: BTC only reached his close (83,435, +25% on Invo) about an hour later (HL 1m
-  candles). The watcher read only page 1 of open calls (50) and of portfolios (20), and 10 s missing was enough.
-- Now `InvoClient.portfolios` / `open_calls` / `live_open_calls` read every page (up to `invo.PAGES_MAX`) while a page
-  is full; `VANISH_S` 10 -> 120 s; a call whose portfolio was not fully read this poll (missing from the list,
-  inactive, fewer calls listed than counted) waits `VANISH_UNREAD_S` (1 h). A confirmed close (in the closed list) is
-  still immediate. Log `invo_call_missing` (once per call: portfolio_read, listed, active, open_count, read) shows why
-  a call went missing. The fake Invo pages both lists like Invo.
+## Invo re-ids edited calls; resizes always mirrored (live 2026-10-13)
+- A prateek BTC short (Casino, 1% x 40x) was closed after 20 min as "call deleted by the trader" at 84,017; he closed
+  it ~09:00 UTC at 83,435 (+25% on Invo). The bot PC log showed why: `invo_call_too_old BTC age_s=1238` then
+  `invo_call_vanished BTC` in the same round, and that pair a dozen times for prateek. Invo lists an EDITED call
+  under a NEW id with the same createdAt; the old id never shows in the closed list.
+- Watcher: a vanished call with a new call of the same portfolio, ticker and side created within `invo.REPLACED_S`
+  (120 s) of it (new this round, or first seen too old: `Watcher.late`) is the same call -> `("invo_replace", user,
+  old, new)` (log `invo_call_replaced`); `Bot.invo_one` re-keys `invo_calls`, writes `invo_link` with the new id
+  (log `invo_relinked`) and mirrors a size change as an `invo_resize`. At a restart `on_invo_baseline` re-links a
+  copy whose saved call id is gone to an open call of that coin/side created near the copy's `opened_ms`.
+- Resizes (owner request 2026-10-13: "if the trader resizes it, resize it, up or down, always"): changes below
+  `RESIZE_MIN` add up (the known call keeps the size we follow); a portfolio with open calls is re-read every
+  `invo.RECHECK_S` (60 s) even if Invo's updatedAt did not move; `Bot.invo_catch_up` brings a copy found at a restart
+  to the call's current size (paper calls). Limits still apply: an add goes through the RiskGate and `invo_cap`, an
+  unfollowed trader's adds are not copied, and a move under min_notional waits for the next one (target-based).
+- Also: `InvoClient.portfolios` / `open_calls` / `live_open_calls` read every page (up to `invo.PAGES_MAX`) while a
+  page is full (was page 1 only: 20 portfolios, 50 open calls); a call whose portfolio was not fully read this poll
+  (missing, inactive, fewer listed than counted) waits `VANISH_UNREAD_S` (1 h) instead of `VANISH_S` (10 s); log
+  `invo_call_missing` once per call says why it went missing. The fake Invo pages both lists and has `reid_call`.
 
 ## Account value = perp + spot stablecoins (bug found live 2026-10-10)
 - `/hyperadd` scored with the PERP account value only while the daily search used the leaderboard value, so the same

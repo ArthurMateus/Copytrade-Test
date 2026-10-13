@@ -56,9 +56,12 @@ RESIZE_MIN = 0.02         # a committed size change smaller than 2% is noise, no
 SLOW_MAX_S = 3.0          # Invo answered 429 (too many requests): spacing doubles up to this ...
 CALM_S = 60.0             # ... and eases back (x0.75 per CALM_S without a 429) to invo.request_gap_s
 DELETED = "call deleted by the trader"   # reason_closed of a call that vanished without showing in the closed list
-VANISH_S = 120.0          # a call missing from our reads but not in the trader's closed list is only treated as closed
-                          # (deleted) after this long: one incomplete answer must not close a copy (audit 2026-10-11;
-                          # 10 s until 2026-10-13, when a prateek BTC copy closed as "deleted" an hour before he did)
+VANISH_S = 10.0           # a call missing from our reads but not in the trader's closed list is only treated as closed
+                          # (deleted) after this long: one incomplete answer must not close a copy (audit 2026-10-11)
+RECHECK_S = 60.0          # open calls of a portfolio holding calls are re-read at least this often even if Invo's
+                          # updatedAt did not move, so no add or trim is missed (owner request 2026-10-13)
+REPLACED_S = 120.0        # a new call with the same portfolio, coin and side created within this of a vanished one
+                          # is that call under a new id (Invo re-ids an edited call, live 2026-10-13)
 VANISH_UNREAD_S = 3600.0  # ... and after this long when its portfolio was not fully read (missing from the list,
                           # inactive, fewer calls listed than counted): a deleted portfolio still closes its copies
 PAGES_MAX = 10            # pages read of one list (portfolios 20 a page, open calls 50 a page)
@@ -486,6 +489,9 @@ class Watcher:
         self.missing: dict[str, float] = {}                # call id -> when it first went missing (not confirmed closed)
         self.rereads: dict[str, int] = {}                  # portfolio id -> reads in a row that returned too few calls
         self.missing_logged: set[str] = set()              # call ids already logged as missing
+        self.read_at: dict[str, float] = {}                # portfolio id -> when its open calls were last read
+        self.late: set[str] = set()                        # open call ids first seen too old (maybe a re-id)
+        self.claimed: set[str] = set()                     # new ids that replaced a vanished call
         self.overviews: dict[str, tuple[float, Portfolio]] = {}   # live portfolio id -> (read at, with real numbers)
         self.live_bad: set[str] = set()                    # live portfolio ids whose positions Invo refuses to show
 
@@ -575,8 +581,10 @@ class Watcher:
                 full.add(p.id)
                 continue
             sig = (p.open_count, tuple(sorted(p.open_assets)), p.updated_ms)     # an edit changes updated_ms
-            if p.open_count and (self.sig.get(p.id) != sig or p.id not in self.calls):
+            if p.open_count and (self.sig.get(p.id) != sig or p.id not in self.calls
+                                 or time.monotonic() - self.read_at.get(p.id, 0.0) >= RECHECK_S):
                 got = self.calls[p.id] = {c.id: c for c in self.client.open_calls(p.id) if c.is_open}
+                self.read_at[p.id] = time.monotonic()
                 # fewer calls than the portfolio counts: Invo's list may lag its count, so read it again next round
                 # instead of waiting for the next change (the new call would be too old by then; audit 2026-10-11)
                 n = self.rereads[p.id] = self.rereads.get(p.id, 0) + 1 if len(got) < p.open_count else 0
@@ -601,8 +609,27 @@ class Watcher:
             # call closed while we were not watching
             self.out.put(("invo_baseline", name, list(now_open.values())))
             return
+        # Invo re-ids an edited call (same coin, side and creation time, new id): the old id vanishes from the open list
+        # without ever showing in the closed list, the new one looks like a 20-minute-old new call. That closed our
+        # copy as "deleted" and never copied the new id (live 2026-10-13, prateek's BTC short). Same call: re-link.
+        for cid, c in list(before.items()):
+            if cid in now_open:
+                continue
+            twin = next((n for nid, n in now_open.items()
+                         if (nid not in before or nid in self.late) and nid not in self.claimed
+                         and n.portfolio_id == c.portfolio_id and n.ticker == c.ticker and n.long == c.long
+                         and abs(n.created_ms - c.created_ms) <= REPLACED_S * 1000), None)
+            if twin is None:
+                continue
+            self.claimed.add(twin.id)
+            self.late.discard(twin.id)
+            self.missing.pop(cid, None)
+            del before[cid]
+            log.info("invo_call_replaced", trader=name, ticker=c.ticker, old=cid, new=twin.id,
+                     old_size=round(c.committed, 4), new_size=round(twin.committed, 4))
+            self.out.put(("invo_replace", name, c, twin))
         for cid, c in now_open.items():
-            if cid not in before:
+            if cid not in before and cid not in self.claimed and cid not in self.late:
                 age_s = (self.now() - c.created_ms) / 1000
                 port = self.ports.get(c.portfolio_id)
                 why = self.skip(name, port) if port is not None else None
@@ -612,6 +639,7 @@ class Watcher:
                     self.out.put(("invo_open", name, c))
                 else:
                     log.info("invo_call_too_old", trader=name, ticker=c.ticker, age_s=round(age_s))
+                    self.late.add(cid)       # (maybe a re-id of a call whose old id vanishes later)
         for cid, c in before.items():
             if cid in now_open:
                 self.missing.pop(cid, None)
@@ -624,7 +652,9 @@ class Watcher:
                         now_open[cid] = replace(new, entry_size=c.entry_size, size=c.size)
                 elif c.exposure > 0 and abs(new.exposure - c.exposure) / c.exposure > RESIZE_MIN:
                     self.out.put(("invo_resize", name, c, new))
-                continue
+                elif c.exposure > 0:            # below RESIZE_MIN: compare the next read with the size we follow,
+                    now_open[cid] = replace(new, entry_size=c.entry_size, size=c.size, leverage=c.leverage)
+                continue                        # so small adds or trims add up until they count (2026-10-13)
             done = self.closed_call(c)
             if done is not None and done is not UNREAD:     # confirmed: the trader closed it (real price and reason)
                 self.missing.pop(cid, None)

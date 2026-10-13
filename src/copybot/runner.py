@@ -24,7 +24,8 @@ from pathlib import Path
 from copybot import config, hl, log, picks, cardfmt
 from copybot.broker import PaperBroker
 from copybot.detector import Detector, Move
-from copybot.invo import DELETED as INVO_DELETED, PREFIX as INVO, InvoClient, Watcher as InvoWatcher
+from copybot.invo import (DELETED as INVO_DELETED, PREFIX as INVO, REPLACED_S as INVO_REPLACED_S,
+                          RESIZE_MIN as INVO_RESIZE_MIN, InvoClient, Watcher as InvoWatcher)
 from copybot.invo_scorer import InvoScorer, copy_blockers, reason_text as invo_reason
 
 EMERGENCY_STOP_PCT = 30.0   # "trader's exit" Invo wallets: the farthest stop, only a guard (a normal trade never gets
@@ -664,12 +665,24 @@ class Bot:
             coin, _ = self.invo_trade_coin(c.ticker)
             if coin is not None:
                 open_by.setdefault((coin, 1 if c.long else -1), []).append(c)
+        by_id = {c.id: c for c in calls}
         for w in self.invo_wallets():
             for p in [p for p in w.st.positions.values() if p.leader == leader]:
                 link = w.st.invo_links.get(p.pos_id)
+                if link and link["call"] not in ids:
+                    # Invo re-ids an edited call (live 2026-10-13): the same coin and side, created when we copied it
+                    twin = next((c for c in open_by.get((p.coin, p.side), []) if c.id not in self.invo_linked(w)
+                                 and abs(c.created_ms - p.opened_ms) <= (self.cfg.invo.max_call_age_s
+                                                                         + INVO_REPLACED_S) * 1000), None)
+                    if twin is not None:
+                        log.info("invo_relinked", wallet=w.name, trader=trader, coin=p.coin, old=link["call"],
+                                 new=twin.id, at="baseline")
+                        self.invo_calls.pop((w.name, link["call"]), None)
+                        w.rec({"ev": "invo_link", "pos_id": p.pos_id, "call": twin.id})
                 if link:
                     if link["call"] in ids:
                         self.invo_calls[(w.name, link["call"])] = p.coin
+                        self.invo_catch_up(w, p, by_id[link["call"]])
                         continue
                     self.invo_calls.pop((w.name, link["call"]), None)
                 else:                                          # copies opened before calls were saved with them
@@ -688,6 +701,30 @@ class Bot:
                     log.exception("invo_wallet_error", wallet=w.name, kind="invo_baseline")
                 finally:
                     self._invo_close_why = None
+
+    def invo_linked(self, w) -> set:
+        """Ids of the calls wallet w's open copies follow."""
+        return {w.st.invo_links[q.pos_id]["call"] for q in w.st.positions.values() if q.pos_id in w.st.invo_links}
+
+    def invo_catch_up(self, w, p, call) -> None:
+        """A copy found again at a restart takes the call's size now (owner request 2026-10-13: "if the trader
+        resizes it, resize it, always"): an add or trim made while the bot was off is mirrored like any other.
+        Paper calls only: a real-money call's size is a % of an equity that moves with the price."""
+        if call.units > 0 or call.exposure <= 0 or p.k <= 0:
+            return
+        was = p.size / p.k                                  # the trader's exposure our copy last followed
+        if abs(call.exposure - was) / was <= INVO_RESIZE_MIN:
+            return
+        if p.leader not in w.st.followed and call.exposure > was:
+            return                                          # an unfollowed trader's adds are not copied
+        log.info("invo_resize", wallet=w.name, trader=p.leader[len(INVO):], coin=p.coin, old=round(was, 4),
+                 new=round(call.exposure, 4), at="baseline")
+        _, fx = self.invo_trade_coin(call.ticker)
+        try:
+            w.pm.on_move(Move(p.leader, p.coin, p.side * was, p.side * call.exposure, int(time.time() * 1000),
+                              call.created_ms, abs(hash(call.id)) % 10**12 + 2, (), call.entry * fx, 1))
+        except Exception:
+            log.exception("invo_wallet_error", wallet=w.name, kind="invo_catch_up")
 
     def invo_closed_by(self, w, p, call_id: str, how: str) -> None:
         """Records how a copy closed by the trader's exit was known (ledger `invo_link`, field closed_by)."""
@@ -789,6 +826,21 @@ class Bot:
                 if primary:
                     self.invo_card(p, force=True)
             return
+        if kind == "invo_replace":
+            # the trader's edited call under a new id (live 2026-10-13): our copy now follows the new id, and a size
+            # change in the edit is mirrored like any add or trim
+            held = self.invo_held(w, call, coin)
+            p = w.st.positions.get(held) if held else None
+            if p is None or p.leader != leader or p.side != side:
+                return
+            self.invo_calls.pop((w.name, call.id), None)
+            self.invo_calls[(w.name, new.id)] = held
+            w.rec({"ev": "invo_link", "pos_id": p.pos_id, "call": new.id})
+            log.info("invo_relinked", wallet=w.name, trader=trader, coin=held, old=call.id, new=new.id)
+            if call.exposure > 0 and abs(new.exposure - call.exposure) / call.exposure > INVO_RESIZE_MIN:
+                kind = "invo_resize"
+            else:
+                return
         if kind == "invo_resize":
             held = self.invo_held(w, new, coin)
             p = w.st.positions.get(held) if held else None
@@ -1019,7 +1071,7 @@ class Bot:
             self.on_searched(item[1], item[3])
         elif kind == "added":
             self.on_added(*item[1:])
-        elif kind in ("invo_open", "invo_close", "invo_resize"):
+        elif kind in ("invo_open", "invo_close", "invo_resize", "invo_replace"):
             try:
                 self.on_invo(kind, item[1], item[2], *item[3:])
             except Exception:

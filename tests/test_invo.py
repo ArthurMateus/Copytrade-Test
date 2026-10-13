@@ -214,11 +214,11 @@ def test_a_call_missing_from_one_read_is_closed_only_when_invo_confirms_it(fake,
     assert drain() == [] and w.known["akira"].keys() == {a, b}
     fake.blank_users.clear()
     fake.delete_call(pid, a)                                 # gone, never closed
-    for dt in (0, 60_000):
+    for dt in (0, 5_000):
         t[0] += dt
         w.round()
         assert drain() == []                                 # not yet: maybe Invo answered incompletely
-    t[0] += 61_000
+    t[0] += 6_000
     w.round()
     (k, _, c), = drain()
     assert (k, c.id, c.reason_closed) == ("invo_close", a, "call deleted by the trader")
@@ -267,6 +267,45 @@ def test_open_calls_past_the_first_page_and_unread_portfolios_never_look_deleted
     w.round()
     (k, _, c), = drain()
     assert (k, c.id, c.closing_price, c.reason_closed) == ("invo_close", btc, 83435.0, "stop_loss_hit")
+
+
+def test_a_call_invo_lists_under_a_new_id_is_the_same_call(fake, tmp_path):
+    """Live 2026-10-13: after prateek edited his BTC short, Invo listed it under a new id (same creation time): the
+    old id vanished (never in the closed list) and the new one looked like a 20-minute-old new call. Our copy was
+    closed as "deleted" and the new id ignored; he closed it an hour later in profit. Now it is one call."""
+    tok = tmp_path / "invo.token"
+    tok.write_text("REFRESH0", encoding="utf-8")
+    pid = fake.add_user("prateek")[0]
+    t = [time.time() * 1000]
+    out = queue.Queue()
+    w = invo.Watcher(invo.InvoClient(fake.url, str(tok), min_interval_s=0), out, lambda: {"prateek"}, 0, 180,
+                     threading.Event(), now=lambda: t[0])
+    drain = lambda: [out.get_nowait() for _ in range(out.qsize())]
+    w.round()
+    drain()
+    old = fake.open_call(pid, "BTC", long=False, leverage=40, size=0.01, entry=83963.0, created_ms=int(t[0]))
+    w.round()
+    assert [k for k, *_ in drain()] == ["invo_open"]
+    t[0] += 1200_000                                         # 20 minutes later he sets a stop: a new id
+    new = fake.reid_call(pid, old, stopLoss=83435.0)
+    for _ in range(3):
+        t[0] += 30_000
+        w.round()
+    (k, _, a, b), = drain()
+    assert (k, a.id, b.id, b.stop) == ("invo_replace", old, new, 83435.0)
+    fresh = fake.open_call(pid, "BTC", long=False, created_ms=int(t[0]))   # a real new call on the same coin: a new call
+    gone = fake.open_call(pid, "ETH", created_ms=int(t[0]))
+    w.round()
+    assert sorted(c.id for k, _, c in drain()) == sorted([fresh, gone])
+    fake.delete_call(pid, gone)                                  # deleted, no twin: still closed after VANISH_S
+    t[0] += 11_000
+    w.round()
+    t[0] += 11_000
+    w.round()
+    assert [(k, c.id) for k, _, c in drain()] == [("invo_close", gone)]
+    fake.close_call(pid, new, price=83435.0, reason="stop_loss_hit")
+    w.round()
+    assert [(k, c.id, c.closing_price) for k, _, c in drain()] == [("invo_close", new, 83435.0)]
 
 
 def test_a_call_counted_before_it_is_listed_is_still_copied(fake, tmp_path):
@@ -681,6 +720,19 @@ def test_watcher_reports_an_add_or_a_trim_of_an_open_call(fake, tmp_path):
     fake.resize_call(pid, cid, 0.101)                      # a 1% change is noise
     w.poll("nicush")
     assert out.empty()
+    time.sleep(0.01)
+    fake.resize_call(pid, cid, 0.1025)                     # ... but small changes add up (owner request 2026-10-13)
+    w.poll("nicush")
+    k, name, old, new = out.get_nowait()
+    assert k == "invo_resize" and old.committed == pytest.approx(0.10) and new.committed == pytest.approx(0.1025)
+    with fake.lock:                                        # an edit Invo does not flag (updatedAt unchanged) ...
+        fake.calls[pid][0].update(entrySize=5.0, positionSize=0.05)
+    w.poll("nicush")
+    assert out.empty()
+    w.read_at.clear()                                      # ... is read at the next RECHECK_S
+    w.poll("nicush")
+    k, name, old, new = out.get_nowait()
+    assert k == "invo_resize" and new.committed == pytest.approx(0.05)
 
 
 def test_bot_mirrors_the_traders_add_and_partial_close(invo_env, monkeypatch):
@@ -705,6 +757,39 @@ def test_bot_mirrors_the_traders_add_and_partial_close(invo_env, monkeypatch):
         assert wait_for(lambda: "resized by the trader 6.0% → 3.0%" in text())
         f.close_call(pid, cid)
         assert wait_for(lambda: "ETH" not in bot.invo.st.positions, timeout=10)
+    finally:
+        stop_bot(bot, th)
+
+
+def test_a_copy_follows_its_call_when_invo_gives_it_a_new_id(invo_env, monkeypatch):
+    """Live 2026-10-13 (prateek's BTC short): an edited call re-listed under a new id keeps our copy open in every
+    wallet, a size change in the edit is mirrored, and the new id's close closes the copy."""
+    hl, dc, data, cdir, f, tok = invo_env
+    pid = f.add_user("prateek")[0]
+    bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
+    try:
+        dc.say("/invofollow prateek")
+        assert wait_for(lambda: bot.invo_watch.known.get("prateek") is not None, timeout=10)
+        cid = f.open_call(pid, "ETH", long=False, leverage=5, size=0.04, entry=3000.0)
+        assert wait_for(lambda: "ETH" in bot.invo.st.positions and all(
+            "ETH" in w.st.positions for w in bot.invo_extra), timeout=10)
+        size0 = bot.invo.st.positions["ETH"].size
+        pos_id = bot.invo.st.positions["ETH"].pos_id
+        new = f.reid_call(pid, cid, stopLoss=2900.0)                                 # edited: new id, same call
+        assert wait_for(lambda: bot.invo.st.invo_links[pos_id]["call"] == new, timeout=10)
+        time.sleep(1.5)
+        assert all("ETH" in w.st.positions for w in bot.invo_wallets())             # nothing closed
+        assert bot.invo.st.positions["ETH"].size == size0
+        new2 = f.reid_call(pid, new, entrySize=2.0, positionSize=0.02)               # edited again: half off
+        assert wait_for(lambda: bot.invo.st.positions["ETH"].size < size0 * 0.6, timeout=10)
+        assert bot.invo.st.positions["ETH"].size == pytest.approx(size0 * 0.5, rel=0.03)
+        new3 = f.reid_call(pid, new2, entrySize=3.0, positionSize=0.03)              # and up again: +50%
+        assert wait_for(lambda: bot.invo.st.positions["ETH"].size > size0 * 0.7, timeout=10)
+        assert bot.invo.st.positions["ETH"].size == pytest.approx(size0 * 0.75, rel=0.03)
+        new2 = new3
+        f.close_call(pid, new2, price=2950.0)
+        assert wait_for(lambda: all("ETH" not in w.st.positions for w in bot.invo_wallets()), timeout=10)
+        assert bot.invo.st.invo_links[pos_id]["closed_by"] == "confirmed"
     finally:
         stop_bot(bot, th)
 
@@ -815,6 +900,39 @@ def test_after_a_restart_only_the_copied_call_moves_our_copy(invo_env, monkeypat
         assert "ETH" in bot.invo.st.positions                                # the other portfolio's close: ignored
         f.close_call(good, a)
         assert wait_for(lambda: "ETH" not in bot.invo.st.positions, timeout=10)
+    finally:
+        stop_bot(bot, th)
+
+
+def test_a_resize_or_a_new_id_while_the_bot_was_off_is_applied_at_the_restart(invo_env, monkeypatch):
+    """Owner request 2026-10-13 ("if the trader resizes it, resize it, always"): an add or a trim made while the bot
+    was off is mirrored when it starts again, also when Invo re-ided the call meanwhile."""
+    hl, dc, data, cdir, f, tok = invo_env
+    pid = f.add_user("prateek")[0]
+    bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
+    try:
+        dc.say("/invofollow prateek")
+        assert wait_for(lambda: bot.invo_watch.known.get("prateek") is not None, timeout=10)
+        a = f.open_call(pid, "ETH", long=True, leverage=5, size=0.04, entry=3000.0)
+        assert wait_for(lambda: "ETH" in bot.invo.st.positions, timeout=10)
+        size0 = bot.invo.st.positions["ETH"].size
+        r1 = bot.invo_extra[0]
+        assert wait_for(lambda: "ETH" in r1.st.positions, timeout=10)
+        size1 = r1.st.positions["ETH"].size
+    finally:
+        stop_bot(bot, th)
+        bot.lock.f.close()
+    b = f.reid_call(pid, a, entrySize=6.0, positionSize=0.06)                         # while off: new id, +50%
+    bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
+    try:
+        assert wait_for(lambda: bot.invo.st.positions.get("ETH") is not None
+                        and bot.invo.st.positions["ETH"].size > size0 * 1.4, timeout=10)
+        assert bot.invo.st.positions["ETH"].size == pytest.approx(size0 * 1.5, rel=0.03)
+        r1 = next(w for w in bot.invo_extra if w.name == r1.name)
+        assert wait_for(lambda: r1.st.positions["ETH"].size > size1 * 1.4, timeout=10)
+        assert bot.invo_calls[("invo_calls", b)] == "ETH"
+        f.close_call(pid, b)
+        assert wait_for(lambda: all("ETH" not in w.st.positions for w in bot.invo_wallets()), timeout=10)
     finally:
         stop_bot(bot, th)
 
