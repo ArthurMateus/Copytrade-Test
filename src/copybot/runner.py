@@ -161,6 +161,11 @@ class Bot:
                                    cap=cap, own_leaders=True,
                                    **(dict(notify=self.on_invo_notify, pause_leaders=True) if primary else {}))
                     x.size_label, x.stop_label = size_label, stop_word(s)
+                    if s == 0:
+                        # the trader's exit: the copy takes the trader's leverage (at most 10x) and the guard stop
+                        # sits just before that leverage's liquidation (owner request 2026-10-14: a 40x call -> 10x)
+                        x.gate.follow_leverage = True
+                        x.gate.call_leverage = lambda: self._invo_call.leverage if self._invo_call else None
                     if s != main:
                         x.base_name = name           # its main-stop version: the calls it copies (see invo_one)
                     variants.append((x, s, stop))
@@ -329,7 +334,7 @@ class Bot:
             if not w.st.genesis_ms:
                 w.rec({"ev": "genesis", "equity0": w.cfg.risk.start_equity, "btc_px0": self.st.btc_px0})
             w.rec({"ev": "boot", "positions": len(w.st.positions), "followed": len(w.st.followed)})
-            side_problems = boot_repair(w.st, w.rec, w.gate, w.name)
+            side_problems = boot_repair(w.st, w.rec, w.gate, w.name, self.assets)
             if side_problems:
                 self.ui.send(f"⚠️ <b>Side wallet {cardfmt.esc(w.label)} restarted with uncertainty</b> · ⏸️ its entries "
                              f"paused\n" + "\n".join(f"• {cardfmt.esc(x)}" for x in side_problems[:5])
@@ -747,7 +752,7 @@ class Bot:
         """Appends a line to an Invo copy's card text (kept in its ledger link)."""
         if p.pos_id not in self.invo_info:
             return
-        self.invo_info[p.pos_id] += f" · {text}"
+        self.invo_info[p.pos_id] += f"\n🤝 {text}"
         self.invo.rec({"ev": "invo_link", "pos_id": p.pos_id, "call": self.invo.st.invo_links[p.pos_id]["call"],
                        "info": self.invo_info[p.pos_id]})
         self.invo_card(p, force=True)
@@ -867,13 +872,17 @@ class Bot:
                     log.info("invo_entry_gap", trader=trader, coin=coin, gap_pct=round(gap, 3),
                              their=call.entry * fx, ours=p.entry_px,
                              age_s=round((time.time() * 1000 - call.created_ms) / 1000, 1))
-                    word = "worse" if gap > 0 else "better" if gap < 0 else "same"
                     kind_word = "real-money" if call.live else "paper"
-                    info = (f"Invo call by @{cardfmt.esc(trader)}: {call.committed * 100:.1f}% x {call.leverage:g}x of "
-                            f"their {kind_word} portfolio{' ' + cardfmt.esc(title) if title else ''}"
-                            f" · their entry {cardfmt.fpx(call.entry)} (ours {gap:+.2f}% {word})"
-                            f" · target {cardfmt.fpx(call.target) if call.target else '-'} · stop "
-                            f"{cardfmt.fpx(call.stop) if call.stop else '-'}")
+                    # what getting in after them cost: the price gap on our notional (+ = we paid more)
+                    cost = gap / 100 * p.size * p.entry_px
+                    late = (f"{p.open_lag_ms / 1000:.1f}s after them" if p.open_lag_ms is not None else "after them")
+                    fill = ("same price as theirs" if abs(gap) < 0.005 else
+                            f"{abs(gap):.2f}% {'worse' if gap > 0 else 'better'} than their {cardfmt.fpx(call.entry)}"
+                            f" ({cardfmt.fusd(-cost)})")
+                    tp_sl = " · ".join(f"{n} {cardfmt.fpx(v)}" for n, v in (("target", call.target), ("their stop", call.stop)) if v)
+                    info = (f"🧾 <b>@{cardfmt.esc(trader)}</b> · {call.committed * 100:.1f}% x {call.leverage:g}x · "
+                            f"{kind_word}{' ' + cardfmt.esc(title) if title else ''}\n"
+                            f"⏱️ In {late} · {fill}" + (f"\n🎯 {tp_sl}" if tp_sl else ""))
                     self.invo_info[p.pos_id] = info
                 w.rec({"ev": "invo_link", "pos_id": p.pos_id, "call": call.id, "info": info,
                        "portfolio": call.portfolio_id, "title": title, "live": call.live})
@@ -909,8 +918,9 @@ class Bot:
                               new.created_ms, abs(hash(new.id)) % 10**12 + 1, (), new.entry * fx, 1))
             p = w.st.positions.get(held)
             if primary and p is not None and p.pos_id in self.invo_info:
-                self.invo_info[p.pos_id] = self.invo_info[p.pos_id].split(" · resized")[0] + (
-                    f" · resized by the trader {call.committed * 100:.1f}% → {new.committed * 100:.1f}%")
+                base_info = re.sub(r"\n↕️[^\n]*| · resized by the trader[^\n]*", "", self.invo_info[p.pos_id])
+                self.invo_info[p.pos_id] = base_info + (
+                    f"\n↕️ Trader resized {call.committed * 100:.1f}% → {new.committed * 100:.1f}%")
                 w.rec({"ev": "invo_link", "pos_id": p.pos_id, "call": new.id, "info": self.invo_info[p.pos_id]})
             log.info("invo_resize", wallet=w.name, trader=trader, coin=held, old=round(call.committed, 4),
                      new=round(new.committed, 4), ours_before=before, ours_after=p.size if p else 0)
@@ -951,8 +961,10 @@ class Bot:
         key = f"invo:pos:{t['pos_id']}"
         self.last_body.pop(key, None)
         info = self.invo_info.pop(t["pos_id"], "")
-        self.ui.final_card(key, cardfmt.closed_card(t) + "\n🧾 Invo" + (f" · closed by the trader ({cardfmt.esc(why)})"
-                                                                     if why else "") + (f"\n{info}" if info else ""))
+        if info and not info.startswith("🧾"):
+            info = "🧾 " + info
+        self.ui.final_card(key, cardfmt.closed_card(t) + (f"\n{info}" if info else "\n🧾 Invo")
+                           + (f"\n🏁 closed by the trader ({cardfmt.esc(why)})" if why else ""))
 
     def score_dict(self, leader: str) -> dict:
         return self.scores.get(leader) or self.scorer.scores.get(leader) or {}
@@ -1536,18 +1548,22 @@ class Bot:
             self.ui.send(f"⏸️ <b>Leader paused</b> <code>{cardfmt.short(kw['leader'])}</code> · "
                          f"{cardfmt.esc(kw['reason'])}\nNo new copies from it; open copies keep mirroring exits.")
 
-    def card_for(self, p, force: bool = False, prefix: str = "pos:", extra: str = "") -> None:
+    def card_for(self, p, force: bool = False, prefix: str = "pos:", extra: str = "", fmt=None) -> None:
         key = f"{prefix}{p.pos_id}"
         mark = self.mids.get(p.coin)
-        body = cardfmt.trade_card(p, mark, 0) + extra
+        fmt = fmt or cardfmt.trade_card
+        body = fmt(p, mark, 0) + extra
         if not force and self.last_body.get(key) == body:
             return   # nothing changed: no edit (the time stamp alone is not a change)
         self.last_body[key] = body
-        self.ui.set_card(key, cardfmt.trade_card(p, mark, now_ms()) + extra)
+        self.ui.set_card(key, fmt(p, mark, now_ms()) + extra)
 
     def invo_card(self, p, force: bool = False) -> None:
         info = self.invo_info.get(p.pos_id)
-        self.card_for(p, force, prefix="invo:pos:", extra=f"\n🧾 {info}" if info else "\n🧾 Invo call")
+        if info and not info.startswith("🧾"):
+            info = "🧾 " + info                       # copies opened before the 2026-10-14 layout
+        self.card_for(p, force, prefix="invo:pos:", extra=f"\n{info}" if info else "\n🧾 Invo call",
+                      fmt=cardfmt.invo_trade_card)
 
     def refresh_ui(self) -> None:
         for p in list(self.st.positions.values()):
@@ -1570,7 +1586,7 @@ class Bot:
                 return cardfmt.invo_wallets_card([(x.size_label, x.stop_label, x.st) for x in self.invo_wallets()],
                                                  self.mids, now)
             if key == "invo:trades":
-                return cardfmt.trades_card(w.st, self.mids, now, title="🧾 <b>Invo trades</b>")
+                return cardfmt.trades_card(w.st, self.mids, now, title="🧾 <b>Invo trades</b>", infos=self.invo_info)
             if key == "invo:traders":
                 return cardfmt.traders_card(w.st, self.mids, {}, {}, now, title="🧾 <b>Invo traders</b>",
                                           extra=self.invo_record_rows())

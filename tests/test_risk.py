@@ -169,3 +169,25 @@ def test_entries_only_on_main_coins(tmp_path):
         assert not d and d.reason == "not_main_coin"
     finally:
         r.close()
+
+
+def test_a_leverage_following_wallet_copies_the_traders_leverage_up_to_10x_with_the_guard_before_liquidation():
+    """Owner request 2026-10-14: a 40x Invo call is copied at 10x, a 5x call at 5x; the 'trader's exit' guard sits
+    just before that leverage's liquidation instead of a fixed 30%."""
+    for called, want in ((40, 10), (10, 10), (5, 5), (1, 1)):
+        g = gate()
+        g.cfg.risk.stop_pct, g.cfg.risk.liq_buffer_mult = 30.0, 1.0
+        g.cfg.risk.risk_per_trade_pct = g.cfg.risk.max_symbol_risk_pct = g.cfg.risk.max_total_risk_pct = 50.0
+        g.follow_leverage, g.call_leverage = True, lambda lev=called: lev
+        d = g.check(open_order(size=0.0005), state(), healthy(), {}, BTC)
+        assert d.ok and d.leverage == want
+        dist = abs(100_000 - d.stop_px) / 100_000
+        assert dist == pytest.approx(min(0.30, 0.95 * liq_distance(want, BTC.max_leverage)))
+        assert dist < liq_distance(want, BTC.max_leverage)
+
+
+def test_a_normal_wallet_ignores_the_traders_leverage():
+    g = gate()
+    g.call_leverage = lambda: 40
+    d = g.check(open_order(), state(), healthy(), {}, BTC)
+    assert d.leverage == g.leverage_for(BTC) and d.leverage <= 10

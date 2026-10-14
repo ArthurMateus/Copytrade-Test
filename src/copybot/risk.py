@@ -62,6 +62,9 @@ class Decision:
         return self.ok
 
 
+GUARD_OF_LIQ = 0.95    # a leverage-following wallet's guard stop: this share of the distance to liquidation
+
+
 def liq_distance(leverage: float, asset_max_lev: float) -> float:
     """Isolated-margin liquidation distance as a fraction of entry (maintenance margin = 1 / (2 x max lev))."""
     mmr = 1.0 / (2.0 * asset_max_lev)
@@ -75,17 +78,27 @@ class RiskGate:
     order_times: collections.deque = field(default_factory=collections.deque)
     # leader -> diversified wallet? (then every core perp may be copied from it, not only the main coins)
     alts_ok: Callable[[str], bool] = field(default_factory=lambda: (lambda leader: False))
+    # Invo "trader's exit" wallets: the copy uses the trader's leverage (at most risk.max_leverage) and the farthest
+    # stop is a guard just before that leverage's liquidation (owner request 2026-10-14)
+    follow_leverage: bool = False
+    call_leverage: Callable[[], float | None] | None = None
 
     def coin_allowed(self, leader: str, coin: str) -> bool:
         return coin in self.cfg.selection.main_coins or (is_core_perp(coin) and self.alts_ok(leader))
 
     # ---- sizing (from OUR risk limits, never from the leader's size) ---------------------------
-    def stop_for(self, side: int, entry: float) -> float:
+    def stop_for(self, side: int, entry: float, leverage: float | None = None, asset: Asset | None = None) -> float:
         d = self.cfg.risk.stop_pct / 100
+        if self.follow_leverage and leverage and asset is not None:
+            d = min(d, GUARD_OF_LIQ * liq_distance(leverage, asset.max_leverage))   # the guard sits before liquidation
         return entry * (1 - d) if side > 0 else entry * (1 + d)
 
     def leverage_for(self, asset: Asset) -> float:
         r = self.cfg.risk
+        if self.follow_leverage and self.call_leverage is not None:
+            lead = self.call_leverage()          # the trader's own leverage, capped like every wallet's
+            if lead:
+                return float(max(1, min(math.floor(lead), r.max_leverage, asset.max_leverage)))
         stop = r.stop_pct / 100
         mmr = 1.0 / (2.0 * asset.max_leverage)
         lev = math.floor(1.0 / (r.liq_buffer_mult * stop + mmr))
@@ -171,7 +184,7 @@ class RiskGate:
             if len(st.positions) >= r.max_positions:
                 return Decision(False, "max_positions")
             lev = self.leverage_for(asset)
-            stop = self.stop_for(o.side, o.px)
+            stop = self.stop_for(o.side, o.px, lev, asset)
         elif o.kind == "boost":
             if pos is None or pos.leader == o.leader or pos.side != o.side:
                 return Decision(False, "boost_without_position")

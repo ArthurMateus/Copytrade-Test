@@ -550,3 +550,17 @@ instances on the same wallet.
   stays on the main coins. Spot (`@`), outcome (`#`) and builder (`xyz:`) markets stay excluded.
 - Success metrics and the kill criterion are in the README and shown by `/hyperprogress` (and `/fomoprogress`,
   `/invoprogress`).
+
+## Invo leverage and short cards (owner request 2026-10-14)
+- Invo "trader's exit" wallets (stop 0) copy at the TRADER's leverage, at most `risk.max_leverage` (10x): a 40x call is
+  10x, a 5x call 5x (`RiskGate.follow_leverage` / `call_leverage`, set in `Bot.__init__`). Their guard stop is
+  `GUARD_OF_LIQ` (95%) of the distance to that leverage's liquidation (about 8.3% at 10x on BTC), capped at 30%, instead of
+  a fixed 30% (which forced 3x). `stop_for(side, entry, leverage, asset)`; `boot_repair(..., assets)` uses it too. The 3%
+  and 8% wallets are unchanged.
+- Invo cards use `cardfmt.invo_trade_body/invo_trade_card` (Invo's own layout: coin, side, leverage, P&L; Price, Size
+  with margin, Exit, Stop, Open for) and `/invotrades` the same per copy (`trades_card(infos=)`). The call text kept in
+  the ledger (`invo_link.info`) is now: `🧾 @trader · size x lev · paper/real-money title`, `⏱️ In 3.3s after them · 0.12%
+  worse than their price (-0.12$)` (entry delay and what it cost), then `↕️` resizes and `🤝` agreements as own lines.
+  Older copies keep their old text. HL and FOMO cards are unchanged (both books are off).
+- `uv run` fails inside the Claude app ("trampoline failed to canonicalize script path"): run tests with
+  `PYTHONPATH=src python -m pytest`. Files use CRLF line endings: scripted multi-line replaces need the Edit tool.

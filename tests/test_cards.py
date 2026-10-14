@@ -70,3 +70,25 @@ def test_traders_are_listed_by_rank_with_history_and_pf():
     tr = cardfmt.traders_card(st, {}, {b: 1, a: 2}, sc, 0)
     assert tr.index("bbbb") < tr.index("aaaa") < tr.index("cccc")   # ... listed by rank, unranked last
     assert "153 trades · 77% win" in tr and "2.50 (wins 2.50$ per 1$ lost)" in tr and "no losing trade" in tr
+
+
+def test_invo_trade_card_is_short_and_shows_leverage():
+    p = Position(pos_id="x", coin="BTC", side=1, size=0.001, entry_px=100_000, stop_px=91_700, leverage=10,
+                 leader="invo:bob", k=1, open_oid=1, opened_ms=0, realized=-0.05, entry_notional=100)
+    s = cardfmt.invo_trade_card(p, 101_000, 1_790_000_000_000)
+    for needle in ("🟢 <b>BTC</b> ⬆️ LONG · 10x · +0.95$ (+0.95%)", "Price: <b>100,000.0 → 101,000.0",
+                   "Size: <b>101.00$ (margin 10.10$)", "Exit: <b>with @bob", "Stop: <b>91,700.0 (9.2% away", "Open for"):
+        assert needle in s, needle
+    assert "Take profit" not in s and "<pre>" not in s
+
+
+def test_invo_trades_card_uses_the_short_layout_per_copy():
+    p = Position(pos_id="x", coin="BTC", side=1, size=0.001, entry_px=100_000, stop_px=91_700, leverage=10,
+                 leader="invo:bob", k=1, open_oid=1, opened_ms=0, entry_notional=100)
+    st = State(equity0=300, btc_px0=100_000, genesis_ms=0)
+    st.positions["BTC"] = p
+    s = cardfmt.trades_card(st, {"BTC": 101_000}, 3_600_000, title="🧾 <b>Invo trades</b>",
+                            infos={"x": "🧾 <b>@bob</b> · 1.0% x 40x\n⏱️ In 3.3s after them · same price as theirs\n🎯 target 1"})
+    for needle in ("🧾 <b>Invo trades</b> · 1 open", "LONG · 10x", "Size: <b>101.00$ (margin 10.10$)", "⏱️ In 3.3s"):
+        assert needle in s, needle
+    assert "Take profit" not in s and "🎯" not in s

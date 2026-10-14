@@ -231,7 +231,7 @@ class PositionManager:
             return self._skip("no_book", coin=m.coin, err=str(e))
         lag = self._lag(self.health(), m)
         # the stop is placed at entry, from the actual fill price; it is part of the same durable event
-        stop = self.gate.stop_for(side, f.px)
+        stop = self.gate.stop_for(side, f.px, d.leverage, asset)
         pos = Position(pos_id=f"{m.coin}-{iid}", coin=m.coin, side=side, size=d.size, entry_px=f.px,
                        stop_px=stop, leverage=d.leverage, leader=m.leader, k=d.size / abs(m.end_pos),
                        open_oid=m.oid, opened_ms=h.now_ms, open_lag_ms=lag)

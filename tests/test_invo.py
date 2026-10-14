@@ -502,7 +502,7 @@ def test_bot_copies_an_invo_call_and_closes_it_when_the_trader_does(invo_env, mo
         assert wait_for(lambda: any("Invo wallets" in m["text"] and "18 combinations" in m["text"]
                                     and "By stop" in m["text"] for m in dc.sent + dc.edits))
         text = lambda: " ".join(m["text"] for m in dc.sent + dc.edits)
-        assert wait_for(lambda: "Invo call by @nicush" in text() and "<b>ETH</b>" in text())   # its live trade card
+        assert wait_for(lambda: "⏱️ In" in text() and "@nicush" in text() and "<b>ETH</b>" in text())   # its live trade card
         for cmd, needle in (("/invo", "Invo calls"), ("/invotrades", "Invo trades"), ("/invotraders", "Invo traders")):
             dc.say(cmd)
             assert wait_for(lambda: needle in text()), cmd
@@ -573,7 +573,7 @@ def test_our_stop_closes_an_invo_copy_and_its_card_becomes_the_summary(invo_env,
         assert wait_for(lambda: "SOL" not in bot.invo.st.positions, timeout=10)
         assert bot.invo.st.closed[-1]["reason"] == "stop"
         text = lambda: " ".join(m["text"] for m in dc.sent + dc.edits)
-        assert wait_for(lambda: "stop-loss hit" in text() and "Invo call by @akira" in text())
+        assert wait_for(lambda: "stop-loss hit" in text() and "⏱️ In" in text() and "@akira" in text())
         assert "closed by the trader" not in text()
     finally:
         stop_bot(bot, th)
@@ -756,7 +756,7 @@ def test_bot_mirrors_the_traders_add_and_partial_close(invo_env, monkeypatch):
         assert wait_for(lambda: bot.invo.st.positions["ETH"].size < size0, timeout=10)
         assert bot.invo.st.positions["ETH"].size == pytest.approx(size0 * 0.75, rel=0.03)
         text = lambda: " ".join(m["text"] for m in dc.sent + dc.edits)
-        assert wait_for(lambda: "resized by the trader 6.0% → 3.0%" in text())
+        assert wait_for(lambda: "Trader resized 6.0% → 3.0%" in text())
         f.close_call(pid, cid)
         assert wait_for(lambda: "ETH" not in bot.invo.st.positions, timeout=10)
     finally:
@@ -940,13 +940,13 @@ def test_after_a_restart_only_the_copied_call_moves_our_copy(invo_env, monkeypat
         b = f.open_call(weak, "ETH", long=True, leverage=5, size=0.05, entry=3000.0)     # skipped (weak portfolio)
         pos_id = bot.invo.st.positions["ETH"].pos_id
         assert bot.invo.st.invo_links[pos_id]["call"] == a
-        assert "their entry" in bot.invo.st.invo_links[pos_id]["info"]
+        assert "⏱️ In" in bot.invo.st.invo_links[pos_id]["info"]
     finally:
         stop_bot(bot, th)
         bot.lock.f.close()
     bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
     try:
-        assert bot.invo_calls[("invo_calls", a)] == "ETH" and "their entry" in bot.invo_info[pos_id]
+        assert bot.invo_calls[("invo_calls", a)] == "ETH" and "⏱️ In" in bot.invo_info[pos_id]
         assert wait_for(lambda: bot.invo_watch.known.get("prateek") is not None, timeout=10)
         f.close_call(weak, b)
         time.sleep(3)
@@ -1067,14 +1067,14 @@ def test_every_size_runs_with_every_stop_and_only_the_exit_differs(invo_env, mon
         e = {x.name: x.st.positions["ETH"].entry_px for x in (s3, s8, tr)}
         assert s3.st.positions["ETH"].stop_px == pytest.approx(e["invo_risk_1pct"] * 0.97)
         assert s8.st.positions["ETH"].stop_px == pytest.approx(e["invo_risk_1pct_stop8"] * 0.92)
-        assert tr.st.positions["ETH"].stop_px == pytest.approx(e["invo_risk_1pct_trader"] * 0.70)  # a guard only
+        assert tr.st.positions["ETH"].stop_px == pytest.approx(e["invo_risk_1pct_trader"] * (1 - 0.95 * (0.1 - 1 / (2 * bot.assets["ETH"].max_leverage))))  # guard just before 10x liquidation
         loss = [x.st.positions["ETH"].size * abs(x.st.positions["ETH"].entry_px - x.st.positions["ETH"].stop_px)
                 for x in (s3, s8)]
         assert loss[0] == pytest.approx(3.0, rel=0.05) and loss[1] == pytest.approx(3.0, rel=0.05)   # 1% of 300$
         assert wait_for(lambda: "ETH" in w["invo_risk_20pct_trader"].st.positions, timeout=10)
         big = w["invo_risk_20pct_trader"].st.positions["ETH"]                     # 20% at its 30% guard: 200$
         assert big.size * big.entry_px == pytest.approx(200.0, rel=0.05)
-        assert big.stop_px == pytest.approx(big.entry_px * 0.70)
+        assert big.stop_px == pytest.approx(big.entry_px * (1 - 0.95 * (0.1 - 1 / (2 * bot.assets["ETH"].max_leverage))))
         assert runner.invo_emergency_stop(20 / 3) == pytest.approx(11.2, abs=0.1)   # (trader size: before liquidation)
         hl.mids["ETH"] = 3000.0 * 0.96
         assert wait_for(lambda: "ETH" not in s3.st.positions, timeout=10)
@@ -1124,7 +1124,7 @@ def test_with_main_stop_0_the_main_wallets_hold_until_the_trader_closes(invo_env
         main, s3 = w["invo_calls"], w["invo_calls_stop3"]
         cid = f.open_call(pid, "ETH", long=True, leverage=10, size=0.05, entry=3000.0)
         assert wait_for(lambda: all("ETH" in x.st.positions for x in w.values()), timeout=10)
-        assert main.st.positions["ETH"].stop_px == pytest.approx(main.st.positions["ETH"].entry_px * 0.70)
+        assert main.st.positions["ETH"].stop_px == pytest.approx(main.st.positions["ETH"].entry_px * (1 - 0.95 * (0.1 - 1 / (2 * bot.assets["ETH"].max_leverage))))
         assert s3.st.positions["ETH"].stop_px == pytest.approx(s3.st.positions["ETH"].entry_px * 0.97)
         assert main.st.positions["ETH"].size == pytest.approx(s3.st.positions["ETH"].size, rel=0.02)
         hl.mids["ETH"] = 3000.0 * 0.96                                    # our 3% stop, not the trader's exit

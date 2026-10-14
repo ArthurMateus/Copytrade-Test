@@ -83,7 +83,7 @@ def max_drop_pct(st: State, mids: dict) -> float:
     return worst * 100
 
 
-def boot_repair(st: State, rec, gate: RiskGate, name: str) -> list[str]:
+def boot_repair(st: State, rec, gate: RiskGate, name: str, assets: dict | None = None) -> list[str]:
     """Restart safety for one wallet: abort dangling intents, give every position a valid stop, and pause
     entries when anything was uncertain. Returns the uncertainties (to alert on)."""
     problems = list(st.uncertain)
@@ -94,7 +94,7 @@ def boot_repair(st: State, rec, gate: RiskGate, name: str) -> list[str]:
         # (code audit 2026-10-10 #3: it used to be reset to entry - 3% at every restart; same rule as Ledger.replay)
         bad = not (0 < p.stop_px < p.entry_px * 10)
         if bad:
-            stop = gate.stop_for(p.side, p.entry_px)
+            stop = gate.stop_for(p.side, p.entry_px, p.leverage, assets.get(p.coin) if assets else None)
             rec({"ev": "stop_set", "coin": p.coin, "pos_id": p.pos_id, "stop_px": stop})
             log.error("stop_repaired", wallet=name, coin=p.coin, stop=stop)
     if problems:

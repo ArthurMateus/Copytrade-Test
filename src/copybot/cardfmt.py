@@ -137,7 +137,34 @@ def trade_card(p: Position, mark: float | None, now_ms: float) -> str:
     return trade_head(p, mark) + "\n" + pre(_trade_rows(p, mark, now_ms)) + ("\n" + updated(now_ms) if now_ms else "")
 
 
-REASONS = {"leader_close": "the trader closed", "leader_flip": "the trader reversed", "stop": "🛑 stop-loss hit",
+def invo_trade_body(p: Position, mark: float | None, now_ms: float) -> str:
+    """An Invo copy, laid out like Invo's own position card: coin, side and leverage, the result, then the few
+    numbers that matter (owner request 2026-10-14)."""
+    net = net_pnl(p, mark)
+    notional = p.entry_notional or p.size * p.entry_px
+    to_stop = abs(p.stop_px / mark - 1) * 100 if mark else None
+    trail = " 🔒 trailing" if (p.stop_px - p.entry_px) * p.side > 0 else ""
+    value = p.size * (mark or p.entry_px)
+    head = (f"{dot(net)} <b>{esc(p.coin)}</b> {side_tag(p.side)} · {p.leverage:g}x · {fusd(net)} "
+            f"({fpct(net / notional * 100)})")
+    rows = [
+        ("Price", f"{fpx(p.entry_px)} → {fpx(mark) if mark else '-'}"),
+        ("Size", f"{fusd(value, sign=False)} (margin {fusd(value / max(p.leverage, 1), sign=False)})"),
+        ("Exit", f"with {short(p.leader)}" + (f" (🤝 +{len(p.backers)} agree)" if p.backers else "")),
+        ("Stop" + trail, f"{fpx(p.stop_px)}" + (f" ({to_stop:.1f}% away" if to_stop is not None else " (")
+         + f", {fusd(loss_if_stopped(p))})"),
+    ]
+    if now_ms:
+        rows.append(("Open for", dur(now_ms - p.opened_ms)))
+    return head + "\n" + pre(rows)
+
+
+def invo_trade_card(p: Position, mark: float | None, now_ms: float) -> str:
+    """The live card of one Invo copy (its call lines are appended by the runner)."""
+    return invo_trade_body(p, mark, now_ms) + ("\n" + updated(now_ms) if now_ms else "")
+
+
+REASONS ={"leader_close": "the trader closed", "leader_flip": "the trader reversed", "stop": "🛑 stop-loss hit",
            "trail_stop": "🔒 trailing stop (profit locked)",
            "leader_reduce": "the trader reduced", "reconcile_leader_flat": "the trader closed (caught by check)",
            "flatten": "/hyperflatten", "leader_reopened": "stale copy", "reconcile_leader_reduced": "check",
@@ -202,7 +229,8 @@ def status_card(st: State, mids: dict, health, now_ms: float, btc_px: float | No
     ]) + "\n" + updated(now_ms)
 
 
-def trades_card(st: State, mids: dict, now_ms: float, title: str = "💼 <b>Trades</b>") -> str:
+def trades_card(st: State, mids: dict, now_ms: float, title: str = "💼 <b>Trades</b>",
+                infos: dict | None = None) -> str:
     """/trades (and /invotrades): every open copy at the live price, plus the result against the starting wallet."""
     eq = st.equity(mids)
     total = eq - st.equity0
@@ -223,7 +251,13 @@ def trades_card(st: State, mids: dict, now_ms: float, title: str = "💼 <b>Trad
         out.append("📭 No open trades.")
     for p in sorted(st.positions.values(), key=lambda p: p.opened_ms):
         mark = mids.get(p.coin)
-        out.append("\n" + trade_head(p, mark) + "\n" + pre(_trade_rows(p, mark, now_ms)))
+        if infos is None:
+            out.append("\n" + trade_head(p, mark) + "\n" + pre(_trade_rows(p, mark, now_ms)))
+        else:                       # Invo: the short layout, with the trader and how late/costly our entry was
+            info = "\n".join(l for l in infos.get(p.pos_id, "").split("\n") if l and not l.startswith("🎯"))
+            if info and not info.startswith("🧾"):
+                info = "🧾 " + info
+            out.append("\n" + invo_trade_body(p, mark, now_ms) + ("\n" + info if info else ""))
     out.append(updated(now_ms))
     return "\n".join(out)
 
