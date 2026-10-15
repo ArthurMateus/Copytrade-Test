@@ -564,3 +564,7 @@ instances on the same wallet.
   Older copies keep their old text. HL and FOMO cards are unchanged (both books are off).
 - `uv run` fails inside the Claude app ("trampoline failed to canonicalize script path"): run tests with
   `PYTHONPATH=src python -m pytest`. Files use CRLF line endings: scripted multi-line replaces need the Edit tool.
+- Hand-followed traders (owner request 2026-10-14, "follow someone outside the rules for testing"): `/invofollow` (a
+  pick) now copies EVERY portfolio of that trader in every Invo wallet, like `invo.always_copy` (`Bot.invo_picked` in
+  `invo_skip` / `invo_floor`); only `/invoblock <user> <portfolio>` stops one. Traders followed by the search keep the
+  portfolio rules. Loss pauses (`invo_drop`) and the `invo.max_traders` limit still apply.

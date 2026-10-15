@@ -899,6 +899,8 @@ def test_weak_portfolios_are_skipped_and_the_owner_can_block_one(invo_env, monke
     text = lambda: " ".join(m["text"] for m in dc.sent + dc.edits)
     try:
         dc.say("/invofollow nicush")
+        assert wait_for(lambda: "invo:nicush" in bot.invo.st.followed)
+        bot.invo.st.picked.discard("invo:nicush")        # as if the search had followed it: the portfolio rules apply
         assert wait_for(lambda: bot.invo_watch.known.get("nicush") is not None, timeout=10)
         f.open_call(weak, "SOL", long=True, leverage=5, size=0.05, entry=150.0)          # weak portfolio: skipped
         f.open_call(good, "ETH", long=True, leverage=5, size=0.05, entry=3000.0)         # good one: copied
@@ -934,6 +936,8 @@ def test_after_a_restart_only_the_copied_call_moves_our_copy(invo_env, monkeypat
     bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
     try:
         dc.say("/invofollow prateek")
+        assert wait_for(lambda: "invo:prateek" in bot.invo.st.followed)
+        bot.invo.st.picked.discard("invo:prateek")
         assert wait_for(lambda: bot.invo_watch.known.get("prateek") is not None, timeout=10)
         a = f.open_call(good, "ETH", long=True, leverage=5, size=0.05, entry=3000.0)
         assert wait_for(lambda: "ETH" in bot.invo.st.positions, timeout=10)
@@ -1155,3 +1159,26 @@ def test_the_wallets_card_shows_the_best_and_worst_combinations():
     assert "9. <b>1% risk · 3% stop</b>" in text
     assert "20% risk · 3% stop" not in text.split("By stop")[0]               # the middle is left out
     assert text.count("biggest drop") == 6 and "<b>By stop</b>" in text
+
+
+
+def test_a_trader_followed_by_hand_is_copied_in_every_portfolio_and_only_blocks_stop_one(invo_env, monkeypatch):
+    """Owner request 2026-10-14: /invofollow = every portfolio of that trader is copied, whatever the floors and rules
+    say (testing traders outside them); /invoblock stops one by hand."""
+    hl, dc, data, cdir, f, tok = invo_env
+    good, weak = f.add_user("nicush", n_portfolios=2)
+    f.port_meta[good] = {"title": "Kitchen", "winRate": 93.0, "closedPositions": 929, "plSnapshot": 140.0}
+    f.port_meta[weak] = {"title": "Probably nothing", "winRate": 77.0, "closedPositions": 39, "plSnapshot": 12.0}
+    bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
+    try:
+        dc.say("/invofollow nicush")
+        assert wait_for(lambda: bot.invo_watch.known.get("nicush") is not None, timeout=10)
+        f.open_call(weak, "SOL", long=True, leverage=5, size=0.05, entry=150.0)          # below our floors: still copied
+        assert wait_for(lambda: "SOL" in bot.invo.st.positions, timeout=10)
+        dc.say("/invoblock nicush probably")
+        assert wait_for(lambda: weak in bot.invo.st.blocked.get("invo:nicush", {}))
+        f.open_call(weak, "ETH", long=True, leverage=5, size=0.05, entry=3000.0)         # blocked by hand: not copied
+        time.sleep(2.5)
+        assert "ETH" not in bot.invo.st.positions
+    finally:
+        stop_bot(bot, th)

@@ -444,8 +444,8 @@ class Bot:
         the floors, on its own numbers (a live portfolio's accuracy and real return)."""
         if self.invo is not None and p.id in self.invo.st.blocked.get(INVO + name.lower(), {}):
             return "blocked by you"
-        if name.lower() in {u.strip().lstrip("@").lower() for u in self.cfg.invo.always_copy}:
-            return None                 # owner request 2026-10-13: copied whatever the floors and rules say
+        if name.lower() in {u.strip().lstrip("@").lower() for u in self.cfg.invo.always_copy} or self.invo_picked(name):
+            return None                 # owner requests 2026-10-13 / 2026-10-14: copied whatever the floors and rules say
         ps = self.invo_portfolio_score(name, p.id)
         if ps is not None:              # owner request 2026-10-12: only a loss after our costs or bait stops it
             hard = copy_blockers(ps.get("reasons"))
@@ -459,7 +459,11 @@ class Bot:
         """The search's view of a portfolio before its own score: blocked, or a paper one below the owner's floors."""
         if self.invo is not None and p.id in self.invo.st.blocked.get(INVO + name.lower(), {}):
             return "blocked by you"
-        return None if p.kind == "live" else self.invo_floors(p)
+        return None if p.kind == "live" or self.invo_picked(name) else self.invo_floors(p)
+
+    def invo_picked(self, name: str) -> bool:
+        """A trader the owner followed by hand (/invofollow): every portfolio of it is copied, only /invoblock stops one."""
+        return self.invo is not None and INVO + name.lower() in self.invo.st.picked
 
     def invo_floors(self, p) -> str | None:
         """The owner's portfolio floors (invo.min_portfolio_win_rate / min_portfolio_pnl_pct / min_portfolio_calls)."""
@@ -557,8 +561,10 @@ class Bot:
             if leader not in w.st.picked:
                 w.rec({"ev": "pick", "leader": leader})
                 return self.ui.send(f"✅ 🧾 @{cardfmt.esc(name)} is already followed, and is now your pick: the search "
-                                    "will not drop it.")
-            return self.ui.send(f"✅ 🧾 @{cardfmt.esc(name)} is already followed (your pick).")
+                                    "will not drop it, and every portfolio of it is copied, whatever the rules say; "
+                                    f"/invoblock {cardfmt.esc(name)} &lt;portfolio&gt; stops one.")
+            return self.ui.send(f"✅ 🧾 @{cardfmt.esc(name)} is already followed (your pick: every portfolio is copied "
+                                "unless you /invoblock it).")
         if len(w.st.followed) >= self.cfg.invo.max_traders:
             return self.ui.send(f"⛔ 🧾 Already following {len(w.st.followed)} Invo traders (the maximum): "
                                 "/invounfollow one first.")
@@ -569,8 +575,9 @@ class Bot:
         self.ui.send(f"➕ 🧾 <b>Following</b> @{cardfmt.esc(name)} on Invo (your pick: the search never drops it) · "
                      "calls they open from now on are copied in every Invo wallet (/invowallets compares them). "
                      "Calls already open are not copied."
-                     + (" Checking its portfolios one by one now: only losing or bait portfolios are skipped."
-                        if self.invo_search is not None else ""))
+                     + f" Every portfolio of it is copied, whatever the rules say; /invoblock {cardfmt.esc(name)} "
+                       "&lt;portfolio&gt; stops one."
+                     + (" (Its portfolios are still scored, for /invotraders.)" if self.invo_search is not None else ""))
 
     def invo_block(self, c) -> None:
         """/invoblock <user> <portfolio>: stop copying that portfolio of a followed trader (its open copies still follow
