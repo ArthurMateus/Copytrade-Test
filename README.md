@@ -56,6 +56,7 @@ Run the tests: `uv run pytest` (about 5 minutes; this includes real-process kill
 | Commands, outbox and in-place edited cards; Discord transport; card rendering | `chat.py`, `discord.py`, `cardfmt.py` |
 | Threads and the trading loop | `runner.py` |
 | Invo: client, watcher, daily search | `invo.py`, `invo_scorer.py` |
+| Invo arena: recipes, backtest, live 2-week seasons, report | `arena.py`, `arena_report.py` |
 | Daily picks report | `picks.py` |
 | FOMO / Solana book | `sol/` (see below) |
 
@@ -226,6 +227,20 @@ minutes (median), a call in the last 14 days. Candidates come from Invo's Discov
 all time, trending users; together only about 66-70 different traders) plus the traders you follow. It reads with the bot's own Invo login, about one request a
 second, once a day (`config/invo.toml`: `search`, `max_candidates`, ...). The very first search starts when the bot
 starts and its result is posted as soon as it ends.
+
+**The Invo arena (`/arena`).** Instead of choosing traders by hand: which set of at most 10 Invo traders would make a
+$300 paper wallet the most money in 2 weeks? After each daily search the bot tests 63 recipes (most money made, best
+profit factor, highest win rate, hot hand, steady, the bot's floors, most active; each with 3, 5 or 10 traders and a
+14, 30 or 60-day look-back) against random traders, the traders you follow, and the best possible picks in hindsight.
+- **Backtest:** for every past 2-week window, each recipe picks using only what happened before that window, then
+  copies those traders' calls inside it, sized like the "invo calls" wallet and closed at the trader's exit.
+- **Live season:** the 6 best recipes' picks are frozen for 2 weeks and scored on the calls that come after, next to
+  a random wallet and your follows. When a season ends, Discord gets the final standings and a new season starts.
+- `/arena` shows the current season and the backtest's best; the full report with charts is
+  `data\arena\index.html` on the bot PC (double-click it). `arena = false` in `config/invo.toml` turns it off.
+- It reads no extra data from Invo (it uses the calls the daily search already reads) and never trades. Trust the
+  live season over the backtest: the backtest only sees traders who are on Invo's rankings today, with deleted calls
+  gone, so it looks better than reality.
 
 ### Setup (once)
 1. In Chrome, open an **Incognito window** (Ctrl+Shift+N), go to https://app.invoapp.com and sign in with the bot's

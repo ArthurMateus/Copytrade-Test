@@ -21,7 +21,7 @@ import traceback
 import uuid
 from pathlib import Path
 
-from copybot import config, hl, log, picks, cardfmt
+from copybot import arena, config, hl, log, picks, cardfmt
 from copybot.broker import PaperBroker
 from copybot.detector import Detector, Move
 from copybot.invo import (DELETED as INVO_DELETED, PREFIX as INVO, REPLACED_S as INVO_REPLACED_S,
@@ -237,6 +237,9 @@ class Bot:
                                           funding_of=self.scorer.funding)
             self.invo_scores = dict(self.invo_search.scores)
             self.invo_reviewed = bool(self.invo_scores)
+        # the Invo arena (copybot/arena.py, owner request 2026-10-19): after each search, on the calls it read
+        self.arena_res: dict | None = arena.load_result(self.data / "arena")
+        self.arena_busy = False
         self.picks = picks.Store(self.data / "picks.json")
         self.sol_booted = False
         self.invo_search_pending = False   # /invosearch: re-pick the Invo traders when the search ends
@@ -537,6 +540,12 @@ class Bot:
             return self.ui.set_card(key, self.render_card(key, self.health(), now_ms()), new=True)
         if c.name in ("/invoblock", "/invounblock"):
             return self.invo_block(c)
+        if c.name == "/invoarena":
+            if not self.cfg.invo.arena:
+                return self.ui.send("🏟️ The arena is off (arena = true in config/invo.toml, then /restart).")
+            return self.ui.send(arena.card(self.arena_res, now_ms(), self.cfg.discord.utc_offset_hours,
+                                           self.arena_report())
+                                + ("\n⏳ Updating now (after the Invo search)." if self.arena_busy else ""))
         name = c.arg.strip().lstrip("@")
         if not re.fullmatch(r"[A-Za-z0-9_.]{2,40}", name):
             return self.ui.send(f"Usage: {c.name} &lt;Invo username&gt; (as in app.invoapp.com/&lt;username&gt;)")
@@ -1173,6 +1182,9 @@ class Bot:
             self.on_invo_added(*item[1:])
         elif kind == "invo_review":
             self.on_invo_review(*item[1:])
+            self.arena_start()
+        elif kind == "arena_done":
+            self.on_arena(item[1])
         elif kind == "invo_unknown":
             self.ui.send(f"⚠️ 🧾 No Invo user called @{cardfmt.esc(item[1])}: /invounfollow {cardfmt.esc(item[1])} and "
                          "check the name (as in app.invoapp.com/&lt;username&gt;).")
@@ -1302,6 +1314,44 @@ class Bot:
         if self.invo_search_pending:
             self.invo_search_pending = False
             self.invo_repick(n_cands)
+
+    def arena_start(self) -> None:
+        """The arena (copybot/arena.py) on its own thread after an Invo search: backtest, then the live season scored,
+        ended and restarted when due. It reads only the calls the search saved and cached Hyperliquid prices; the
+        result comes back as ("arena_done", result or None). Paper only: it never touches a wallet."""
+        if self.invo is None or not self.cfg.invo.arena or self.arena_busy:
+            return
+        self.arena_busy = True
+        follows = sorted(a[len(INVO):] for a in self.invo.st.followed)
+        params = arena.Params.of(self.cfg, self.scorer.params.cost_bps)
+
+        def work() -> None:
+            res = None
+            try:
+                res = arena.run(self.data / "cache", self.data / "arena", self.invo_trade_coin, self.scorer.candles,
+                                params, now_ms(), follows, funding_of=self.scorer.funding)
+            except Exception:
+                log.exception("arena_failed")
+            self.q.put(("arena_done", res))
+        threading.Thread(target=work, name="arena", daemon=True).start()
+
+    def arena_report(self) -> str:
+        return str(self.data / "arena" / "index.html")
+
+    def on_arena(self, res: dict | None) -> None:
+        """An arena run ended: a finished season gets its final card, a new one its start card."""
+        self.arena_busy = False
+        if res is None:
+            return
+        self.arena_res = res
+        bt = res.get("backtest") or {}
+        log.info("arena_done", traders=bt.get("traders", 0), windows=len(bt.get("starts") or []),
+                 ended=bool(res.get("ended")), started=bool(res.get("started")))
+        off = self.cfg.discord.utc_offset_hours
+        if res.get("ended"):
+            self.ui.send(arena.ended_card(res["ended"], off))
+        if res.get("started"):
+            self.ui.send("🏁 <b>New arena season</b>\n" + arena.card(res, now_ms(), off, self.arena_report()))
 
     def on_invo_added(self, name: str, s: dict | None, quiet: bool = False) -> None:
         """/invoadd result: follow at once if it passes every rule and a slot is free, else say why not. `quiet`

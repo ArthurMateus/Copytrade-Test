@@ -38,7 +38,7 @@ def test_the_three_books_have_the_same_commands():
     assert VERBS == ("status", "trades", "traders", "wallets", "progress", "search", "add", "follow", "unfollow",
                      "pause", "resume", "flatten", "reset")
     assert set(SLASH_COMMANDS) == ({"/help", "/restart", "/picks"} | set(HYPER_COMMANDS + FOMO_COMMANDS + INVO_COMMANDS)
-                                   | {"/invoblock", "/invounblock"})                  # Invo only: portfolio blocks
+                                   | {"/invoblock", "/invounblock", "/invoarena"})    # Invo only: blocks, arena
     assert len(SLASH_COMMANDS) < 100 and len(set(SLASH_COMMANDS)) == len(SLASH_COMMANDS)
     assert all(len(c) - 1 <= 32 and c[1:].islower() for c in SLASH_COMMANDS)          # Discord's name rules
     for b in ("hyper", "fomo", "invo"):                                                # same options everywhere

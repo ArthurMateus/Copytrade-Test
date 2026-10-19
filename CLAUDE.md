@@ -568,3 +568,37 @@ instances on the same wallet.
   pick) now copies EVERY portfolio of that trader in every Invo wallet, like `invo.always_copy` (`Bot.invo_picked` in
   `invo_skip` / `invo_floor`); only `/invoblock <user> <portfolio>` stops one. Traders followed by the search keep the
   portfolio rules. Loss pauses (`invo_drop`) and the `invo.max_traders` limit still apply.
+
+## Invo arena (owner request 2026-10-19: "which wallet gets the most money following different traders, max 10
+## traders, 2 weeks, with backtesting, instead of me following by hand")
+- Owner's choices: the BOT builds the competing wallets (recipes, not players); backtest first, then live 2-week
+  seasons; results in a report page + Discord (`/arena`, invo-only short name of `/invoarena`).
+- `arena.py` (pure, no network) + `arena_report.py` (the HTML page). Analysis only: it never touches a wallet, the
+  ledger or an order; its state is `data/arena/season.json` (current season + the last 26), `arena.json` (last
+  result, read back at start for `/arena`) and `index.html`.
+- Data: `InvoScorer.score` saves every portfolio it read (closed + open calls) with `arena.save_calls` to
+  `data/cache/invo/calls/<user>.json`, merged run after run (history grows past `history_days`). NO extra Invo
+  requests (a second program on the bot's login would log it out, and more reads bring 429s). With `invo.arena` on and
+  no calls saved yet, the search runs at start once.
+- After each Invo search (`invo_review` event) `Bot.arena_start` runs `arena.run` on a thread (prices: the Scorer's
+  cached 1h candles and funding; coins: `invo_trade_coin`), back as `("arena_done", res)`: `on_arena` posts the final
+  card of a season that ended (`ended_card`: standings + where the backtest's favourite finished) and the new
+  season's card. ~3-5 s for 300 traders x 16 windows.
+- Replay (`simulate`) = the main Invo wallet (`invo_calls`, trader's exit): notional = committed share x leverage x
+  `size_mult` (live portfolios `live_size_mult`) of equity at the open, capped at `max_risk_pct / stop_pct` of equity,
+  at least the minimum notional; exit at the trader's close or at `guard_pct(lev)` (= `runner.invo_emergency_stop`, a
+  test checks they agree) if a 1h candle reached it; minus `cost_bps` and funding. A copy open at the window's end
+  counts at that hour's close; nothing reads a price after the window. Not modelled: copy delay, wallet risk limits,
+  agreement boosts.
+- Recipes (`RECIPES`) x 3/5/10 traders x 14/30/60-day look-back = 63 strategies. Every pick needs >= 5 copies in the
+  look-back, a call in the last 14 days and money made; each trader's portfolios that LOST in the look-back are not
+  copied (`kept_portfolios`, as the bot skips losing portfolios). Baselines: `random` (middle of 20 random wallets
+  of active traders, every portfolio copied: what luck gives), `follows` (the bot's followed traders now: hindsight
+  biased), `hindsight` (best 10 of each window: a ceiling).
+- Backtest = walk-forward: windows of 14 days starting every 7 (anchored so the newest ends now), from the oldest
+  call + 60 days. Picks use only the calls before the window. Ranked by mean 2-week return; "$300 back-to-back" chains
+  the non-overlapping windows ending now. Known bias (stated on the page and the card): candidates come from today's
+  rankings and deleted calls are gone, so the backtest flatters; the live season is the honest check.
+- Season: the 6 best recipes (at most 2 per recipe) pick now with their look-back; picks AND kept portfolios are
+  frozen for 14 days, plus one random wallet and the follows; scored on calls opened since the start. When it ends,
+  the next starts at once with fresh picks.

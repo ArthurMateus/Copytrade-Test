@@ -253,7 +253,8 @@ class Invo:
     min_hl_share: float = 0.5             # at least this share of its calls must be on coins Hyperliquid lists
     min_hold_min: float = 15.0            # median call duration at least this (shorter cannot be copied by polling)
     max_idle_days: float = 14.0           # its newest call is at most this old
-    drop_after_fails: int = 2             # a followed trader failing the rules this many searches in a row is dropped
+    arena: bool = True                    # after each search, the arena (copybot/arena.py): backtest + 2-week seasons
+    drop_after_fails: int = 2            # a followed trader failing the rules this many searches in a row is dropped
 
 
 @dataclass

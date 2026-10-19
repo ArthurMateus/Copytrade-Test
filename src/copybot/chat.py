@@ -31,13 +31,14 @@ VERBS = ("status", "trades", "traders", "wallets", "progress", "search", "add", 
 HYPER_COMMANDS = tuple(f"/hyper{v}" for v in VERBS)
 FOMO_COMMANDS = tuple(f"/fomo{v}" for v in VERBS)
 INVO_COMMANDS = tuple(f"/invo{v}" for v in VERBS)
-INVO_EXTRA = ("/invoblock", "/invounblock")       # Invo only: block one portfolio of a followed trader
+INVO_EXTRA = ("/invoblock", "/invounblock",      # Invo only: block one portfolio of a followed trader
+              "/invoarena")                      # ... and the arena (copybot/arena.py)
 ALIASES = {f"/hyper{v}": f"/{v}" for v in VERBS}
 ALIASES.update({"/fomostatus": "/fomo", "/invostatus": "/invo",
                 # older names
                 "/hyperwallet": "/wallets", "/hyperpositions": "/trades", "/hyperleaders": "/traders",
                 "/positions": "/trades", "/leaders": "/traders",
-                "/block": "/invoblock", "/unblock": "/invounblock",     # (only Invo has them)
+                "/block": "/invoblock", "/unblock": "/invounblock", "/arena": "/invoarena",   # (only Invo has them)
                 "/fomowallet": "/fomo", "/fomopositions": "/fomotrades", "/fomoleaders": "/fomotraders"})
 COMMANDS = tuple(dict.fromkeys(("/help", "/restart", "/picks", "/fomo", "/invo") + tuple(f"/{v}" for v in VERBS)
                                + tuple(ALIASES) + FOMO_COMMANDS + INVO_COMMANDS + INVO_EXTRA))
@@ -55,14 +56,14 @@ def canon(name: str) -> str:
 
 # Only Invo runs (owner request 2026-10-12: "just wallets, traders, etc"): with the Hyperliquid book off, the short
 # names are Invo's (/wallets = /invowallets, /block = /invoblock); the /invo… names keep working (not listed).
-INVO_ONLY_COMMANDS = ("/help", "/restart", "/picks") + tuple(f"/{v}" for v in VERBS) + ("/block", "/unblock")
-_INVO_WORDS = re.compile(r"/invo(" + "|".join(VERBS + ("block", "unblock")) + r")\b")
+INVO_ONLY_COMMANDS = ("/help", "/restart", "/picks") + tuple(f"/{v}" for v in VERBS) + ("/block", "/unblock", "/arena")
+_INVO_WORDS = re.compile(r"/invo(" + "|".join(VERBS + ("block", "unblock", "arena")) + r")\b")
 
 
 def invo_name(name: str) -> str | None:
     """A short name typed while only Invo runs -> the Invo command's canonical name (None: not a short book name)."""
     v = name[1:]
-    if v in VERBS or v in ("block", "unblock"):
+    if v in VERBS or v in ("block", "unblock", "arena"):
         return canon(f"/invo{v}")
     return None
 
@@ -82,6 +83,7 @@ INVO_HELP = ("🤖 <b>Copybot (paper)</b> · 🧾 Invo calls (copied on Hyperliq
              "add &lt;user&gt; – check it with the strict rules, follow it if it passes\n"
              "follow &lt;user&gt; – follow it as your pick (never dropped by the search) · unfollow &lt;user&gt;\n"
              "block · unblock &lt;user&gt; &lt;portfolio&gt; – stop / restart copying one portfolio\n"
+             "arena – which ≤10 traders make $300 the most in 2 weeks: live season + backtest\n"
              "pause · resume – new copies (exits and stops always run)\n"
              "flatten &lt;PIN&gt; – close every trade and pause · reset &lt;PIN&gt; – back to the start, traders kept\n\n"
              "Examples: /wallets · /follow nicush · /block nicush Kitchen\n"

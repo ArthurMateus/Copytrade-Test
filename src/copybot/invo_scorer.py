@@ -38,7 +38,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from copybot import log, scoring
+from copybot import arena, log, scoring
 from copybot.hl import Account, Candle, Fill, OpenPos
 from copybot.invo import Call, InvoAuthError
 
@@ -223,6 +223,8 @@ class InvoScorer:
         self.fails: dict = st.get("fails", {})
         self.fail_at: dict = st.get("fail_at", {})     # trader -> when its fail count last went up (ms)
         self.last = int(st.get("last", 0)) if self.scores else 0     # rules changed (or first start): search now
+        if getattr(self.c, "arena", False) and not any((self.dir / "calls").glob("*.json")):
+            self.last = 0                      # the arena has no calls saved yet (first start with it): search now
         self.progress: dict = {"phase": "idle", "todo": 0, "done": 0}
         self.req = threading.Event()
         self.add_q: queue.Queue = queue.Queue()    # /invoadd: traders the owner wants checked now
@@ -395,8 +397,10 @@ class InvoScorer:
         per: dict[str, dict] = {}
         all_closed: list[Call] = []
         all_open: list[Call] = []
+        read = []
         for p in ports:                         # every portfolio counts, not only the ones that look good
             p, closed, opened = self.read_portfolio(p, since)
+            read.append((p, closed, opened))
             all_closed += closed
             all_open += opened
             if not closed and not opened:
@@ -410,6 +414,10 @@ class InvoScorer:
                          "invo_score": inv.get("score"), "invo_capped": inv.get("capped", False),
                          "invo_caps": inv.get("caps", []),
                          "copy": bool(p.active and not copy_blockers(s["reasons"]) and not self.skip(name, p))}
+        try:                                    # the arena replays these calls (copybot/arena.py): no extra reads
+            arena.save_calls(self.dir.parent, name, read, now)
+        except OSError as e:
+            log.warn("arena_save_failed", trader=name, err=str(e)[:120])
         overall = score_trader(name, all_closed, all_open, *args,
                                (len(ports), sum(1 for x in per.values() if x["copy"]),
                                 sum(1 for p in ports if p.pnl_pct < 0)), **fkw)

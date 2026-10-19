@@ -4,6 +4,13 @@ Start here, then read CLAUDE.md (design, decisions, hard rules; the source of tr
 it). Repo: https://github.com/ArthurMateus/Copytrade-Test (branch `main`). Everything is **PAPER ONLY**: no keys, no
 signing, no order endpoints (`tests/test_safety.py` enforces it). Tests: `uv run pytest` (~320 tests, ~5.5 min).
 
+## 2026-10-19: the Invo arena (branch `invo-arena`)
+- Built at the owner's request: the bot tests which set of <= 10 Invo traders makes 300$ the most in 2 weeks
+  (backtest on past calls, then live 2-week seasons), `/arena` in Discord, report `data/arena/index.html`. Design in
+  CLAUDE.md "Invo arena". Tested only on synthetic data so far: the Claude PC has no Invo login (and must not use the
+  bot's). First real results come after the owner pulls and restarts (one Invo search runs at start, then the arena).
+- Check after deploy: the log has `arena_done` with traders > 0, Discord got "New arena season", /arena answers.
+
 ## Where we left off (2026-10-12 evening): read this first
 - Only the Invo book runs (`selection.enabled` / `sol.enabled` false). Commands on Discord have no prefix: /status,
   /wallets, /traders, /follow, /unfollow, /flatten, /reset <PIN>, /picks, /block ...
