@@ -83,7 +83,7 @@ INVO_HELP = ("🤖 <b>Copybot (paper)</b> · 🧾 Invo calls (copied on Hyperliq
              "add &lt;user&gt; – check it with the strict rules, follow it if it passes\n"
              "follow &lt;user&gt; – follow it as your pick (never dropped by the search) · unfollow &lt;user&gt;\n"
              "block · unblock &lt;user&gt; &lt;portfolio&gt; – stop / restart copying one portfolio\n"
-             "arena – which ≤10 traders make $300 the most in 2 weeks: live season + backtest\n"
+             "arena – the best groups of ≤10 traders in every size × stop: live wallets + backtest\n"
              "pause · resume – new copies (exits and stops always run)\n"
              "flatten &lt;PIN&gt; – close every trade and pause · reset &lt;PIN&gt; – back to the start, traders kept\n\n"
              "Examples: /wallets · /follow nicush · /block nicush Kitchen\n"

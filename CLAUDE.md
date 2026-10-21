@@ -570,35 +570,44 @@ instances on the same wallet.
   portfolio rules. Loss pauses (`invo_drop`) and the `invo.max_traders` limit still apply.
 
 ## Invo arena (owner request 2026-10-19: "which wallet gets the most money following different traders, max 10
-## traders, 2 weeks, with backtesting, instead of me following by hand")
-- Owner's choices: the BOT builds the competing wallets (recipes, not players); backtest first, then live 2-week
-  seasons; results in a report page + Discord (`/arena`, invo-only short name of `/invoarena`).
-- `arena.py` (pure, no network) + `arena_report.py` (the HTML page). Analysis only: it never touches a wallet, the
-  ledger or an order; its state is `data/arena/season.json` (current season + the last 26), `arena.json` (last
-  result, read back at start for `/arena`) and `index.html`.
-- Data: `InvoScorer.score` saves every portfolio it read (closed + open calls) with `arena.save_calls` to
-  `data/cache/invo/calls/<user>.json`, merged run after run (history grows past `history_days`). NO extra Invo
-  requests (a second program on the bot's login would log it out, and more reads bring 429s). With `invo.arena` on and
-  no calls saved yet, the search runs at start once.
-- After each Invo search (`invo_review` event) `Bot.arena_start` runs `arena.run` on a thread (prices: the Scorer's
-  cached 1h candles and funding; coins: `invo_trade_coin`), back as `("arena_done", res)`: `on_arena` posts the final
-  card of a season that ended (`ended_card`: standings + where the backtest's favourite finished) and the new
-  season's card. ~3-5 s for 300 traders x 16 windows.
-- Replay (`simulate`) = the main Invo wallet (`invo_calls`, trader's exit): notional = committed share x leverage x
-  `size_mult` (live portfolios `live_size_mult`) of equity at the open, capped at `max_risk_pct / stop_pct` of equity,
-  at least the minimum notional; exit at the trader's close or at `guard_pct(lev)` (= `runner.invo_emergency_stop`, a
-  test checks they agree) if a 1h candle reached it; minus `cost_bps` and funding. A copy open at the window's end
-  counts at that hour's close; nothing reads a price after the window. Not modelled: copy delay, wallet risk limits,
-  agreement boosts.
-- Recipes (`RECIPES`) x 3/5/10 traders x 14/30/60-day look-back = 63 strategies. Every pick needs >= 5 copies in the
-  look-back, a call in the last 14 days and money made; each trader's portfolios that LOST in the look-back are not
-  copied (`kept_portfolios`, as the bot skips losing portfolios). Baselines: `random` (middle of 20 random wallets
-  of active traders, every portfolio copied: what luck gives), `follows` (the bot's followed traders now: hindsight
-  biased), `hindsight` (best 10 of each window: a ceiling).
-- Backtest = walk-forward: windows of 14 days starting every 7 (anchored so the newest ends now), from the oldest
-  call + 60 days. Picks use only the calls before the window. Ranked by mean 2-week return; "$300 back-to-back" chains
-  the non-overlapping windows ending now. Known bias (stated on the page and the card): candidates come from today's
-  rankings and deleted calls are gone, so the backtest flatters; the live season is the honest check.
-- Season: the 6 best recipes (at most 2 per recipe) pick now with their look-back; picks AND kept portfolios are
-  frozen for 14 days, plus one random wallet and the follows; scored on calls opened since the start. When it ends,
-  the next starts at once with fresh picks.
+## traders, 2 weeks, with backtesting, instead of me following by hand"; extended 2026-10-20)
+- `arena.py` (pure, no network). Data: `InvoScorer.score` saves every portfolio it read (closed + open calls) with
+  `arena.save_calls` to `data/cache/invo/calls/<user>.json`, merged run after run. NO extra Invo requests for the
+  backtest (a second program on the bot's login would log it out, and more reads bring 429s). With `invo.arena` on and
+  no calls saved yet, the search runs at start once. After each Invo search (`invo_review`) `Bot.arena_start` runs
+  `arena.run` on a thread (prices: the Scorer's cached 1h candles and funding), back as `("arena_done", res)`.
+  Result: `data/arena/arena.json` (`VERSION` 2; older files are ignored). The HTML report and the 2-week seasons of
+  the first version are gone (owner 2026-10-20: results on the Discord card only; groups kept until the owner says).
+- Groups: `RECIPES` x 3/5/7/10 traders x 14/30/60-day look-back = 84. Every pick needs >= 5 copies in the look-back,
+  a call in the last 14 days and money made; a trader's portfolios that LOST in the look-back are not copied
+  (`kept_portfolios`). Baselines: `chooser` (at each window the 3 best groups on the windows that had ENDED by then,
+  measured on the new one: the honest check of "use the backtest's best live"), `random`, `follows`, `hindsight`.
+- Every group runs in every wallet variant of the Invo book (owner request 2026-10-20): `Variant(risk, stop)` = trader
+  size + each `invo.risk_wallets_pct`, x each `invo.stops_pct` (18). Sizing as the live wallets (`notional_of`: trader
+  size capped at `max_risk_pct / stop_pct` of equity; r% risk = r% of equity at its own stop, the trader's exit at the
+  30% guard), exit at the trader's close, our stop (3/8%) or `guard_pct(lev)` (trader's exit) on a 1h candle. Groups
+  are RANKED on the main wallet (trader size at `main_stop_pct`); `bt["best"]`/`["worst"]` = 3 best / worst
+  combinations (group x variant), `by_stop` / `by_size` averages.
+- Delay (owner: "around 5 seconds"): every entry and every trader-driven exit is worse by `Params.delay_bps`:
+  `arena.delay_cost(Bot.invo_gaps())` = the mean entry gap of the Invo book's real copies (main wallet; `invo_link.gap`
+  since 2026-10-20, older ones parsed from the card text) once there are 20 (`MIN_GAPS`; per coin likewise), else
+  `invo.arena_delay_bps` (10), plus `arena_delay_margin_bps` (5), never negative. 1-minute candles were not used:
+  Hyperliquid serves only the last 5,000 of them (~3.5 days). Costs kept apart per result: `fees` (taker x2, within
+  `cost_bps`), `slippage` (the rest of `cost_bps`), `funding`, `delay`.
+- Not modelled in the backtest: the wallets' risk limits, agreement boosts. Known bias: candidates are today's
+  rankings, deleted calls are gone (stated on the card).
+- Live (owner choices 2026-10-20: "new arena paper wallets", 3 groups, "keep groups until I say"): the first run with
+  groups writes `data/arena/live.json` (`arena.new_live`: slot, picks, kept portfolios, frozen) and `Bot.arena_build`
+  gives each group `Bot.invo_set("g<slot>_", ...)` = the same 18 wallets as the Invo book (same sizers, stops, limits,
+  RiskGate), in `data/arena/wallets/` (`arena_slot` attribute, no cards, no leader pauses). Routing: the watcher's
+  filter is `Bot.invo_watch_skip` (a call passes if any set copies its portfolio); `on_invo` sends opens to the Invo
+  book's wallets only if `invo_skip` passes and to an arena group's only if the portfolio is in its kept list
+  (`arena_skip`); `all_invo_wallets()` (book + arena) is used for routing, baselines, watched traders, restore and
+  /invopause /invoresume /invoflatten; `invo_wallets()` (book only) for /invowallets, /invoreset, cards.
+  `invo.arena_groups` (3, 0 = backtest only). The groups' traders are watched like followed ones (more traders = longer
+  Invo rounds; the owner chose 3 groups for that reason).
+- `/arena` (= `/invoarena`) = `arena.card(res, Bot.arena_view())`: live (groups, 3 best / 3 worst of group x size x
+  stop with fees and funding, averages per stop and group, the replay of the same calls `live_replay`) + backtest.
+  When the newest best groups differ, `Bot.ask` posts a 🔄 Switch / ✋ Keep question; Switch = `Bot.arena_switch`
+  (closes the arena wallets' copies at the book, archives `data/arena/wallets/` and live.json to
+  `data/archive/arena-<stamp>/`, builds the new groups at 300$, no restart).

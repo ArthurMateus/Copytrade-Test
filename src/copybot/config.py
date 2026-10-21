@@ -253,7 +253,10 @@ class Invo:
     min_hl_share: float = 0.5             # at least this share of its calls must be on coins Hyperliquid lists
     min_hold_min: float = 15.0            # median call duration at least this (shorter cannot be copied by polling)
     max_idle_days: float = 14.0           # its newest call is at most this old
-    arena: bool = True                    # after each search, the arena (copybot/arena.py): backtest + 2-week seasons
+    arena: bool = True                    # after each search, the arena (copybot/arena.py): backtest + live groups
+    arena_groups: int = 3                 # the backtest's best groups copied live, each in every size x stop (0 = off)
+    arena_delay_bps: float = 10.0         # the backtest's delay cost per entry/exit until 20 real copies measure it
+    arena_delay_margin_bps: float = 5.0   # ... added to the measured (or this) cost, to stay on the safe side
     drop_after_fails: int = 2            # a followed trader failing the rules this many searches in a row is dropped
 
 
@@ -401,6 +404,9 @@ CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
     ("invo", "min_hold_min"): (0.0, 1440.0),
     ("invo", "max_idle_days"): (1.0, 90.0),
     ("invo", "drop_after_fails"): (1, 10),
+    ("invo", "arena_groups"): (0, 6),
+    ("invo", "arena_delay_bps"): (0.0, 200.0),
+    ("invo", "arena_delay_margin_bps"): (0.0, 100.0),
     ("picks", "hour"): (0.0, 23.99),
     ("picks", "top_n"): (1, 20),
     ("invo", "max_traders"): (0, 20),

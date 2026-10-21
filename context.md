@@ -4,12 +4,16 @@ Start here, then read CLAUDE.md (design, decisions, hard rules; the source of tr
 it). Repo: https://github.com/ArthurMateus/Copytrade-Test (branch `main`). Everything is **PAPER ONLY**: no keys, no
 signing, no order endpoints (`tests/test_safety.py` enforces it). Tests: `uv run pytest` (~320 tests, ~5.5 min).
 
-## 2026-10-19: the Invo arena (branch `invo-arena`)
-- Built at the owner's request: the bot tests which set of <= 10 Invo traders makes 300$ the most in 2 weeks
-  (backtest on past calls, then live 2-week seasons), `/arena` in Discord, report `data/arena/index.html`. Design in
-  CLAUDE.md "Invo arena". Tested only on synthetic data so far: the Claude PC has no Invo login (and must not use the
-  bot's). First real results come after the owner pulls and restarts (one Invo search runs at start, then the arena).
-- Check after deploy: the log has `arena_done` with traders > 0, Discord got "New arena season", /arena answers.
+## 2026-10-20: the Invo arena (branch `invo-arena`, not merged into main)
+- Built at the owner's request (CLAUDE.md "Invo arena"): a backtest of 84 groups of <= 10 Invo traders in all 18 size x
+  stop wallets, with a measured ~5 s delay cost and fees/slippage/funding/delay kept apart; the 3 best groups then copy
+  live in their own 18 paper wallets each (`data/arena/wallets/`), kept until the owner switches them under `/arena`.
+- NOT backtested on real data yet: the Claude PC has no Invo login (and must not use the bot's). Next: the owner pulls
+  the branch on the bot PC and restarts; the first Invo search saves the calls, the arena runs, "Arena live" is posted.
+  Then ask the owner for `/arena` (paste) and `data\arena\arena.json` + `data\cache\invo\calls` (zipped) to check
+  the results BEFORE merging into main.
+- Check after deploy: log `arena_done` with traders > 0 and `delay_bps`, `arena_wallets groups=3 wallets=54`, Invo
+  rounds not much slower (watch `invo_poll_failed` / `invo_throttled`).
 
 ## Where we left off (2026-10-12 evening): read this first
 - Only the Invo book runs (`selection.enabled` / `sol.enabled` false). Commands on Discord have no prefix: /status,

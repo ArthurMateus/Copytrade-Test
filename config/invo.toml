@@ -53,6 +53,10 @@ max_calls = 600           # closed calls read per trader at most                
 min_hl_share = 0.5        # at least this share of its calls on coins Hyperliquid lists             [0, 1]
 min_hold_min = 15.0       # median call at least this long (shorter cannot be copied)               [0, 1440]
 max_idle_days = 14.0      # its newest call at most this old                                        [1, 90]
-arena = true              # after each search: which <=10 traders make 300$ the most in 2 weeks (backtest + live
-                          # 2-week seasons, paper only: /arena, data/arena/index.html). Reads no extra Invo data.
+arena = true              # after each search: which groups of <=10 traders make 300$ the most in 2 weeks, in every
+                          # size x stop above (backtest on the calls the search read: no extra Invo data); /arena
+arena_groups = 3          # the backtest's best groups copied live, each in every size x stop (paper; they stay until
+                          # you switch them under /arena; each group's traders are also read by the watcher)  [0, 6]
+arena_delay_bps = 10.0    # the backtest's cost of our late entry and exit (0.10%) until 20 real copies measure it [0, 200]
+arena_delay_margin_bps = 5.0   # added to the measured (or the above) cost, to stay on the safe side        [0, 100]
 drop_after_fails = 2     # none of a followed trader's portfolios copied this many daily searches in a row: Discord asks you to drop it (buttons); /invofollow picks are never asked  [1, 10]   # fixed-risk Invo wallets next to the trader-size one (/invowallets)

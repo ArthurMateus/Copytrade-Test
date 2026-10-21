@@ -56,7 +56,7 @@ Run the tests: `uv run pytest` (about 5 minutes; this includes real-process kill
 | Commands, outbox and in-place edited cards; Discord transport; card rendering | `chat.py`, `discord.py`, `cardfmt.py` |
 | Threads and the trading loop | `runner.py` |
 | Invo: client, watcher, daily search | `invo.py`, `invo_scorer.py` |
-| Invo arena: recipes, backtest, live 2-week seasons, report | `arena.py`, `arena_report.py` |
+| Invo arena: recipes, backtest of every size × stop, live groups | `arena.py` |
 | Daily picks report | `picks.py` |
 | FOMO / Solana book | `sol/` (see below) |
 
@@ -228,19 +228,29 @@ all time, trending users; together only about 66-70 different traders) plus the 
 second, once a day (`config/invo.toml`: `search`, `max_candidates`, ...). The very first search starts when the bot
 starts and its result is posted as soon as it ends.
 
-**The Invo arena (`/arena`).** Instead of choosing traders by hand: which set of at most 10 Invo traders would make a
-$300 paper wallet the most money in 2 weeks? After each daily search the bot tests 63 recipes (most money made, best
-profit factor, highest win rate, hot hand, steady, the bot's floors, most active; each with 3, 5 or 10 traders and a
-14, 30 or 60-day look-back) against random traders, the traders you follow, and the best possible picks in hindsight.
-- **Backtest:** for every past 2-week window, each recipe picks using only what happened before that window, then
-  copies those traders' calls inside it, sized like the "invo calls" wallet and closed at the trader's exit.
-- **Live season:** the 6 best recipes' picks are frozen for 2 weeks and scored on the calls that come after, next to
-  a random wallet and your follows. When a season ends, Discord gets the final standings and a new season starts.
-- `/arena` shows the current season and the backtest's best; the full report with charts is
-  `data\arena\index.html` on the bot PC (double-click it). `arena = false` in `config/invo.toml` turns it off.
-- It reads no extra data from Invo (it uses the calls the daily search already reads) and never trades. Trust the
-  live season over the backtest: the backtest only sees traders who are on Invo's rankings today, with deleted calls
-  gone, so it looks better than reality.
+**The Invo arena (`/arena`).** Instead of choosing traders by hand: which group of at most 10 Invo traders makes a
+$300 paper wallet the most money in 2 weeks, and in which size and stop? After each daily search the bot tests 84
+groups (most money made, best profit factor, highest win rate, hot hand, steady, the bot's floors, most active; each
+with 3, 5, 7 or 10 traders and a 14, 30 or 60-day look-back), each in all 18 wallets the Invo book runs (trader size
+and 1/2/5/10/20% risk, each with a 3% stop, an 8% stop and the trader's exit), against random traders, the traders you
+follow, and the best possible picks in hindsight.
+- **Backtest:** for every past 2-week window, each group is picked using only what happened before that window, then
+  copies those traders' calls inside it, sized like the live Invo wallets. Every entry and every exit that follows the
+  trader pays our delay (about 5 s after the trader): the price gap the bot measured on its real Invo copies, plus a
+  margin (`arena_delay_bps` until 20 copies have measured it). Fees, slippage, funding and the delay are counted apart.
+- **The arena's own choice:** at each window, the 3 groups with the best backtest so far, measured on a window they had
+  not seen yet. That is the honest answer to "does using the backtest's best groups work?".
+- **Live:** the 3 best groups (`arena_groups`) copy their traders' new calls on Hyperliquid's real book, each in its own
+  18 wallets ($300 each, `data\arena\wallets\`), through the same risk gate and limits as the Invo book. They stay
+  until you switch them: `/arena` asks with a button when the backtest's best groups have changed (the old arena
+  wallets are archived in `data\archive\arena-<date>\`).
+- `/arena` shows the live wallets (3 best and 3 worst of group × size × stop, the average per stop and per group, fees
+  and funding) and the backtest (3 best and 3 worst combinations, the average per stop, the honest check).
+  `arena = false` in `config/invo.toml` turns it off, `arena_groups = 0` keeps only the backtest.
+- It reads no extra data from Invo for the backtest (it uses the calls the daily search already reads); the live groups'
+  traders are read like followed ones (3 groups of up to 10 traders: Invo rounds take longer, about 0.5 s per extra
+  trader). Trust the live wallets over the backtest: the backtest only sees traders who are on Invo's rankings today,
+  with deleted calls gone, so it looks better than reality.
 
 ### Setup (once)
 1. In Chrome, open an **Incognito window** (Ctrl+Shift+N), go to https://app.invoapp.com and sign in with the bot's

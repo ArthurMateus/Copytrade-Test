@@ -126,88 +126,28 @@ class Bot:
         self.invo_info: dict[str, str] = {}          # our position id -> what the trader called (for its card)
         self._invo_close_why: str | None = None      # the trader's close reason while it is being mirrored
         self.invo_baseline_wait: dict[str, list] = {}  # trader -> its first read, held until Hyperliquid's coins load
+        self.side_broker = side_broker
+        # the Invo arena's live groups (owner request 2026-10-20): each group of traders the arena's backtest liked
+        # best gets every Invo size x stop as its own wallets, in data/arena/wallets/ (arena_build)
+        self.arena_groups: list[dict] = []
+        self.arena_live: dict | None = None
         if cfg.invo.enabled and cfg.invo_token_file:
-            # every size x every stop (owner request 2026-10-12): the trader-size wallet and the 1-20% risk wallets,
-            # each once per stop in invo.stops_pct (0 = the trader's exit). A risk wallet risks its r% at ITS OWN stop
-            # (owner request 2026-10-13, "A": copies of r% x equity / stop; the trader's exit at its 30% guard), so a
-            # "20% risk" wallet never loses more than ~20% on one copy at any stop; it used to copy the 3%-stop
-            # notional at every stop (8% stop = 53% of the wallet). The trader-size versions keep one notional. The versions at invo.main_stop_pct keep the plain names (invo_calls,
-            # invo_risk_<r>pct), decide which calls are copied, and invo_calls posts the cards and owns the followed
-            # list; the others are named <name>_stop<s> / <name>_trader (owner request 2026-10-12: "keep the trades
-            # open until the traders close them", main_stop_pct 0; it was our 3% stop)
-            base, main = cfg.risk.stop_pct, cfg.invo.main_stop_pct
-            stop_word = lambda s: f"{s:g}% stop" if s > 0 else "trader's exit"
-            suffix = lambda s: "" if s == main else f"_stop{s:g}" if s > 0 else "_trader"
-            sizes = [("invo_calls", "trader size", cfg.invo.limits_pct, cfg.invo.max_risk_pct / base, self.invo_size,
-                      self.invo_cap)]
-            sizes += [(f"invo_risk_{r:g}pct", f"{r:g}% risk", r, None, None, None) for r in cfg.invo.risk_wallets_pct]
-            variants = []
-            for s in [main, *[s for s in cfg.invo.stops_pct if s != main]]:      # the deciding versions first
-                for name, size_label, risk, mult, sizer, cap in sizes:
-                    if sizer is None:                # a risk wallet: r% of equity lost if its own stop is hit
-                        stop = s if s > 0 else invo_emergency_stop(risk / EMERGENCY_STOP_PCT)
-                        # (lifted to the minimum notional: 1% at the 30% guard is ~10$, a smaller copy would be skipped)
-                        sizer = lambda m, px, eq, r=risk, st=stop: max(
-                            eq * r / st, cfg.risk.min_notional_usd * 1.05) / px if px > 0 else 0.0
-                        # its limits: r% (at least room for a minimum copy at this stop: 1% at the 30% guard is ~10$)
-                        level = max(risk, 120 * cfg.risk.min_notional_usd * stop / 100 / cfg.risk.start_equity)
-                    else:                            # trader size: the same notional at every stop, and the limits
-                        stop = s if s > 0 else invo_emergency_stop(mult)   # of a wallet risking it at this stop
-                        level = risk * stop / base
-                    primary = s == main and name == "invo_calls"
-                    x = SideWallet(cfg, level, self.data, side_broker, self.health, self.mids,
-                                   self.assets, alts_ok=lambda leader: True, score_of=self.score_of,
-                                   name=name + suffix(s), label=f"{size_label} · {stop_word(s)}", sizer=sizer,
-                                   cap=cap, own_leaders=True,
-                                   **(dict(notify=self.on_invo_notify, pause_leaders=True) if primary else {}))
-                    x.size_label, x.stop_label = size_label, stop_word(s)
-                    if s == 0:
-                        # the trader's exit: the copy takes the trader's leverage (at most 10x) and the guard stop
-                        # sits just before that leverage's liquidation (owner request 2026-10-14: a 40x call -> 10x)
-                        x.gate.follow_leverage = True
-                        x.gate.call_leverage = lambda: self._invo_call.leverage if self._invo_call else None
-                    if s != main:
-                        x.base_name = name           # its main-stop version: the calls it copies (see invo_one)
-                    variants.append((x, s, stop))
-                    if primary:
-                        self.invo = x
-                    else:
-                        self.invo_extra.append(x)
-                    self.sides.append(x)
-            for x in self.invo_wallets():
-                # a call is first seen up to a round (poll_s + the reads) after it was posted: entries may be that
-                # old (still fail closed)
-                x.cfg.risk.max_entry_age_s = cfg.invo.max_call_age_s + cfg.invo.poll_s + 10
-                x.cfg.risk.trail_after_pct, x.cfg.risk.trail_pct = cfg.invo.trail_after_pct, cfg.invo.trail_pct
-                # the leader pause compares a trader's copy drawdown with leader_pause_dd_pct of (equity /
-                # max_leaders): set so the limit is invo.pause_dd_pct of the whole wallet
-                x.cfg.risk.leader_pause_dd_pct = cfg.invo.pause_dd_pct * max(1, x.cfg.risk.max_leaders)
-                # a second trader on the coin and side we hold adds size (owner request 2026-10-13, "B"), but the
-                # first trader's exit still closes the whole copy (no hand-over to the second one)
-                x.pm.handover = False
-            for x, s, stop in variants:
-                if s != base:
-                    # its stop; the stop only has to sit before liquidation (a wider stop with the 3x buffer of the
-                    # usual one would leave no leverage for the same copy size)
-                    x.cfg.risk.stop_pct = stop
-                    x.cfg.risk.liq_buffer_mult = 1.0
-                if s != main:
-                    # same calls as its main-stop version (owner request 2026-10-12: the 8% and trader-exit versions
-                    # of the bigger sizes copied 3 of 13 calls, their budget still full of copies the usual stop had
-                    # closed): that version decides which calls are copied, so the wallet-wide budgets here only stop
-                    # runaways. Per-trade and per-coin limits stay (same copy size); margin still limits what it holds.
-                    r = x.cfg.risk
-                    r.max_total_risk_pct, r.max_positions = 1000.0, 100
-                    r.daily_loss_pct = r.weekly_loss_pct = 100.0
-            # watched: the followed traders AND the unfollowed ones we still hold a copy of (their exits are copied);
-            # rebuilt on the trading thread (invo_refresh_watched), read by the watcher thread
+            self.invo, self.invo_extra = self.invo_set("", "", self.data,
+                                                       dict(notify=self.on_invo_notify, pause_leaders=True))
+            self.sides += [self.invo, *self.invo_extra]
+            if cfg.invo.arena and cfg.invo.arena_groups > 0:
+                self.arena_live = arena.load_live(self.data / "arena")
+                if self.arena_live:
+                    self.arena_build(self.arena_live, boot=False)
+            # watched: the followed traders AND the unfollowed ones we still hold a copy of (their exits are copied),
+            # and the arena groups' traders; rebuilt on the trading thread (invo_refresh_watched), read by the watcher
             self.invo_watched: frozenset[str] = frozenset()
             self.invo_watch = InvoWatcher(InvoClient(cfg.invo.api_base, cfg.invo_token_file,
                                                      min_interval_s=cfg.invo.request_gap_s), self.q,
                                           lambda: self.invo_watched, cfg.invo.poll_s,
-                                          cfg.invo.max_call_age_s, self.stop, skip=self.invo_skip)
+                                          cfg.invo.max_call_age_s, self.stop, skip=self.invo_watch_skip)
             self.invo_refresh_watched()
-            for x in self.invo_wallets():                # the call each open copy belongs to (ledger, audit 2026-10-11)
+            for x in self.all_invo_wallets():            # the call each open copy belongs to (ledger, audit 2026-10-11)
                 for p in x.st.positions.values():
                     link = x.st.invo_links.get(p.pos_id)
                     if link and p.leader.startswith(INVO):
@@ -260,6 +200,195 @@ class Bot:
         self.leaders_with_positions: set[str] = set()
         self.ws_down_since = 0.0     # websocket down since (0 = up); alerted only if it stays down
         self.ws_alerted = False
+
+    def invo_set(self, prefix: str, label_prefix: str, data_dir: Path, primary_kw: dict) -> tuple:
+        """Every Invo size x every stop (owner request 2026-10-12): the trader-size wallet and the 1-20% risk wallets,
+        each once per stop in invo.stops_pct (0 = the trader's exit). Returns (the trader-size wallet at the main stop,
+        the others); `prefix` names them (the arena's groups: "g1_"), `primary_kw` goes to the first one.
+        A risk wallet risks its r% at ITS OWN stop (owner request 2026-10-13, "A": copies of r% x equity / stop; the
+        trader's exit at its 30% guard), so a "20% risk" wallet never loses more than ~20% on one copy at any stop; it
+        used to copy the 3%-stop notional at every stop (8% stop = 53% of the wallet). The trader-size versions keep
+        one notional. The versions at invo.main_stop_pct keep the plain names (invo_calls, invo_risk_<r>pct), decide
+        which calls are copied, and invo_calls posts the cards and owns the followed list; the others are named
+        <name>_stop<s> / <name>_trader (owner request 2026-10-12: "keep the trades open until the traders close them",
+        main_stop_pct 0; it was our 3% stop)."""
+        cfg = self.cfg
+        base, main = cfg.risk.stop_pct, cfg.invo.main_stop_pct
+        stop_word = lambda s: f"{s:g}% stop" if s > 0 else "trader's exit"
+        suffix = lambda s: "" if s == main else f"_stop{s:g}" if s > 0 else "_trader"
+        sizes = [("invo_calls", "trader size", cfg.invo.limits_pct, cfg.invo.max_risk_pct / base, self.invo_size,
+                  self.invo_cap)]
+        sizes += [(f"invo_risk_{r:g}pct", f"{r:g}% risk", r, None, None, None) for r in cfg.invo.risk_wallets_pct]
+        variants = []
+        first, others = None, []
+        for s in [main, *[s for s in cfg.invo.stops_pct if s != main]]:      # the deciding versions first
+            for name, size_label, risk, mult, sizer, cap in sizes:
+                if sizer is None:                # a risk wallet: r% of equity lost if its own stop is hit
+                    stop = s if s > 0 else invo_emergency_stop(risk / EMERGENCY_STOP_PCT)
+                    # (lifted to the minimum notional: 1% at the 30% guard is ~10$, a smaller copy would be skipped)
+                    sizer = lambda m, px, eq, r=risk, st=stop: max(
+                        eq * r / st, cfg.risk.min_notional_usd * 1.05) / px if px > 0 else 0.0
+                    # its limits: r% (at least room for a minimum copy at this stop: 1% at the 30% guard is ~10$)
+                    level = max(risk, 120 * cfg.risk.min_notional_usd * stop / 100 / cfg.risk.start_equity)
+                else:                            # trader size: the same notional at every stop, and the limits
+                    stop = s if s > 0 else invo_emergency_stop(mult)   # of a wallet risking it at this stop
+                    level = risk * stop / base
+                primary = s == main and name == "invo_calls"
+                x = SideWallet(cfg, level, data_dir, self.side_broker, self.health, self.mids,
+                               self.assets, alts_ok=lambda leader: True, score_of=self.score_of,
+                               name=prefix + name + suffix(s), label=f"{label_prefix}{size_label} · {stop_word(s)}",
+                               sizer=sizer, cap=cap, own_leaders=True, **(primary_kw if primary else {}))
+                x.size_label, x.stop_label = size_label, stop_word(s)
+                if s == 0:
+                    # the trader's exit: the copy takes the trader's leverage (at most 10x) and the guard stop
+                    # sits just before that leverage's liquidation (owner request 2026-10-14: a 40x call -> 10x)
+                    x.gate.follow_leverage = True
+                    x.gate.call_leverage = lambda: self._invo_call.leverage if self._invo_call else None
+                if s != main:
+                    x.base_name = prefix + name  # its main-stop version: the calls it copies (see invo_one)
+                variants.append((x, s, stop))
+                if primary:
+                    first = x
+                else:
+                    others.append(x)
+        for x, s, stop in variants:
+            # a call is first seen up to a round (poll_s + the reads) after it was posted: entries may be that
+            # old (still fail closed)
+            x.cfg.risk.max_entry_age_s = cfg.invo.max_call_age_s + cfg.invo.poll_s + 10
+            x.cfg.risk.trail_after_pct, x.cfg.risk.trail_pct = cfg.invo.trail_after_pct, cfg.invo.trail_pct
+            # the leader pause compares a trader's copy drawdown with leader_pause_dd_pct of (equity /
+            # max_leaders): set so the limit is invo.pause_dd_pct of the whole wallet
+            x.cfg.risk.leader_pause_dd_pct = cfg.invo.pause_dd_pct * max(1, x.cfg.risk.max_leaders)
+            # a second trader on the coin and side we hold adds size (owner request 2026-10-13, "B"), but the
+            # first trader's exit still closes the whole copy (no hand-over to the second one)
+            x.pm.handover = False
+            if s != base:
+                # its stop; the stop only has to sit before liquidation (a wider stop with the 3x buffer of the
+                # usual one would leave no leverage for the same copy size)
+                x.cfg.risk.stop_pct = stop
+                x.cfg.risk.liq_buffer_mult = 1.0
+            if s != main:
+                # same calls as its main-stop version (owner request 2026-10-12: the 8% and trader-exit versions
+                # of the bigger sizes copied 3 of 13 calls, their budget still full of copies the usual stop had
+                # closed): that version decides which calls are copied, so the wallet-wide budgets here only stop
+                # runaways. Per-trade and per-coin limits stay (same copy size); margin still limits what it holds.
+                r = x.cfg.risk
+                r.max_total_risk_pct, r.max_positions = 1000.0, 100
+                r.daily_loss_pct = r.weekly_loss_pct = 100.0
+        return first, others
+
+    # ---- the arena's live groups (owner request 2026-10-20) ---------------------------------------------------
+    def arena_build(self, live: dict, boot: bool = True) -> None:
+        """One set of Invo wallets per live arena group (copybot/arena.py), each following the group's traders, only
+        in the portfolios the arena kept for them (frozen with the group). Built at start from data/arena/live.json,
+        or on the trading thread when the arena picks its first groups (`boot`: genesis and repair now)."""
+        d = self.data / "arena"
+        for g in live["groups"]:
+            slot = g["slot"]
+            first, others = self.invo_set(f"g{slot}_", f"G{slot} · ", d, {})
+            ws = [first, *others]
+            for w in ws:
+                w.arena_slot = slot
+                if boot:
+                    self.boot_side(w)
+                for n in g["picks"]:
+                    if INVO + n.lower() not in w.st.followed:
+                        w.rec({"ev": "follow", "leader": INVO + n.lower(), "reason": "arena group"})
+            keep = {n.lower(): set(v) for n, v in (g.get("portfolios") or {}).items()}
+            self.arena_groups.append({"slot": slot, "group": g, "primary": first, "wallets": ws, "keep": keep})
+            self.sides += ws
+        log.info("arena_wallets", groups=len(live["groups"]), wallets=sum(len(x["wallets"]) for x in self.arena_groups))
+
+    def arena_wallets(self) -> list:
+        return [w for g in self.arena_groups for w in g["wallets"]]
+
+    def all_invo_wallets(self) -> list:
+        """Every wallet copying Invo calls: the Invo book's own, then the arena groups'."""
+        return [*self.invo_wallets(), *self.arena_wallets()]
+
+    def arena_skip(self, name: str, portfolio_id: str) -> list:
+        """The arena groups copying this portfolio of `name` (frozen with the group)."""
+        return [g for g in self.arena_groups if portfolio_id in g["keep"].get(name.lower(), ())]
+
+    def invo_watch_skip(self, name: str, p) -> str | None:
+        """The watcher's filter: new calls of a portfolio no wallet copies are dropped there. The Invo book's rule
+        (invo_skip) for the traders it follows; an arena group's kept portfolios for its traders."""
+        if self.arena_skip(name, p.id):
+            return None
+        return self.invo_skip(name, p)
+
+    def invo_gaps(self) -> list[tuple[str, float]]:
+        """(coin, % we got in worse than the trader) of the Invo book's real copies (main wallet): the arena's delay
+        cost. From the `gap` field of the copy's link (since 2026-10-20), or read back from its card text before."""
+        if self.invo is None:
+            return []
+        st = self.invo.st
+        coins = {t["pos_id"]: t["coin"] for t in st.closed if "pos_id" in t}
+        coins.update({p.pos_id: p.coin for p in st.positions.values()})
+        out = []
+        for pid, link in st.invo_links.items():
+            coin = link.get("coin") or coins.get(pid)
+            gap = link.get("gap")
+            if gap is None:
+                info = link.get("info") or ""
+                m = re.search(r"([+\-−]?\d+(?:\.\d+)?)% (worse|better)", info)
+                if m:
+                    gap = abs(float(m.group(1).replace("−", "-"))) * (1 if m.group(2) == "worse" else -1)
+                elif "same price as theirs" in info:
+                    gap = 0.0
+            if coin and gap is not None:
+                out.append((coin, float(gap)))
+        return out
+
+    def arena_view(self) -> dict | None:
+        """The live groups and their wallets' results, for the /arena card (funding = paid)."""
+        if not self.arena_live:
+            return None
+        ws = []
+        for g in self.arena_groups:
+            for w in g["wallets"]:
+                st = w.st
+                ws.append({"slot": g["slot"], "size": w.size_label, "stop": w.stop_label, "equity0": st.equity0,
+                           "pnl": st.equity(self.mids) - st.equity0, "trades": len(st.closed),
+                           "wins": sum(1 for t in st.closed if t["pnl"] > 0), "open": len(st.positions),
+                           "fees": sum(t.get("fees", 0.0) for t in st.closed)
+                           + sum(p.fees for p in st.positions.values()),
+                           "funding": -(sum(t.get("funding", 0.0) for t in st.closed)
+                                        + sum(p.funding for p in st.positions.values()))})
+        return {**self.arena_live, "wallets": ws}
+
+    def arena_switch(self, groups: list[dict]) -> str:
+        """The owner switched the live groups (button under /arena): the arena wallets' open copies are closed at the
+        book, their ledgers archived to data/archive/arena-<stamp>/ and the new groups start at 300$ each."""
+        n = 0
+        for w in self.arena_wallets():
+            n += len(w.st.positions)
+            w.pm.flatten("arena groups switched")
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+        arch = self.data / "archive" / f"arena-{stamp}"
+        old = {w.name for w in self.arena_wallets()}
+        for w in self.arena_wallets():
+            w.ledger.frozen = True
+            w.ledger.close()
+        self.sides = [w for w in self.sides if not hasattr(w, "arena_slot")]
+        self.invo_calls = {k: v for k, v in self.invo_calls.items() if k[0] not in old}
+        self.arena_groups = []
+        d = self.data / "arena" / "wallets"
+        moved = d.exists()
+        if moved:
+            arch.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(d), str(arch / "wallets"))
+        live_p = self.data / "arena" / "live.json"
+        if live_p.exists():
+            arch.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(live_p), str(arch / "live.json"))
+        self.arena_live = arena.new_live(groups, now_ms())
+        arena.save_live(self.data / "arena", self.arena_live)
+        self.arena_build(self.arena_live)
+        self.invo_refresh_watched()
+        log.info("arena_switched", closed=n, archive=arch.as_posix(), groups=len(groups))
+        return f"{n} open arena copies closed · old wallets saved in <code>{cardfmt.esc(arch.as_posix())}</code>" \
+            if moved else ""
 
     # ---- health ------------------------------------------------------------------------------------
     def health(self) -> Health:
@@ -333,21 +462,7 @@ class Bot:
                          + "\n".join(f"• {cardfmt.esc(x)}" for x in problems[:10])
                          + "\nCheck, then /hyperresume.")
 
-        def boot_side(w):
-            if not w.st.genesis_ms:
-                w.rec({"ev": "genesis", "equity0": w.cfg.risk.start_equity, "btc_px0": self.st.btc_px0})
-            w.rec({"ev": "boot", "positions": len(w.st.positions), "followed": len(w.st.followed)})
-            side_problems = boot_repair(w.st, w.rec, w.gate, w.name, self.assets)
-            if side_problems:
-                self.ui.send(f"⚠️ <b>Side wallet {cardfmt.esc(w.label)} restarted with uncertainty</b> · ⏸️ its entries "
-                             f"paused\n" + "\n".join(f"• {cardfmt.esc(x)}" for x in side_problems[:5])
-                             + ("\n/invoresume resumes the Invo wallets." if w.own_leaders else
-                                "\n/hyperresume resumes every Hyperliquid wallet."))
-            if self.st.entries_paused and not w.st.entries_paused and not w.own_leaders:
-                w.rec({"ev": "pause", "reason": self.st.pause_reason or "main wallet paused"})
-            log.info("side_wallet", wallet=w.name, equity=round(w.st.equity(), 2), positions=len(w.st.positions),
-                     trades=len(w.st.closed), paused=w.st.entries_paused)
-        self.on_sides("boot", boot_side)
+        self.on_sides("boot", self.boot_side)
         self.sync_sides()
         for key, mid in self.st.cards.items():
             if key.startswith("dc:"):                 # (keys without the prefix were Telegram messages)
@@ -375,6 +490,22 @@ class Bot:
                          f"{_traders(len(self.invo.st.followed))}" + (" · ⏸️ paused" if self.invo.st.entries_paused else ""))
         # one start message for every book (owner request 2026-10-10)
         self.ui.send("🤖 <b>Copybot started</b> (paper)\n" + "\n".join(lines))
+
+    def boot_side(self, w) -> None:
+        """Genesis, boot and restart repair of one side wallet (also arena wallets built later)."""
+        if not w.st.genesis_ms:
+            w.rec({"ev": "genesis", "equity0": w.cfg.risk.start_equity, "btc_px0": self.st.btc_px0})
+        w.rec({"ev": "boot", "positions": len(w.st.positions), "followed": len(w.st.followed)})
+        side_problems = boot_repair(w.st, w.rec, w.gate, w.name, self.assets)
+        if side_problems:
+            self.ui.send(f"⚠️ <b>Side wallet {cardfmt.esc(w.label)} restarted with uncertainty</b> · ⏸️ its entries "
+                         f"paused\n" + "\n".join(f"• {cardfmt.esc(x)}" for x in side_problems[:5])
+                         + ("\n/invoresume resumes the Invo wallets." if w.own_leaders else
+                            "\n/hyperresume resumes every Hyperliquid wallet."))
+        if self.st.entries_paused and not w.st.entries_paused and not w.own_leaders:
+            w.rec({"ev": "pause", "reason": self.st.pause_reason or "main wallet paused"})
+        log.info("side_wallet", wallet=w.name, equity=round(w.st.equity(), 2), positions=len(w.st.positions),
+                 trades=len(w.st.closed), paused=w.st.entries_paused)
 
     def start_threads(self) -> None:
         self.feed.set_users(self.wanted_users())
@@ -500,27 +631,28 @@ class Bot:
         if c.name == "/invoprogress":
             return self.ui.send("🧾 " + cardfmt.progress_text(w.st, self.mids, self.mids.get("BTC"), now_ms()))
         if c.name == "/invopause":
-            for x in self.invo_wallets():
+            for x in self.all_invo_wallets():
                 x.rec({"ev": "pause", "reason": "/invopause"})
-            return self.ui.send("⏸️ 🧾 <b>Invo copies paused</b> (every Invo wallet). Exits and stops keep running. "
+            return self.ui.send("⏸️ 🧾 <b>Invo copies paused</b> (every Invo wallet, the arena's too). Exits and stops keep running. "
                                 "/invoresume to continue.")
         if c.name == "/invoresume":
-            for x in self.invo_wallets():
+            for x in self.all_invo_wallets():
                 if x.st.uncertain:
                     x.rec({"ev": "ack", "items": list(x.st.uncertain)})
                 x.rec({"ev": "resume"})
-            return self.ui.send("▶️ 🧾 <b>Invo copies resumed</b> (every Invo wallet).")
+            return self.ui.send("▶️ 🧾 <b>Invo copies resumed</b> (every Invo wallet, the arena's too).")
         if c.name in ("/invoflatten", "/invoreset"):
             if not self.ui.check_pin(c.arg):
                 log.warn("invo_bad_pin", cmd=c.name)
                 return self.ui.send(f"⛔ Wrong or missing PIN. Usage: {c.name} &lt;PIN&gt;")
             if c.name == "/invoflatten":
                 n = 0
-                for x in self.invo_wallets():
+                for x in self.all_invo_wallets():
                     n += len(x.st.positions)
                     x.rec({"ev": "pause", "reason": "/invoflatten"})
                     x.pm.flatten("flatten")
-                return self.ui.send(f"🛑 🧾 <b>Invo flattened</b>: {n} trade(s) closed in the Invo wallets. ⏸️ Invo copies "
+                return self.ui.send(f"🛑 🧾 <b>Invo flattened</b>: {n} trade(s) closed in the Invo wallets (the arena's "
+                                    "too). ⏸️ Invo copies "
                                     "paused · /invoresume to continue.")
             n_open = sum(len(x.st.positions) for x in self.invo_wallets())
             if n_open:
@@ -543,9 +675,21 @@ class Bot:
         if c.name == "/invoarena":
             if not self.cfg.invo.arena:
                 return self.ui.send("🏟️ The arena is off (arena = true in config/invo.toml, then /restart).")
-            return self.ui.send(arena.card(self.arena_res, now_ms(), self.cfg.discord.utc_offset_hours,
-                                           self.arena_report())
-                                + ("\n⏳ Updating now (after the Invo search)." if self.arena_busy else ""))
+            self.ui.send(arena.card(self.arena_res, self.arena_view(), now_ms(), self.cfg.discord.utc_offset_hours)
+                         + ("\n⏳ Updating now (after the Invo search)." if self.arena_busy else ""))
+            nxt = (self.arena_res or {}).get("next") or []
+            if self.arena_live and nxt and not arena.same_groups(self.arena_live, nxt) \
+                    and not any(a["kind"] == "arena_switch" for a in self.asks.values()):
+                # the live groups stay until the owner switches them (owner choice 2026-10-20)
+                n_open = sum(len(w.st.positions) for w in self.arena_wallets())
+                self.ask({"kind": "arena_switch", "groups": nxt},
+                         "❓ 🏟️ <b>Switch the arena's live groups to the backtest's best now?</b>\n"
+                         + "\n".join(f"• {cardfmt.esc(g['label'])}: {cardfmt.esc(', '.join(g['picks']))}" for g in nxt)
+                         + f"\nThe {len(self.arena_wallets())} arena wallets start again at "
+                           f"{cardfmt.fusd(self.cfg.risk.start_equity, sign=False)} each (the old ones are archived)"
+                         + (f"; their {n_open} open copies are closed now." if n_open else "."),
+                         [("yes", "🔄 Switch", 1), ("no", "✋ Keep the live groups", 2)])
+            return
         name = c.arg.strip().lstrip("@")
         if not re.fullmatch(r"[A-Za-z0-9_.]{2,40}", name):
             return self.ui.send(f"Usage: {c.name} &lt;Invo username&gt; (as in app.invoapp.com/&lt;username&gt;)")
@@ -665,7 +809,9 @@ class Bot:
         if self.invo is None:
             return
         names = {a[len(INVO):] for a in self.invo.st.followed}
-        for w in self.invo_wallets():
+        for g in self.arena_groups:                        # the arena's live groups (owner request 2026-10-20)
+            names |= {a[len(INVO):] for a in g["primary"].st.followed}
+        for w in self.all_invo_wallets():
             names |= {a[len(INVO):] for p in w.st.positions.values() for a in (p.leader, *p.backers)
                       if a.startswith(INVO)}
         if names != self.invo_watched:
@@ -699,7 +845,7 @@ class Bot:
             if coin is not None:
                 open_by.setdefault((coin, 1 if c.long else -1), []).append(c)
         by_id = {c.id: c for c in calls}
-        for w in self.invo_wallets():
+        for w in self.all_invo_wallets():
             # copies this trader backs (agreement, "B"): find its call again, or take the extra size off if it closed
             for p in [p for p in w.st.positions.values() if leader in p.backers]:
                 mine = open_by.get((p.coin, p.side), [])
@@ -827,8 +973,10 @@ class Bot:
         leader = INVO + trader
         if self.invo is None:
             return
-        if leader not in self.invo.st.followed and (kind == "invo_open" or not any(
-                p.leader == leader or leader in p.backers for w in self.invo_wallets()
+        main = leader in self.invo.st.followed
+        in_arena = any(leader in g["primary"].st.followed for g in self.arena_groups)
+        if not main and not in_arena and (kind == "invo_open" or not any(
+                p.leader == leader or leader in p.backers for w in self.all_invo_wallets()
                 for p in w.st.positions.values())):
             return       # an unfollowed trader: only the exits and resizes of copies we still hold
         coin, fx = self.invo_trade_coin(call.ticker)
@@ -840,10 +988,22 @@ class Bot:
                      their_stop_pct=round(stop_pct, 2) if stop_pct is not None else "none",
                      their_target_pct=round(target_pct, 2) if target_pct is not None else "none")
             if coin is None:
+                if not main:             # an arena group's trader: not worth a message
+                    return
                 return self.ui.send(f"🧾 Invo · @{cardfmt.esc(trader)} called {cardfmt.esc(call.ticker)}: not on "
                                     "Hyperliquid, not copied.")
         self.sync_invo_extras()
-        for w in self.invo_wallets():
+        wallets = self.all_invo_wallets()
+        if kind == "invo_open":
+            # the watcher lets a call through when ANY wallet set copies its portfolio: the Invo book's own rules
+            # (invo_skip) for its wallets, the portfolios each arena group kept for its own
+            port = self.invo_watch.ports.get(call.portfolio_id) if self.invo_watch is not None else None
+            why = self.invo_skip(trader, port) if port is not None else None
+            if main and why:
+                log.info("invo_skip", wallet=self.invo.name, trader=trader, coin=coin, why=why)
+            slots = {g["slot"] for g in self.arena_skip(trader, call.portfolio_id)}
+            wallets = [w for w in wallets if (w.arena_slot in slots if hasattr(w, "arena_slot") else why is None)]
+        for w in wallets:
             try:
                 self.invo_one(w, kind, leader, trader, call, new, coin, fx)
             except Exception as e:          # one Invo wallet's failure never reaches the others
@@ -901,7 +1061,8 @@ class Bot:
                             f"⏱️ In {late} · {fill}" + (f"\n🎯 {tp_sl}" if tp_sl else ""))
                     self.invo_info[p.pos_id] = info
                 w.rec({"ev": "invo_link", "pos_id": p.pos_id, "call": call.id, "info": info,
-                       "portfolio": call.portfolio_id, "title": title, "live": call.live})
+                       "portfolio": call.portfolio_id, "title": title, "live": call.live, "coin": coin,
+                       "gap": round(gap, 4)})   # (the gap measures the arena's delay cost, Bot.invo_gaps)
                 if primary:
                     self.invo_card(p, force=True)
             return
@@ -1316,42 +1477,52 @@ class Bot:
             self.invo_repick(n_cands)
 
     def arena_start(self) -> None:
-        """The arena (copybot/arena.py) on its own thread after an Invo search: backtest, then the live season scored,
-        ended and restarted when due. It reads only the calls the search saved and cached Hyperliquid prices; the
-        result comes back as ("arena_done", result or None). Paper only: it never touches a wallet."""
+        """The arena (copybot/arena.py) on its own thread after an Invo search: the backtest of every group x size x
+        stop, the best groups now and the replay of the live ones. It reads only the calls the search saved and cached
+        Hyperliquid prices; the result comes back as ("arena_done", result or None). The delay cost is measured on
+        the Invo book's real copies (invo_gaps)."""
         if self.invo is None or not self.cfg.invo.arena or self.arena_busy:
             return
         self.arena_busy = True
         follows = sorted(a[len(INVO):] for a in self.invo.st.followed)
-        params = arena.Params.of(self.cfg, self.scorer.params.cost_bps)
+        c = self.cfg.invo
+        delay = arena.delay_cost(self.invo_gaps(), c.arena_delay_bps, c.arena_delay_margin_bps)
+        params = arena.Params.of(self.cfg, self.scorer.params.cost_bps, delay)
+        live = self.arena_live
 
         def work() -> None:
             res = None
             try:
                 res = arena.run(self.data / "cache", self.data / "arena", self.invo_trade_coin, self.scorer.candles,
-                                params, now_ms(), follows, funding_of=self.scorer.funding)
+                                params, now_ms(), follows, funding_of=self.scorer.funding, live=live, delay=delay,
+                                groups=c.arena_groups)
             except Exception:
                 log.exception("arena_failed")
             self.q.put(("arena_done", res))
         threading.Thread(target=work, name="arena", daemon=True).start()
 
-    def arena_report(self) -> str:
-        return str(self.data / "arena" / "index.html")
-
     def on_arena(self, res: dict | None) -> None:
-        """An arena run ended: a finished season gets its final card, a new one its start card."""
+        """An arena run ended. No live groups yet: the best ones start copying now (owner request 2026-10-20: "get
+        the best ones from the backtest and we use them for live"); later ones only change on the owner's click."""
         self.arena_busy = False
         if res is None:
             return
         self.arena_res = res
         bt = res.get("backtest") or {}
+        d = res.get("delay") or {}
         log.info("arena_done", traders=bt.get("traders", 0), windows=len(bt.get("starts") or []),
-                 ended=bool(res.get("ended")), started=bool(res.get("started")))
-        off = self.cfg.discord.utc_offset_hours
-        if res.get("ended"):
-            self.ui.send(arena.ended_card(res["ended"], off))
-        if res.get("started"):
-            self.ui.send("🏁 <b>New arena season</b>\n" + arena.card(res, now_ms(), off, self.arena_report()))
+                 groups=len(res.get("next") or []), delay_bps=d.get("bps"), delay_measured=d.get("measured"))
+        nxt = (res.get("next") or [])[:self.cfg.invo.arena_groups]
+        if self.arena_live is None and nxt and self.cfg.invo.arena_groups > 0:
+            self.arena_live = arena.new_live(nxt, now_ms())
+            arena.save_live(self.data / "arena", self.arena_live)
+            self.arena_build(self.arena_live)
+            self.invo_refresh_watched()
+            self.ui.send(f"🏁 <b>Arena live</b>: the backtest's {len(nxt)} best groups now copy their traders' new "
+                         f"calls, each in {len(self.arena_groups[0]['wallets'])} wallets (every size × stop, "
+                         f"{cardfmt.fusd(self.cfg.risk.start_equity, sign=False)} each, paper). They stay until you "
+                         "switch them (/arena).\n"
+                         + arena.card(res, self.arena_view(), now_ms(), self.cfg.discord.utc_offset_hours))
 
     def on_invo_added(self, name: str, s: dict | None, quiet: bool = False) -> None:
         """/invoadd result: follow at once if it passes every rule and a slot is free, else say why not. `quiet`
@@ -1430,6 +1601,13 @@ class Bot:
             w.rec({"ev": "pick", "leader": leader})
             return self.ui.final_card(key, a["text"] + f"\n✅ <b>Kept</b> @{cardfmt.esc(name)} as your pick: the search "
                                       "will not ask about it again (/invounfollow drops it).")
+        if a["kind"] == "arena_switch":
+            if ans != "yes" or self.invo is None:
+                return self.ui.final_card(key, a["text"] + "\n✋ Kept the live groups.")
+            done = self.arena_switch(a["groups"])
+            return self.ui.final_card(key, a["text"] + "\n🔄 <b>Switched</b>: "
+                                      + ", ".join(f"G{g['slot']}" for g in self.arena_live["groups"])
+                                      + " copy from now on" + (f" · {done}" if done else ""))
         if a["kind"] == "repick":
             if ans != "yes":
                 return self.ui.final_card(key, a["text"] + "\n❌ Kept your Invo traders as they are.")

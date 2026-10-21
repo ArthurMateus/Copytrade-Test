@@ -1,25 +1,39 @@
-"""Invo arena (owner request 2026-10-19): which set of at most 10 Invo traders would have made a 300$ wallet the most
-money in 2 weeks, instead of the owner picking traders by hand.
+"""Invo arena (owner request 2026-10-19, extended 2026-10-20): which groups of at most 10 Invo traders would have made a
+300$ wallet the most money in 2 weeks, in every size x stop the Invo book runs, instead of the owner picking traders by
+hand; the best groups are then copied live in their own paper wallets.
 
 Recipes pick the traders (top return, profit factor, win rate, hot hand, steady, the bot's own floors, most active),
-each with 3, 5 or 10 traders and a 14, 30 or 60 day look-back. Baselines next to them: random wallets (luck), the
-traders the bot follows now, and the best 10 in hindsight (a ceiling nobody can pick in advance).
+each with 3, 5, 7 or 10 traders and a 14, 30 or 60 day look-back. Baselines next to them: random wallets (luck), the
+traders the bot follows now, the best 10 in hindsight (a ceiling nobody can pick in advance) and "the arena's own
+choice": at each window the 3 recipes with the best backtest SO FAR (only windows that had ended), measured on the
+window they had not seen. That last one is the honest number for "use the backtest's best groups live".
 
 Backtest = walk-forward: for every 2-week window (one starting every 7 days) a recipe picks using ONLY the calls before
-the window starts (a call still open then counts at that moment's price), then the wallet copies its traders' calls
-opened inside the window. Live = a season: the best recipes' picks are frozen for 2 weeks and scored on the calls that
-come after, the same way (the honest check of the backtest).
+the window starts (a call still open then counts at that moment's price), then its group's calls opened inside the
+window are copied in EVERY wallet variant of the Invo book (owner request 2026-10-20: "different wallets for each
+trader combination, for different risks and stops"): trader size and each invo.risk_wallets_pct level, at each of
+invo.stops_pct (0 = the trader's exit). Groups are ranked on the wallet the bot really runs (trader size at
+invo.main_stop_pct); the card shows the 3 best and 3 worst combinations (group x size x stop) and the average per stop.
 
-Copies are replayed like the main Invo wallet (`invo_calls`, the trader's exit): notional = the call's committed share
-x leverage x invo.size_mult of the wallet's equity at the open (live portfolios x invo.live_size_mult), capped at
-invo.max_risk_pct of equity at risk.stop_pct, at least the minimum notional; closed at the trader's exit price, or at
-the liquidation guard (`guard_pct`, = runner.invo_emergency_stop of the call's leverage, at most 10x) if a 1h candle
-reached it first; minus our round-trip cost and the funding paid. A copy still open at the window's end counts at that
-hour's close. Not modelled: our copy delay (Invo calls are seen seconds after they are posted), the wallet's risk
-limits, a second trader boosting a held coin.
+Copies are replayed like the live Invo wallets:
+- trader size: notional = the call's committed share x leverage x invo.size_mult of the wallet's equity at the open
+  (live portfolios x invo.live_size_mult), capped at invo.max_risk_pct of equity at risk.stop_pct, at least the minimum
+  notional; an r% risk wallet: r% of equity at its own stop (the trader's exit: at the 30% guard), at least the minimum;
+- our ~5 s delay (owner request 2026-10-20): every entry, and every exit that follows the trader, is that much worse
+  than the trader's price: the entry gap the bot MEASURED on its real copies (`delay_cost`: per coin with enough
+  copies, else all of them; a configured default before there are enough) plus a margin;
+- exit at the trader's close, at our stop (3%, 8%) or at the liquidation guard (`guard_pct`, the trader's exit) if a 1h
+  candle reached it first; a copy still open at the window's end counts at that hour's close; nothing reads a price
+  after the window;
+- costs kept apart (owner request 2026-10-20): taker fees, the rest of our round-trip cost (slippage), funding, delay.
+Not modelled: the wallets' risk limits and a second trader boosting a held coin (the live wallets have both).
 
-Known bias (shown in the report): the traders come from today's Invo rankings and their portfolios as they are now
-(deleted portfolios and calls are gone), so the past looks better than it was. The live season has neither bias.
+Known bias (shown on the card): the traders come from today's Invo rankings and their portfolios as they are now
+(deleted portfolios and calls are gone), so the past looks better than it was. The live wallets have neither bias.
+
+Live (owner choice 2026-10-20): the 3 best groups are frozen (traders AND the portfolios their look-back kept) and copied
+by the bot in 18 paper wallets each (runner `arena_build`, data/arena/wallets/), until the owner switches them to the
+newest best groups (/arena -> button). State: data/arena/live.json; last result: data/arena/arena.json.
 
 The calls come from the daily Invo search, which already reads every candidate's portfolios (`save_calls`, no extra
 requests to Invo): data/cache/invo/calls/<user>.json, merged run after run so the history grows.
@@ -35,27 +49,29 @@ import math
 import random
 import statistics
 import time
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from copybot.invo import Call, Portfolio
 
 DAY = 86_400_000
 HOUR = 3_600_000
-WINDOW_DAYS = 14          # one season / backtest window
+WINDOW_DAYS = 14          # one backtest window
 STEP_DAYS = 7             # a backtest window starts every this many days
 LOOKBACKS = (14, 30, 60)  # days a recipe looks back
-SIZES = (3, 5, 10)        # traders per wallet (owner: at most 10)
+SIZES = (3, 5, 7, 10)     # traders per group (owner: at most 10)
 MAX_TRADERS = 10
 MIN_TRADES = 5            # copies in the look-back to be picked at all
 MIN_TRADES_RATIO = 10     # ... for the profit-factor and win-rate recipes
 ACTIVE_DAYS = 14          # a pick must have opened a call this recently
 HOT_DAYS = 7              # the hot-hand recipe ranks on this many last days
 RANDOM_DRAWS = 20         # random wallets per window (the luck baseline)
-SEASON_WALLETS = 6        # best backtest recipes that play a live season (+ random and your follows)
+LIVE_GROUPS = 3           # best groups copied live (owner choice 2026-10-20: 3 x 18 wallets)
+CHOOSER_MIN = 2           # ended windows the arena's own choice needs before it chooses
+MIN_GAPS = 20             # measured entry gaps needed to replace the configured delay cost (per coin likewise)
 MAX_LEVERAGE = 10.0       # a copy takes the trader's leverage, at most this (owner request 2026-10-14)
 GUARD_MAX_PCT = 30.0      # runner.EMERGENCY_STOP_PCT
-VERSION = 1
+VERSION = 2
 
 RECIPES = {
     "top_return": "most money made",
@@ -67,6 +83,7 @@ RECIPES = {
     "active": "most copies among profitable traders",
 }
 BASELINES = {
+    "chooser": f"the arena's own choice (its best {LIVE_GROUPS} so far, on weeks it had not seen)",
     "random": "random traders (luck)",
     "follows": "the traders the bot follows now",
     "hindsight": "best traders in hindsight (a ceiling, not a strategy)",
@@ -119,6 +136,42 @@ def load_calls(cache_dir) -> dict[str, tuple[dict[str, Portfolio], list[Call]]]:
     return out
 
 
+# ---- wallet variants and the delay ----------------------------------------------------------------------------------
+@dataclass(frozen=True)
+class Variant:
+    """One wallet of a group: its size (None = the trader's size, else r% risk) and its stop (0 = the trader's exit)."""
+    risk: float | None = None
+    stop: float = 0.0
+
+    @property
+    def key(self) -> str:
+        return f"{'trader' if self.risk is None else f'r{self.risk:g}'}·{'exit' if self.stop <= 0 else f's{self.stop:g}'}"
+
+    @property
+    def size_label(self) -> str:
+        return "trader size" if self.risk is None else f"{self.risk:g}% risk"
+
+    @property
+    def stop_label(self) -> str:
+        return f"{self.stop:g}% stop" if self.stop > 0 else "trader's exit"
+
+
+def delay_cost(gaps: list[tuple[str, float]], default_bps: float, margin_bps: float) -> dict:
+    """What our late entry costs, per side, from the bot's real copies: `gaps` = (coin, % we got in worse than the
+    trader; + = worse). The mean of all of them (or the configured default before MIN_GAPS copies) plus the margin,
+    and per coin where that coin has MIN_GAPS copies. Never below the margin (a lucky streak is not an edge)."""
+    vals = [g * 100 for _, g in gaps]
+    measured = len(vals) >= MIN_GAPS
+    base = max(0.0, statistics.fmean(vals)) if measured else default_bps
+    by: dict[str, list[float]] = {}
+    for coin, g in gaps:
+        by.setdefault(coin, []).append(g * 100)
+    return {"bps": round(base + margin_bps, 2), "measured": len(vals), "default": not measured,
+            "margin_bps": margin_bps,
+            "by_coin": {c: round(max(0.0, statistics.fmean(v)) + margin_bps, 2)
+                        for c, v in sorted(by.items()) if len(v) >= MIN_GAPS}}
+
+
 # ---- replay ---------------------------------------------------------------------------------------------------------
 @dataclass(frozen=True)
 class Params:
@@ -127,12 +180,32 @@ class Params:
     live_size_mult: float = 10.0
     cap_frac: float = 1.0 / 3.0       # invo.max_risk_pct / risk.stop_pct: the biggest copy as a share of equity
     min_notional: float = 10.0
-    cost_bps: float = 13.0
+    cost_bps: float = 13.0            # our whole round trip (fees + slippage)
+    fee_bps: float = 4.5              # ... of which the taker fee, per side
+    delay_bps: float = 0.0            # our late entry and late trader-driven exit, per side (delay_cost)
+    delay_by_coin: tuple = ()         # ((coin, bps), ...) where measured
+    risks: tuple = (1.0, 2.0, 5.0, 10.0, 20.0)   # invo.risk_wallets_pct
+    stops: tuple = (3.0, 8.0, 0.0)    # invo.stops_pct
+    main_stop: float = 0.0            # invo.main_stop_pct
 
     @classmethod
-    def of(cls, cfg, cost_bps: float = 13.0) -> "Params":
+    def of(cls, cfg, cost_bps: float = 13.0, delay: dict | None = None) -> "Params":
+        d = delay or {"bps": cfg.invo.arena_delay_bps + cfg.invo.arena_delay_margin_bps, "by_coin": {}}
         return cls(cfg.risk.start_equity, cfg.invo.size_mult, cfg.invo.live_size_mult,
-                   cfg.invo.max_risk_pct / cfg.risk.stop_pct, cfg.risk.min_notional_usd, cost_bps)
+                   cfg.invo.max_risk_pct / cfg.risk.stop_pct, cfg.risk.min_notional_usd, cost_bps,
+                   cfg.broker.taker_fee_pct * 100, d["bps"], tuple(sorted((d.get("by_coin") or {}).items())),
+                   tuple(cfg.invo.risk_wallets_pct), tuple(cfg.invo.stops_pct), cfg.invo.main_stop_pct)
+
+    @property
+    def main(self) -> Variant:
+        return Variant(None, self.main_stop)
+
+    def variants(self) -> list[Variant]:
+        stops = [self.main_stop, *[s for s in self.stops if s != self.main_stop]]
+        return [Variant(r, s) for s in stops for r in (None, *self.risks)]
+
+    def delay(self, coin: str) -> float:
+        return dict(self.delay_by_coin).get(coin, self.delay_bps)
 
 
 @dataclass(frozen=True)
@@ -181,13 +254,15 @@ def prepare(traders: dict[str, tuple[dict, list[Call]]], coin_of) -> dict[str, l
 
 
 class Prices:
-    """1h candles per coin, read once per coin for the whole span."""
+    """1h candles per coin, read once per coin for the whole span; stop hits cached (every variant and window
+    re-asks the same ones)."""
 
     def __init__(self, candles_of, funding_of=None, start_ms: int = 0, end_ms: int = 0):
         self.candles_of, self.funding_of = candles_of, funding_of
         self.start, self.end = start_ms, end_ms
         self._c: dict[str, tuple[list[int], list]] = {}
         self._f: dict[str, tuple[list[int], list[float]]] = {}
+        self._h: dict[tuple, tuple[int, float] | None] = {}
 
     def candles(self, coin: str):
         if coin not in self._c:
@@ -204,16 +279,24 @@ class Prices:
         i = bisect.bisect_left(ts, t) - 1
         return cs[i].c if i >= 0 else None
 
-    def guard_hit(self, coin: str, long: bool, entry: float, pct: float, start: int, end: int) -> tuple[int, float] | None:
+    def hit(self, coin: str, long: bool, entry: float, pct: float, start: int, end: int,
+            horizon: int | None = None) -> tuple[int, float] | None:
         """(time, price) where a copy opened at `start` first moved `pct`% against us before `end`, else None.
-        The hour the copy opened in counts only from its entry (its earlier range is not ours): skipped."""
-        ts, cs = self.candles(coin)
-        lvl = entry * (1 - pct / 100) if long else entry * (1 + pct / 100)
-        for i in range(bisect.bisect_right(ts, start), bisect.bisect_left(ts, end)):
-            c = cs[i]
-            if (c.l <= lvl) if long else (c.h >= lvl):
-                return c.t, lvl
-        return None
+        The hour the copy opened in counts only from its entry (its earlier range is not ours): skipped. The first
+        hit up to `horizon` (the copy's own close) is cached, so other windows and variants only compare times."""
+        key = (coin, long, entry, pct, start, horizon)
+        if key not in self._h:
+            ts, cs = self.candles(coin)
+            lvl = entry * (1 - pct / 100) if long else entry * (1 + pct / 100)
+            got = None
+            for i in range(bisect.bisect_right(ts, start), bisect.bisect_left(ts, horizon or self.end)):
+                c = cs[i]
+                if (c.l <= lvl) if long else (c.h >= lvl):
+                    got = (c.t, lvl)
+                    break
+            self._h[key] = got
+        got = self._h[key]
+        return got if got is not None and got[0] < end else None
 
     def funding(self, coin: str, side: int, start: int, end: int) -> float:
         """Funding a notional of 1 paid (+) while held."""
@@ -243,6 +326,10 @@ class Result:
     open_left: int = 0                # copies still open at the end (counted at that price)
     recent: float = 0.0               # $ made by copies closed in the last HOT_DAYS
     last_open_ms: int = 0
+    fees: float = 0.0                 # $ paid: taker fees
+    slippage: float = 0.0             # ... the rest of our round-trip cost
+    funding: float = 0.0              # ... funding (negative = received)
+    delay: float = 0.0                # ... getting in (and out after the trader) later than the trader
     by_trader: dict = field(default_factory=dict)   # trader -> $ made
     curve: list = field(default_factory=list)       # [(ms, equity)] at every exit
 
@@ -263,16 +350,29 @@ class Result:
         return self.gross_win / self.gross_loss if self.gross_loss > 0 else (99.0 if self.gross_win > 0 else 0.0)
 
 
-def simulate(copies: list[Copy], start: int, end: int, p: Params, prices: Prices,
+def notional_of(c: Copy, v: Variant, equity: float, p: Params) -> float:
+    """The copy's size in wallet variant v, as the live wallets size it (runner: invo_size / the risk sizers)."""
+    if v.risk is None:
+        mult = p.live_size_mult if c.live else p.size_mult
+        return max(min(c.exposure * mult * equity, p.cap_frac * equity), p.min_notional * 1.05)
+    at = v.stop if v.stop > 0 else guard_pct(v.risk / GUARD_MAX_PCT)
+    return max(equity * v.risk / at, p.min_notional * 1.05)
+
+
+def simulate(copies: list[Copy], start: int, end: int, p: Params, prices: Prices, v: Variant | None = None,
              start_equity: float | None = None) -> Result:
-    """A wallet copying `copies` opened in [start, end): sized on its equity at each open, closed at the trader's exit
-    (or the guard), copies still open at `end` counted at that hour's price. Never reads a price after `end`."""
+    """A wallet (variant v, default the main one) copying `copies` opened in [start, end): sized on its equity at each
+    open, in after the trader by the delay cost, closed at the trader's exit (late by the delay too), its stop or the
+    guard; copies still open at `end` counted at that hour's price. Never reads a price after `end`."""
+    v = v or p.main
     eq0 = p.start_equity if start_equity is None else start_equity
     r = Result(start, end, eq0, eq0, curve=[(start, eq0)])
     todo = [c for c in copies if start <= c.open_ms < end]
     pending: list[tuple[int, int, float]] = []     # (exit ms, order, pnl)
     peak = eq0
     order = 0
+    fee_bps = min(2 * p.fee_bps, p.cost_bps)          # cost_bps is the whole round trip: fees, then slippage
+    slip_bps = p.cost_bps - fee_bps
 
     def settle(until: int) -> None:
         nonlocal peak
@@ -289,21 +389,34 @@ def simulate(copies: list[Copy], start: int, end: int, p: Params, prices: Prices
         settle(c.open_ms)
         if r.equity <= 0:
             break
-        mult = p.live_size_mult if c.live else p.size_mult
-        notional = max(min(c.exposure * mult * r.equity, p.cap_frac * r.equity), p.min_notional * 1.05)
+        notional = notional_of(c, v, r.equity, p)
         side = 1 if c.long else -1
+        d = p.delay(c.coin) / 1e4
+        ours = c.entry * (1 + side * d)               # we get in after them: a worse price
         if c.close_ms is not None and c.close_ms < end:
-            t_out, px = max(c.close_ms, c.open_ms + 1), c.close_px
+            t_out, theirs = max(c.close_ms, c.open_ms + 1), c.close_px
+            px = theirs * (1 - side * d)              # ... and out after them
         else:
-            t_out, px = end, prices.mark(c.coin, end)
+            t_out, theirs = end, prices.mark(c.coin, end)
             r.open_left += 1
-            if px is None:                          # no price: the copy counts flat
-                px = c.entry
-        hit = prices.guard_hit(c.coin, c.long, c.entry, guard_pct(c.lev), c.open_ms, t_out)
-        if hit is not None:
+            if theirs is None:                         # no price: the copy counts flat
+                theirs = c.entry
+            px = theirs
+        hit = prices.hit(c.coin, c.long, ours, v.stop if v.stop > 0 else guard_pct(c.lev), c.open_ms, t_out,
+                         c.close_ms)
+        if hit is not None:                            # our own stop: no delay on the exit
             t_out, px = hit
-        pnl = side * notional * (px / c.entry - 1) - notional * p.cost_bps / 1e4
-        pnl -= notional * prices.funding(c.coin, side, c.open_ms, t_out)
+            theirs = px
+        gross = side * notional * (px / ours - 1)
+        delay = side * notional * (theirs / c.entry - 1) - gross
+        fees = notional * fee_bps / 1e4
+        slip = notional * slip_bps / 1e4
+        fund = notional * prices.funding(c.coin, side, c.open_ms, t_out)
+        pnl = gross - fees - slip - fund
+        r.fees += fees
+        r.slippage += slip
+        r.funding += fund
+        r.delay += delay
         pending.append((t_out, order, pnl))
         order += 1
         r.trades += 1
@@ -422,10 +535,11 @@ class Picker:
     def picks(self, s: Strategy, end: int) -> list[str]:
         return pick(s.recipe, self.stats(end, s.lookback), s.k, end)
 
-    def run(self, names: list[str], start: int, end: int, lookback: int = 30, keep: bool = True) -> Result:
+    def run(self, names: list[str], start: int, end: int, lookback: int = 30, keep: bool = True,
+            v: Variant | None = None) -> Result:
         """A wallet following `names` from `start` (portfolios chosen on the `lookback` days before it) to `end`."""
         kp = self.keep(start, lookback) if keep else None
-        return simulate(wallet_copies(self.copies, names, kp), start, end, self.p, self.prices)
+        return simulate(wallet_copies(self.copies, names, kp), start, end, self.p, self.prices, v)
 
 
 def eligible(picker: Picker, end: int, lookback: int = 30) -> list[str]:
@@ -463,20 +577,33 @@ def summarize(rets: list[float]) -> dict:
             "chained": chained}
 
 
+def _costs(rs: list[Result]) -> dict:
+    """Average $ per 2-week window: fees, slippage, funding, delay; trades per window."""
+    n = max(1, len(rs))
+    return {k: round(sum(getattr(r, k) for r in rs) / n, 3) for k in ("fees", "slippage", "funding", "delay")} | \
+        {"trades": round(sum(r.trades for r in rs) / n, 1)}
+
+
 def backtest(copies: dict[str, list[Copy]], p: Params, prices: Prices, now_ms: int, follows: list[str] = (),
-             seed: int = 7) -> dict:
-    """Every strategy over every window. Returns the ranking (best mean 2-week return first) and the per-window
-    results, plus each strategy's picks for a season starting now."""
-    picker = Picker(copies, p, prices)
+             seed: int = 7, picker: Picker | None = None) -> dict:
+    """Every strategy in every wallet variant over every window. Returns the strategies ranked on the main wallet
+    (best mean 2-week return first) with their windows, the best and worst combinations (strategy x variant), the
+    average per stop and per size, and the baselines (the arena's own choice, random, follows, hindsight)."""
+    picker = picker or Picker(copies, p, prices)
     starts = windows(copies, now_ms)
+    vs = p.variants()
+    main = p.main
     rows: dict[str, dict] = {}
+    per_v: dict[tuple[str, str], list[Result]] = {}
 
     def add(s: Strategy, t0: int, names: list[str], res: Result) -> None:
         row = rows.setdefault(s.key, {"key": s.key, "recipe": s.recipe, "k": s.k, "lookback": s.lookback,
                                       "label": s.label, "windows": []})
         row["windows"].append({"start": t0, "ret": res.ret, "pnl": res.pnl, "trades": res.trades,
                                "win_rate": res.win_rate, "max_dd": res.max_dd, "picks": names,
-                               "by_trader": {n: round(v, 2) for n, v in sorted(res.by_trader.items(),
+                               "fees": round(res.fees, 3), "funding": round(res.funding, 3),
+                               "delay": round(res.delay, 3),
+                               "by_trader": {n: round(x, 2) for n, x in sorted(res.by_trader.items(),
                                                                                key=lambda x: -x[1])}})
 
     rng = random.Random(seed)
@@ -484,7 +611,11 @@ def backtest(copies: dict[str, list[Copy]], p: Params, prices: Prices, now_ms: i
         t1 = t0 + WINDOW_DAYS * DAY
         for s in strategies():
             names = picker.picks(s, t0)
-            add(s, t0, names, picker.run(names, t0, t1, s.lookback))
+            for v in vs:
+                res = picker.run(names, t0, t1, s.lookback, v=v)
+                per_v.setdefault((s.key, v.key), []).append(res)
+                if v == main:
+                    add(s, t0, names, res)
         pool = eligible(picker, t0)
         # luck: random traders, every portfolio copied (no filter on how they did)
         draws = [picker.run(rng.sample(pool, min(MAX_TRADERS, len(pool))), t0, t1, keep=False)
@@ -497,119 +628,128 @@ def backtest(copies: dict[str, list[Copy]], p: Params, prices: Prices, now_ms: i
         solo = trader_stats(copies, t0, t1, p, prices)
         best = [n for n, _ in sorted(solo.items(), key=lambda x: -x[1].pnl)[:MAX_TRADERS]]
         add(Strategy("hindsight"), t0, best, picker.run(best, t0, t1, keep=False))
+    # the arena's own choice: at each window, its LIVE_GROUPS best strategies on the windows that had ENDED by then
+    keys = [s.key for s in strategies()]
+    for i, t0 in enumerate(starts):
+        seen = [j for j, tj in enumerate(starts) if tj + WINDOW_DAYS * DAY <= t0]
+        if len(seen) < CHOOSER_MIN:
+            continue
+        chosen = sorted(keys, key=lambda k: (-statistics.fmean(rows[k]["windows"][j]["ret"] for j in seen), k))
+        chosen = chosen[:LIVE_GROUPS]
+        ws = [rows[k]["windows"][i] for k in chosen]
+        row = rows.setdefault("chooser", {"key": "chooser", "recipe": "chooser", "k": MAX_TRADERS, "lookback": 0,
+                                          "label": BASELINES["chooser"], "windows": []})
+        row["windows"].append({"start": t0, "ret": statistics.fmean(w["ret"] for w in ws),
+                               "pnl": statistics.fmean(w["pnl"] for w in ws), "trades": sum(w["trades"] for w in ws),
+                               "win_rate": statistics.fmean(w["win_rate"] for w in ws),
+                               "max_dd": max(w["max_dd"] for w in ws), "picks": chosen, "by_trader": {}})
     for row in rows.values():
         row.update(summarize([w["ret"] for w in row["windows"]]))
     ranked = sorted(rows.values(), key=lambda r: (r["recipe"] not in BASELINES, r["mean"], r["median"]), reverse=True)
+    combos = []
+    for s in strategies():
+        for v in vs:
+            rs = per_v.get((s.key, v.key)) or []
+            if rs:
+                combos.append({"key": s.key, "label": s.label, "variant": v.key, "size": v.size_label,
+                               "stop": v.stop_label, **summarize([r.ret for r in rs]), **_costs(rs)})
+    combos.sort(key=lambda c: (-c["mean"], -c["median"], c["key"], c["variant"]))
+
+    def avg_by(field_: str) -> dict:
+        by: dict[str, list[float]] = {}
+        for c in combos:
+            by.setdefault(c[field_], []).append(c["mean"])
+        return {k: statistics.fmean(x) for k, x in by.items()}
     return {"v": VERSION, "ts": now_ms, "window_days": WINDOW_DAYS, "step_days": STEP_DAYS, "starts": starts,
-            "traders": len(copies), "calls": sum(len(cs) for cs in copies.values()), "ranking": ranked}
+            "traders": len(copies), "calls": sum(len(cs) for cs in copies.values()), "ranking": ranked,
+            "main": main.key, "variants": len(vs), "strategies": len(keys), "best": combos[:3],
+            "worst": combos[-3:][::-1] if len(combos) > 3 else [], "by_stop": avg_by("stop"), "by_size": avg_by("size"),
+            "delay_bps": p.delay_bps, "delay_by_coin": dict(p.delay_by_coin)}
 
 
-def best_strategies(bt: dict, n: int = SEASON_WALLETS) -> list[Strategy]:
-    """The `n` best recipes of a backtest (baselines excluded), at most two per recipe so a season compares ideas."""
-    out, per = [], {}
+def best_groups(bt: dict, picker: Picker, now_ms: int, n: int = LIVE_GROUPS) -> list[dict]:
+    """The groups to copy live: the `n` best strategies of the backtest (on the main wallet), each picking NOW with its
+    look-back; a group with nobody, or with the same traders as a better one, is skipped."""
+    out, seen = [], set()
     for r in bt.get("ranking", []):
-        if r["recipe"] in BASELINES or per.get(r["recipe"], 0) >= 2 or not r["windows"]:
+        if r["recipe"] in BASELINES or not r["windows"]:
             continue
-        per[r["recipe"]] = per.get(r["recipe"], 0) + 1
-        out.append(Strategy(r["recipe"], r["k"], r["lookback"]))
+        s = Strategy(r["recipe"], r["k"], r["lookback"])
+        names = picker.picks(s, now_ms)
+        if not names or tuple(sorted(names)) in seen:
+            continue
+        seen.add(tuple(sorted(names)))
+        keep = picker.keep(now_ms, s.lookback)
+        out.append({"key": s.key, "label": s.label, "picks": names, "lookback": s.lookback,
+                    "portfolios": {x: sorted(keep.get(x, ())) for x in names},
+                    "backtest_mean": r["mean"], "chained": r["chained"], "positive": r["positive"]})
         if len(out) >= n:
             break
     return out
 
 
-# ---- live seasons ---------------------------------------------------------------------------------------------------
-def new_season(copies: dict[str, list[Copy]], p: Params, prices: Prices, bt: dict, now_ms: int,
-               follows: list[str] = (), seed: int | None = None) -> dict:
-    """A season starting now: the best backtest recipes' picks (look-back ending now), frozen for WINDOW_DAYS, next
-    to one random wallet and the bot's follows."""
-    picker = Picker(copies, p, prices)
-    wallets = []
-    by_key = {r["key"]: r for r in bt.get("ranking", [])}
-    for s in best_strategies(bt):
-        names = picker.picks(s, now_ms)
-        if names:
-            keep = picker.keep(now_ms, s.lookback)
-            wallets.append({"key": s.key, "label": s.label, "picks": names, "lookback": s.lookback,
-                            "portfolios": {n: sorted(keep.get(n, ())) for n in names},
-                            "backtest_mean": by_key.get(s.key, {}).get("mean")})
-    pool = eligible(picker, now_ms)
-    if pool:
-        rng = random.Random(now_ms if seed is None else seed)
-        names = rng.sample(pool, min(MAX_TRADERS, len(pool)))
-        wallets.append({"key": "random", "label": BASELINES["random"], "picks": names, "lookback": 30,
-                        "portfolios": None, "backtest_mean": None})
-    if follows:
-        wallets.append({"key": "follows", "label": BASELINES["follows"], "picks": list(follows)[:MAX_TRADERS],
-                        "lookback": 0, "portfolios": None, "backtest_mean": None})
-    return {"v": VERSION, "start": now_ms, "end": now_ms + WINDOW_DAYS * DAY, "wallets": wallets, "standings": [],
-            "done": False}
-
-
-def score_season(season: dict, copies: dict[str, list[Copy]], p: Params, prices: Prices, now_ms: int) -> dict:
-    """The season's standings at `now_ms` (or its end): each wallet replayed on the calls opened since it started."""
-    end = min(now_ms, season["end"])
-    rows = []
-    for w in season["wallets"]:
-        keep = None if w.get("portfolios") is None else {n: set(v) for n, v in w["portfolios"].items()}
-        res = simulate(wallet_copies(copies, w["picks"], keep), season["start"], end, p, prices)
-        rows.append({"key": w["key"], "label": w["label"], "picks": w["picks"], "equity": res.equity, "ret": res.ret,
-                     "pnl": res.pnl, "trades": res.trades, "win_rate": res.win_rate, "max_dd": res.max_dd,
-                     "open": res.open_left, "backtest_mean": w.get("backtest_mean"),
-                     "by_trader": {n: round(v, 2) for n, v in sorted(res.by_trader.items(), key=lambda x: -x[1])},
-                     "curve": [(t, round(e, 2)) for t, e in res.curve]})
-    rows.sort(key=lambda r: -r["equity"])
-    return {**season, "standings": rows, "as_of": end, "done": now_ms >= season["end"]}
+def replay_live(live: dict, copies: dict[str, list[Copy]], p: Params, prices: Prices, now_ms: int) -> list[dict]:
+    """What the replay says the live groups made since they started (main wallet): next to the real wallets, it shows
+    how far the backtest's way of counting is from real fills."""
+    out = []
+    for g in live.get("groups") or []:
+        keep = {n: set(v) for n, v in (g.get("portfolios") or {}).items()}
+        res = simulate(wallet_copies(copies, g["picks"], keep), live["start"], now_ms, p, prices)
+        out.append({"slot": g["slot"], "ret": res.ret, "pnl": res.pnl, "trades": res.trades})
+    return out
 
 
 # ---- the run the bot does after each Invo search --------------------------------------------------------------------
 def run(cache_dir, out_dir, coin_of, candles_of, p: Params, now_ms: int, follows: list[str] = (),
-        funding_of=None) -> dict:
-    """Backtest, then the live season: scored, ended (kept in the history) and a new one started when due. Writes
-    out_dir/arena.json (and the report page) and returns {"backtest", "season", "ended", "started"}."""
+        funding_of=None, live: dict | None = None, delay: dict | None = None, groups: int = LIVE_GROUPS) -> dict:
+    """Backtest, the best groups now, and the replay of the live groups. Writes out_dir/arena.json and returns
+    {"backtest", "next", "live_replay", "delay"}."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     copies = prepare(load_calls(cache_dir), coin_of)
     first = min((c.open_ms for cs in copies.values() for c in cs), default=now_ms)
     prices = Prices(candles_of, funding_of, first - DAY, now_ms + HOUR)
-    bt = backtest(copies, p, prices, now_ms, follows)
-    state_p = out / "season.json"
-    try:
-        state = json.loads(state_p.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        state = {"current": None, "past": []}
-    ended = started = None
-    cur = state.get("current")
-    if cur is not None:
-        cur = score_season(cur, copies, p, prices, now_ms)
-        if cur["done"]:
-            ended = cur
-            state["past"] = ([season_summary(cur)] + list(state.get("past") or []))[:26]
-            cur = None
-    if cur is None and copies:
-        cur = score_season(new_season(copies, p, prices, bt, now_ms, follows), copies, p, prices, now_ms)
-        started = cur
-    state["current"] = cur
-    _write(state_p, state)
-    res = {"backtest": bt, "season": cur, "past": state.get("past") or [], "ended": ended, "started": started}
-    _write(out / "arena.json", {k: v for k, v in res.items() if k not in ("ended", "started")})
-    (out / "index.html").write_text(report_html(res, now_ms), encoding="utf-8")
+    picker = Picker(copies, p, prices)
+    bt = backtest(copies, p, prices, now_ms, follows, picker=picker)
+    res = {"v": VERSION, "ts": now_ms, "backtest": bt, "next": best_groups(bt, picker, now_ms, groups),
+           "live_replay": replay_live(live, copies, p, prices, now_ms) if live else [],
+           "delay": delay or {"bps": p.delay_bps, "by_coin": dict(p.delay_by_coin), "measured": 0, "default": True}}
+    _write(out / "arena.json", res)
     return res
 
 
 def load_result(out_dir) -> dict | None:
-    """The last run's result (arena.json), for /arena after a restart; None before the first run."""
+    """The last run's result (arena.json), for /arena after a restart; None before the first run (or an old one)."""
     try:
-        return json.loads((Path(out_dir) / "arena.json").read_text(encoding="utf-8"))
+        res = json.loads((Path(out_dir) / "arena.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    return res if res.get("v") == VERSION else None
 
 
-def season_summary(s: dict) -> dict:
-    """What a finished season keeps: who won, and whether the backtest's favourite did."""
-    st = s.get("standings") or []
-    return {"start": s["start"], "end": s["end"],
-            "standings": [{k: r[k] for k in ("key", "label", "picks", "ret", "pnl", "trades", "backtest_mean")}
-                          for r in st]}
+def load_live(out_dir) -> dict | None:
+    """The live groups (data/arena/live.json): {"start", "groups": [{"slot", "key", "label", "picks", "portfolios",
+    ...}]}; None before the first ones."""
+    try:
+        d = json.loads((Path(out_dir) / "live.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return d if d.get("groups") else None
+
+
+def save_live(out_dir, live: dict) -> None:
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    _write(Path(out_dir) / "live.json", live)
+
+
+def new_live(groups: list[dict], now_ms: int) -> dict:
+    return {"v": VERSION, "start": now_ms, "groups": [{**g, "slot": i} for i, g in enumerate(groups, 1)]}
+
+
+def same_groups(live: dict | None, groups: list[dict]) -> bool:
+    if not live:
+        return not groups
+    return sorted(tuple(sorted(g["picks"])) for g in live["groups"]) == sorted(tuple(sorted(g["picks"])) for g in groups)
 
 
 def _write(p: Path, obj) -> None:
@@ -627,65 +767,98 @@ def _day(ms: int, offset_h: float = 0.0) -> str:
     return time.strftime("%d/%m", time.gmtime(ms / 1000 + offset_h * 3600))
 
 
-def card(res: dict | None, now_ms: int, offset_h: float = 0.0, report: str = "") -> str:
-    """The /arena card: the live season's standings and the backtest's best recipes."""
+def _usd(x: float) -> str:
+    return ("+" if x >= 0 else "−") + f"{abs(x):.2f}$"
+
+
+def _medal(i: int) -> str:
+    return {0: "🥇", 1: "🥈", 2: "🥉"}.get(i, f"{i + 1}.")
+
+
+def card(res: dict | None, live: dict | None, now_ms: int, offset_h: float = 0.0) -> str:
+    """/arena: the live groups' wallets (3 best and 3 worst of group x size x stop, average per stop and per group,
+    fees and funding), then the backtest (3 best and 3 worst combinations, per stop, the honest check).
+    `live` = {"start", "groups", "wallets": [{"slot", "size", "stop", "equity0", "pnl", "trades", "wins", "open",
+    "fees", "funding"}]} built by the runner from the live wallets' ledgers."""
+    e = html.escape
+    lines = ["🏟️ <b>Invo arena</b> · the best groups of ≤10 Invo traders, each in every size × stop (300$ each, paper)"]
+    if live and live.get("groups"):
+        ws = sorted(live.get("wallets") or [], key=lambda w: (-w["pnl"], w["slot"], w["size"], w["stop"]))
+        days = max(1, math.ceil((now_ms - live["start"]) / DAY))
+        lines.append(f"\n<b>Live</b> since {_day(live['start'], offset_h)} (day {days}) · {len(live['groups'])} groups × "
+                     f"{len(ws) // max(1, len(live['groups']))} wallets")
+        for g in live["groups"]:
+            lines.append(f"<b>G{g['slot']}</b> {e(g['label'])}: {e(', '.join(g['picks']))}")
+
+        def line(i: int, w: dict) -> str:
+            won = f" · {w['wins'] / w['trades'] * 100:.0f}% won" if w["trades"] else ""
+            pct = w["pnl"] / w["equity0"] * 100 if w["equity0"] else 0.0
+            dot = "🟢" if w["pnl"] > 0.005 else ("🔴" if w["pnl"] < -0.005 else "⚪")
+            return (f"{_medal(i) if abs(w['pnl']) > 0.005 or i >= 3 else f'{i + 1}.'} <b>G{w['slot']} · "
+                    f"{e(w['size'])} · {e(w['stop'])}</b> {dot} {_usd(w['pnl'])} ({pct:+.1f}%) · {w['trades']} trades"
+                    f"{won} · {w['open']} open · fees {w['fees']:.2f}$ · funding {_usd(-w['funding'])}")
+        if len(ws) <= 6:
+            lines += [line(i, w) for i, w in enumerate(ws)]
+        elif ws:
+            lines += ["🏆 <b>Best</b>", *(line(i, w) for i, w in enumerate(ws[:3]))]
+            lines += ["🔻 <b>Worst</b>", *(line(len(ws) - 3 + i, w) for i, w in enumerate(ws[-3:]))]
+        if ws:
+            def avg(k: str) -> str:
+                by: dict = {}
+                for w in ws:
+                    by.setdefault(w[k], []).append(w["pnl"] / w["equity0"] * 100 if w["equity0"] else 0.0)
+                return " · ".join(f"{e(str(name))} {sum(v) / len(v):+.2f}%" for name, v in
+                                  sorted(by.items(), key=lambda x: -sum(x[1]) / len(x[1])))
+            lines.append(f"<b>By stop</b> (average): {avg('stop')}")
+            lines.append("<b>By group</b> (average): " + " · ".join(
+                f"G{s} {x:+.2f}%" for s, x in sorted(
+                    ((s, statistics.fmean(w['pnl'] / w['equity0'] * 100 for w in ws if w['slot'] == s))
+                     for s in {w['slot'] for w in ws}), key=lambda y: -y[1])))
+            lines.append(f"Costs so far, all {len(ws)} wallets: fees {sum(w['fees'] for w in ws):.2f}$ · funding "
+                         f"{_usd(-sum(w['funding'] for w in ws))}")
+        rep = (res or {}).get("live_replay") or []
+        if rep:
+            lines.append("Replay of the same calls (trader size · main stop): " + " · ".join(
+                f"G{x['slot']} {_pct(x['ret'])}" for x in rep) + " (real fills differ: delay, limits)")
+    elif res and res.get("backtest"):
+        lines.append("\nNo live groups yet: the best groups start after the next backtest that finds some.")
     if not res or not res.get("backtest"):
-        return ("🏟️ <b>Invo arena</b>: no run yet. It runs after each Invo search (daily); the first needs the "
-                "search to have read the traders once.")
-    e = html.escape
-    lines = ["🏟️ <b>Invo arena</b> · which ≤10 traders make a $300 wallet the most in 2 weeks"]
-    s = res.get("season")
-    if s:
-        day = min(WINDOW_DAYS, max(1, math.ceil((min(now_ms, s["end"]) - s["start"]) / DAY)))
-        lines.append(f"\n<b>Live season</b> {_day(s['start'], offset_h)} → {_day(s['end'], offset_h)} · day "
-                     f"{day}/{WINDOW_DAYS}")
-        for i, r in enumerate(s.get("standings") or [], 1):
-            medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"{i}.")
-            lines.append(f"{medal} ${r['equity']:.0f} ({_pct(r['ret'])}) · {r['trades']} copies · {e(r['label'])}")
-            lines.append(f"    {e(', '.join(r['picks'][:MAX_TRADERS]))}")
+        lines.append("\n<b>Backtest</b>: no run yet. It runs after each Invo search (daily); the first needs the search "
+                     "to have read the traders once.")
+        return "\n".join(lines)
     bt = res["backtest"]
-    top = [r for r in bt["ranking"] if r["recipe"] not in BASELINES][:5]
+    d = res.get("delay") or {}
+    how = ("configured, not measured yet" if d.get("default") else f"measured on {d.get('measured', 0)} real copies")
+    lines.append(f"\n<b>Backtest</b> · {bt['traders']} traders, {bt['calls']} calls, {len(bt['starts'])} two-week windows · "
+                 f"{bt.get('strategies', 0)} groups × {bt.get('variants', 0)} wallets · delay cost "
+                 f"{bt.get('delay_bps', 0) / 100:.2f}% per entry and exit ({how}, margin included)")
+
+    def combo(i: int, c: dict) -> str:
+        return (f"{_medal(i) if i < 3 else '•'} {_pct(c['mean'])} a fortnight · 300$ → {300 * c['chained']:.0f}$ · "
+                f"{c['positive'] * 100:.0f}% up · <b>{e(c['size'])} · {e(c['stop'])}</b> · {e(c['label'])}\n"
+                f"    per 2 weeks: {c['trades']:g} trades · fees {c['fees']:.2f}$ · funding {_usd(-c['funding'])} · "
+                f"delay {c['delay']:.2f}$")
+    if bt.get("best"):
+        lines += ["🏆 <b>Best combinations</b> (average 2-week return)", *(combo(i, c) for i, c in enumerate(bt["best"]))]
+    if bt.get("worst"):
+        lines += ["🔻 <b>Worst</b>", *(combo(3, c) for c in bt["worst"])]
+    if bt.get("by_stop"):
+        lines.append("<b>By stop</b> (average of every group and size): " + " · ".join(
+            f"{e(k)} {_pct(x)}" for k, x in sorted(bt["by_stop"].items(), key=lambda y: -y[1])))
     base = {r["recipe"]: r for r in bt["ranking"] if r["recipe"] in BASELINES}
-    lines.append(f"\n<b>Backtest</b> · {bt['traders']} traders, {len(bt['starts'])} two-week windows · average 2-week "
-                 "return (back-to-back $300 →):")
-    for r in top:
-        lines.append(f"• {_pct(r['mean'])} · ${300 * r['chained']:.0f} · {r['positive'] * 100:.0f}% of windows up · "
-                     f"{e(r['label'])}")
-    for k in ("random", "follows", "hindsight"):
+    top = next((r for r in bt["ranking"] if r["recipe"] not in BASELINES), None)
+    if top:
+        lines.append(f"Best group on the main wallet: {_pct(top['mean'])} · {e(top['label'])}")
+    for k in ("chooser", "random", "follows", "hindsight"):
         if k in base:
-            lines.append(f"  vs {_pct(base[k]['mean'])} · {e(BASELINES[k])}")
-    past = res.get("past") or []
-    if past:
-        p0 = past[0]
-        w = p0["standings"][0] if p0["standings"] else None
-        if w:
-            lines.append(f"\nLast season ({_day(p0['start'], offset_h)}): won by {e(w['label'])} {_pct(w['ret'])}")
-    if report:
-        lines.append(f"\n📄 Full report: <code>{e(report)}</code>")
-    lines.append("Paper only: nothing here trades. The backtest flatters (today's rankings, deleted calls are gone); "
-                 "the live season is the honest check.")
+            lines.append(f"  vs {_pct(base[k]['mean'])} · {e(BASELINES[k])}"
+                         + (f" ({base[k]['n_windows']} windows)" if k == "chooser" else ""))
+    if "chooser" not in base and bt["starts"]:
+        lines.append(f"  (the arena's own choice needs {CHOOSER_MIN + 2} windows of history: not enough yet)")
+    nxt = res.get("next") or []
+    if nxt and live and not same_groups(live, nxt):
+        lines.append("\n<b>Best groups now</b> (not live: /arena asks to switch):")
+        lines += [f"• {e(g['label'])}: {e(', '.join(g['picks']))}" for g in nxt]
+    lines.append("The backtest flatters (today's rankings, deleted calls are gone); the live wallets are the honest "
+                 "check.")
     return "\n".join(lines)
-
-
-def ended_card(s: dict, offset_h: float = 0.0) -> str:
-    """The final standings of a season that just ended, and whether the backtest's favourite won."""
-    e = html.escape
-    st = s.get("standings") or []
-    lines = [f"🏆 <b>Arena season over</b> · {_day(s['start'], offset_h)} → {_day(s['end'], offset_h)} · $300 each"]
-    for i, r in enumerate(st, 1):
-        medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"{i}.")
-        lines.append(f"{medal} ${r['equity']:.0f} ({_pct(r['ret'])}) · {r['trades']} copies · {e(r['label'])}")
-        if i <= 3:
-            lines.append(f"    {e(', '.join(r['picks'][:MAX_TRADERS]))}")
-    fav = max((r for r in st if r.get("backtest_mean") is not None), key=lambda r: r["backtest_mean"], default=None)
-    if fav and st:
-        rank = st.index(fav) + 1
-        lines.append(f"\nThe backtest's favourite ({e(fav['label'])}) finished #{rank} of {len(st)}"
-                     + (": the backtest called it." if rank == 1 else "."))
-    lines.append("A new season starts now with fresh picks.")
-    return "\n".join(lines)
-
-
-def report_html(res: dict, now_ms: int) -> str:
-    from copybot.arena_report import render
-    return render(res, now_ms)

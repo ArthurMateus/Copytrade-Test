@@ -338,7 +338,7 @@ class State:
         the same copy only change the fields they carry."""
         link = self.invo_links.setdefault(ev["pos_id"], {"info": ""})
         link["call"] = ev["call"]
-        link.update({k: ev[k] for k in ("info", "portfolio", "title", "live", "closed_by") if k in ev})
+        link.update({k: ev[k] for k in ("info", "portfolio", "title", "live", "closed_by", "coin", "gap") if k in ev})
 
     def _ev_invo_unblock(self, ev):
         self.blocked.get(ev["leader"], {}).pop(ev["portfolio"], None)

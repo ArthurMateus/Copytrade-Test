@@ -329,6 +329,7 @@ def test_only_a_loss_after_costs_bait_or_a_low_profit_factor_stops_a_portfolios_
     b = SimpleNamespace(cfg=cfg, invo=None, invo_scores={"t": {"by_portfolio": per, "reasons": ["loses_overall"]}})
     b.invo_portfolio_score = lambda n, pid: Bot.invo_portfolio_score(b, n, pid)
     b.invo_floors = lambda p: Bot.invo_floors(b, p)
+    b.invo_picked = lambda n: False                 # (an /invofollow pick is copied in every portfolio)
     port = lambda pid, kind="paper", win=90.0: SimpleNamespace(id=pid, kind=kind, closed=100, win_rate=win,
                                                                pnl_pct=300.0)
     assert Bot.invo_skip(b, "t", port("good")) is None
@@ -359,7 +360,8 @@ def test_failed_searches_count_once_a_day_and_reset_when_something_is_copied():
 
 def test_a_real_money_portfolio_is_found_on_invos_leaderboard_scored_and_copied_alone(search_env, monkeypatch):
     """End to end: Invo's score leaderboard brings a trader with a paper portfolio that fails our rules and a real-money
-    one that passes; /invofollow copies the real-money portfolio only."""
+    one that passes; following it from the search copies the real-money portfolio only (an /invofollow pick would
+    copy both: owner request 2026-10-14)."""
     hl, dc, data, cdir, f, tok = search_env
     paper = f.add_user("realguy")[0]
     live = f.add_live("realguy", accuracy=70.0, pnl=900.0, closed=400)
@@ -385,8 +387,11 @@ def test_a_real_money_portfolio_is_found_on_invos_leaderboard_scored_and_copied_
         assert s["by_portfolio"][live]["invo_score"] == 9.1 and s["by_portfolio"][live]["kind"] == "live"
         assert not s["by_portfolio"][paper]["copy"]
         assert wait_for(lambda: "real money, Invo 9.1/10" in text(), timeout=30)     # in the picks
-        dc.say("/invofollow realguy")
-        assert wait_for(lambda: "copying Live Portfolio" in text(), timeout=60)
+        dc.say("/invosearch")                                    # the search proposes it: a follow, not a pick
+        assert wait_for(lambda: dc.asked("Apply?"), timeout=90)
+        dc.click(dc.asked("Apply?"), "✅ Apply")
+        assert wait_for(lambda: "invo:realguy" in bot.invo.st.followed, timeout=30)
+        assert "invo:realguy" not in bot.invo.st.picked
         assert wait_for(lambda: bot.invo_watch.known.get("realguy") is not None, timeout=10)
         f.open_call(paper, "SOL", long=True, leverage=5, size=0.05, entry=150.0)   # fails our rules: not copied
         f.live_open(live, "ETH", True, 5, 10.0, 3000.0, 1.0)

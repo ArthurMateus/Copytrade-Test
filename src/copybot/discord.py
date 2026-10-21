@@ -46,7 +46,7 @@ VERB_TEXT = {
     "reset": "this book back to the start, no open trades, traders kept (needs the PIN)",
 }
 DESCRIPTIONS = {f"/{b}{v}": f"{n}: {t}" for b, n in BOOK_NAMES.items() for v, t in VERB_TEXT.items()}
-DESCRIPTIONS.update({"/invoarena": "Invo: the arena, which 10 traders make $300 the most in 2 weeks",
+DESCRIPTIONS.update({"/invoarena": "Invo: the arena, the best groups of 10 traders in every size x stop (live + backtest)",
                      "/invoblock": "Invo: stop copying one portfolio of a trader (user, then the portfolio name)",
                      "/invounblock": "Invo: copy a blocked portfolio again (user, then the portfolio name)",
                      "/help": "List the commands", "/restart": "Restart the bot",
