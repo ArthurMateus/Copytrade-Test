@@ -73,6 +73,25 @@ def test_min_notional_skip():
     assert not d.ok and d.reason.startswith("below_min_notional")
 
 
+def test_a_minimum_copy_floored_under_the_minimum_by_a_coarse_lot_takes_one_lot_more():
+    """Audit 2026-10-24: a 10.5$ minimum copy of SOL (lot 0.01 = 1.21$) was floored to 0.08 SOL = 9.66$ and refused;
+    it now takes one lot more (0.09 SOL = 10.87$), within the limits."""
+    sol = META["SOL"]
+    d = gate().check(open_order(px=sol.mark, size=10.5 / sol.mark, coin="SOL"), state(), healthy(), {}, sol)
+    assert d.ok and d.size == pytest.approx(0.09)
+    assert 10.0 <= d.size * sol.mark <= 1.5 * 10.5
+
+
+def test_an_entry_refused_only_for_margin_says_so():
+    """Audit 2026-10-24: the Invo routing needs to tell "no margin left" from every other refusal."""
+    g, st = gate(), state()
+    add_pos(st, coin="ETH", size=0.1, entry=3000.0, stop=2999.0, lev=1)       # 300$ of margin used, ~0 risk
+    d = g.check(open_order(size=0.0005), st, healthy(), {}, BTC)
+    assert not d.ok and d.reason == "margin_full"
+    st.positions.clear()
+    assert g.check(open_order(size=0.0005), st, healthy(), {}, BTC).ok
+
+
 @pytest.mark.parametrize("mutate,reason", [
     (lambda h, st: setattr(h, "mids_age_s", 30), "stale_prices"),
     (lambda h, st: setattr(h, "clock_ok", False), "clock_in_doubt"),

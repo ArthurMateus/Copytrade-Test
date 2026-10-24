@@ -47,6 +47,7 @@ class PositionManager:
         self.sizer = sizer   # (move, price, our equity) -> wanted size; None = fixed risk (the gate still clamps)
         self.cap = cap       # our equity -> the most notional one copy may hold (opens and adds); None = no cap
         self.handover = True  # the owner's exit hands the copy to a backer; False (Invo): it closes the copy
+        self.last_refusal: str | None = None   # why the last open() was refused (None = it was not)
 
     # ---- ledger helpers -----------------------------------------------------------------------
     def _rec(self, ev: dict) -> dict:
@@ -218,6 +219,7 @@ class PositionManager:
         want = self.sizer(m, px, eq) if self.sizer else self.gate.entry_size(eq, px)
         d = self.gate.check(Order("open", m.coin, side, want, px, leader=m.leader, fill_time_ms=m.time_ms),
                             self.st, h, self.mids, asset)
+        self.last_refusal = None if d else d.reason
         if not d:
             if not d.reason.startswith(("leader_", "not_main_coin", "below_min_notional")):
                 self._rec({"ev": "count", "name": "opens_refused"})   # a copy our limits did not allow

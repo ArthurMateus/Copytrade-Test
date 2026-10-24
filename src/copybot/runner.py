@@ -121,6 +121,9 @@ class Bot:
         self.invo: SideWallet | None = None          # the Invo calls wallet (needs INVO_TOKEN_FILE)
         self.invo_watch: InvoWatcher | None = None
         self.invo_calls: dict[tuple, str] = {}       # (wallet name, Invo call id) -> the coin we hold for it
+        # (deciding wallet name, Invo call id) it would have copied but had no margin left for (audit 2026-10-24):
+        # its 3%/8% versions still copy the call with their own margin
+        self.invo_decided: set[tuple] = set()
         self.invo_extra: list[SideWallet] = []       # the fixed-risk Invo wallets (invo.risk_wallets_pct)
         self._invo_call = None                       # the call being opened (read by invo_size)
         self.invo_info: dict[str, str] = {}          # our position id -> what the trader called (for its card)
@@ -223,11 +226,23 @@ class Bot:
         first, others = None, []
         for s in [main, *[s for s in cfg.invo.stops_pct if s != main]]:      # the deciding versions first
             for name, size_label, risk, mult, sizer, cap in sizes:
+                gate_box: list = []              # this wallet's gate, once built (the sizer below needs its stop)
                 if sizer is None:                # a risk wallet: r% of equity lost if its own stop is hit
                     stop = s if s > 0 else invo_emergency_stop(risk / EMERGENCY_STOP_PCT)
+
+                    def stop_of(m, st=stop, box=gate_box, s=s):
+                        """The stop distance (%) this copy will get. The trader's exit: the guard before liquidation
+                        at the trader's leverage (often 5-8%, not the 30% cap: audit 2026-10-24, F1/F2)."""
+                        if s > 0 or not box:
+                            return st
+                        g, asset = box[0], self.assets.get(m.coin)
+                        if asset is None:
+                            return st
+                        return (1 - g.stop_for(1, 1.0, g.leverage_for(asset), asset)) * 100
+
                     # (lifted to the minimum notional: 1% at the 30% guard is ~10$, a smaller copy would be skipped)
-                    sizer = lambda m, px, eq, r=risk, st=stop: max(
-                        eq * r / st, cfg.risk.min_notional_usd * 1.05) / px if px > 0 else 0.0
+                    sizer = lambda m, px, eq, r=risk, f=stop_of: max(
+                        eq * r / f(m), cfg.risk.min_notional_usd * 1.05) / px if px > 0 else 0.0
                     # its limits: r% (at least room for a minimum copy at this stop: 1% at the 30% guard is ~10$)
                     level = max(risk, 120 * cfg.risk.min_notional_usd * stop / 100 / cfg.risk.start_equity)
                 else:                            # trader size: the same notional at every stop, and the limits
@@ -239,6 +254,7 @@ class Bot:
                                name=prefix + name + suffix(s), label=f"{label_prefix}{size_label} · {stop_word(s)}",
                                sizer=sizer, cap=cap, own_leaders=True, **(primary_kw if primary else {}))
                 x.size_label, x.stop_label = size_label, stop_word(s)
+                gate_box.append(x.gate)
                 if s == 0:
                     # the trader's exit: the copy takes the trader's leverage (at most 10x) and the guard stop
                     # sits just before that leverage's liquidation (owner request 2026-10-14: a 40x call -> 10x)
@@ -372,6 +388,7 @@ class Bot:
             w.ledger.close()
         self.sides = [w for w in self.sides if not hasattr(w, "arena_slot")]
         self.invo_calls = {k: v for k, v in self.invo_calls.items() if k[0] not in old}
+        self.invo_decided = {k for k in self.invo_decided if k[0] not in old}
         self.arena_groups = []
         d = self.data / "arena" / "wallets"
         moved = d.exists()
@@ -1018,7 +1035,7 @@ class Bot:
             if leader not in w.st.followed:
                 return
             base = getattr(w, "base_name", None)
-            if base is not None and (base, call.id) not in self.invo_calls:
+            if base is not None and (base, call.id) not in self.invo_calls and (base, call.id) not in self.invo_decided:
                 log.info("invo_skip", wallet=w.name, trader=trader, coin=coin, why=f"not copied by {base}")
                 return
             held_p = w.st.positions.get(coin)
@@ -1031,11 +1048,17 @@ class Bot:
             m = Move(leader, coin, 0.0, side * call.exposure, call.created_ms, call.created_ms,
                      abs(hash(call.id)) % 10**12, (), call.entry * fx, 1)
             self._invo_call = call
+            w.pm.last_refusal = None
             try:
                 w.pm.on_move(m)
             finally:
                 self._invo_call = None
             p = w.st.positions.get(coin)
+            if base is None and w.pm.last_refusal == "margin_full":
+                # a deciding wallet (trader's exit: the trader's leverage, often 1x) out of margin: the call is still
+                # one it copies, so its 3%/8% versions take it with their own margin (audit 2026-10-24, F3)
+                self.invo_decided.add((w.name, call.id))
+                log.info("invo_decided_no_margin", wallet=w.name, trader=trader, coin=coin)
             if p is not None and p.leader == leader:
                 self.invo_calls[(w.name, call.id)] = coin
                 # how much worse than the trader we got in (+ = we paid more for a long / got less for a short), in

@@ -302,7 +302,7 @@ instances on the same wallet.
   at that stop (`risk x stop / 3`). Risk wallets (owner choice "A", 2026-10-13; they used to copy the 3%-stop
   notional at every stop, so "20% risk" at the 8% stop lost 53% of the wallet per stop hit and the 10%/20% x wide-stop
   wallets lost 50-70% on one or two calls): an r% wallet loses r% of itself at ITS stop: copy = equity x r / stop
-  (3%: 300 x r/3, 8%: r/8, trader's exit: at the 30% guard, r/30), lifted to 1.05 x min_notional, limits of level
+  (3%: 300 x r/3, 8%: r/8, trader's exit: at its real guard stop since 2026-10-24, see "Wallet audit fixes"), lifted to 1.05 x min_notional, limits of level
   max(r, room for a minimum copy). Variants: `liq_buffer_mult` 1 (the stop only has to sit before liquidation).
 - 0 = the trader's exit: no stop of ours but a guard `invo_emergency_stop(mult)` = min(30%, 95% of (1/ceil(mult) -
   2.5%)): a copy that big (mult = notional / equity) is liquidated about there (trader size; the risk wallets' copies
@@ -611,3 +611,15 @@ instances on the same wallet.
   When the newest best groups differ, `Bot.ask` posts a 🔄 Switch / ✋ Keep question; Switch = `Bot.arena_switch`
   (closes the arena wallets' copies at the book, archives `data/arena/wallets/` and live.json to
   `data/archive/arena-<stamp>/`, builds the new groups at 300$, no restart).
+
+## Wallet audit fixes (owner request 2026-10-24, after the Wallet Auditor's report `reports/wallet_audit/AUDIT.md`)
+- Trader's-exit risk wallets (`invo_risk_<r>pct` at stop 0) are sized with the stop they really get: the guard at
+  the trader's leverage (`RiskGate.stop_for(..., leverage_for(asset), asset)`, e.g. 8.3% on BTC at 10x), not the 30%
+  cap. A "5% risk" copy loses ~5% at its guard (it lost 0.8-1.4% at 10x), and an agreement boost is half a copy
+  again (it was 1.8-2.1x). Same-notional trader-size wallets are unchanged. The arena backtest still sizes at 30%.
+- Routing: a deciding wallet (main stop) refused ONLY for margin (`RiskGate` reason `margin_full`, read from
+  `PositionManager.last_refusal`) still counts the call as decided (`Bot.invo_decided`, memory only; log
+  `invo_decided_no_margin`), so its 3%/8% versions copy it with their own margin (1x calls filled the trader's-exit
+  wallets' margin and the twins skipped calls with margin free).
+- Minimum copies: when lot rounding leaves a request of >= min_notional under it (10.5$ of SOL -> 9.66$), the gate
+  takes one lot more if the limits hold it and it stays <= 1.5x the request (`risk._entry`).

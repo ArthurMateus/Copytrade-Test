@@ -212,10 +212,22 @@ class RiskGate:
         caps.append((eq * r.max_symbol_risk_pct / 100 - sym_now) / per_unit)
         caps.append((eq * r.max_total_risk_pct / 100 - st.total_risk()) / per_unit)
         used_margin = sum(p.size * p.entry_px / p.leverage for p in st.positions.values())
-        caps.append((eq - used_margin) * lev / o.px)
-        size = round_size(max(0.0, min(caps)), asset.sz_decimals)
-        if size <= 0:
-            return Decision(False, "risk_budget_full")
-        if size * o.px < r.min_notional_usd:
+        margin_cap = (eq - used_margin) * lev / o.px
+        limit = min([*caps[1:], margin_cap])          # what our limits allow, apart from the size asked for
+        size = round_size(max(0.0, min(o.size, limit)), asset.sz_decimals)
+        if 0 < o.size <= limit and size * o.px < r.min_notional_usd <= o.size * o.px:
+            # a minimum copy floored under the minimum by a coarse lot (audit 2026-10-24: 10.5$ of SOL became
+            # 0.08 SOL = 9.66$ and was refused): one lot up, if the limits hold it and it stays near the request
+            lot = 10 ** -asset.sz_decimals
+            up = round(math.ceil(r.min_notional_usd / o.px / lot - 1e-9) * lot, asset.sz_decimals)
+            if up <= limit and up * o.px <= 1.5 * o.size * o.px:
+                size = up
+        if size <= 0 or size * o.px < r.min_notional_usd:
+            # margin alone stopped it (audit 2026-10-24): Invo routing still lets the 3%/8% versions copy it
+            others = round_size(max(0.0, min(caps)), asset.sz_decimals)
+            if margin_cap < min(caps) and others * o.px >= r.min_notional_usd:
+                return Decision(False, "margin_full")
+            if size <= 0:
+                return Decision(False, "risk_budget_full")
             return Decision(False, f"below_min_notional:${size * o.px:.2f}")
         return Decision(True, "entry", size=size, leverage=lev, stop_px=stop)

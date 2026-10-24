@@ -493,8 +493,10 @@ def test_bot_copies_an_invo_call_and_closes_it_when_the_trader_does(invo_env, mo
             q = w.st.positions["ETH"]
             base = w.name.rsplit("_", 1)[0] if w.name.endswith(("_stop8", "_trader")) else w.name
             # trader size: the same copy at every stop; r% risk: r% of the wallet lost at ITS stop (owner request
-            # 2026-10-13, "A"): 3% -> 300 x r / 3%, 8% -> 300 x r / 8%, trader's exit -> at its 30% guard (>= 10.5$)
-            stop = 8.0 if w.name.endswith("_stop8") else 30.0 if w.name.endswith("_trader") else 3.0
+            # 2026-10-13, "A"): 3% -> 300 x r / 3%, 8% -> 300 x r / 8%, trader's exit -> at the guard it really gets,
+            # just before 10x liquidation (audit 2026-10-24: it was sized for 30%) (>= 10.5$)
+            guard = 95 * (0.1 - 1 / (2 * bot.assets["ETH"].max_leverage))
+            stop = 8.0 if w.name.endswith("_stop8") else guard if w.name.endswith("_trader") else 3.0
             want = 150.0 if base == "invo_calls" else max(300 * float(base.split("_")[2][:-3]) / stop, 10.5)
             assert q.size * q.entry_px == pytest.approx(want, rel=0.12), w.name
             assert "invo:nicush" in w.st.followed
@@ -1073,12 +1075,13 @@ def test_every_size_runs_with_every_stop_and_only_the_exit_differs(invo_env, mon
         assert s8.st.positions["ETH"].stop_px == pytest.approx(e["invo_risk_1pct_stop8"] * 0.92)
         assert tr.st.positions["ETH"].stop_px == pytest.approx(e["invo_risk_1pct_trader"] * (1 - 0.95 * (0.1 - 1 / (2 * bot.assets["ETH"].max_leverage))))  # guard just before 10x liquidation
         loss = [x.st.positions["ETH"].size * abs(x.st.positions["ETH"].entry_px - x.st.positions["ETH"].stop_px)
-                for x in (s3, s8)]
-        assert loss[0] == pytest.approx(3.0, rel=0.05) and loss[1] == pytest.approx(3.0, rel=0.05)   # 1% of 300$
+                for x in (s3, s8, tr)]
+        # 1% of 300$ at every stop, the trader's-exit guard included (audit 2026-10-24: it was sized for 30%)
+        assert loss == pytest.approx([3.0, 3.0, 3.0], rel=0.05)
         assert wait_for(lambda: "ETH" in w["invo_risk_20pct_trader"].st.positions, timeout=10)
-        big = w["invo_risk_20pct_trader"].st.positions["ETH"]                     # 20% at its 30% guard: 200$
-        assert big.size * big.entry_px == pytest.approx(200.0, rel=0.05)
+        big = w["invo_risk_20pct_trader"].st.positions["ETH"]                     # 20% = 60$ lost at its guard
         assert big.stop_px == pytest.approx(big.entry_px * (1 - 0.95 * (0.1 - 1 / (2 * bot.assets["ETH"].max_leverage))))
+        assert big.size * (big.entry_px - big.stop_px) == pytest.approx(60.0, rel=0.05)
         assert runner.invo_emergency_stop(20 / 3) == pytest.approx(11.2, abs=0.1)   # (trader size: before liquidation)
         hl.mids["ETH"] = 3000.0 * 0.96
         assert wait_for(lambda: "ETH" not in s3.st.positions, timeout=10)
@@ -1141,6 +1144,29 @@ def test_with_main_stop_0_the_main_wallets_hold_until_the_trader_closes(invo_env
         assert main.st.closed[-1]["reason"] == "leader_close"
         text = lambda: " ".join(m["text"] for m in dc.sent + dc.edits)
         assert wait_for(lambda: "closed by the trader" in text())         # the main wallet's card
+    finally:
+        stop_bot(bot, th)
+
+
+def test_a_deciding_wallet_out_of_margin_still_lets_its_8pct_version_copy(invo_env, monkeypatch):
+    """Audit 2026-10-24 (F3): the trader's-exit wallets decide what the 3%/8% versions copy and take the trader's
+    leverage; at 1x their margin filled after two calls and the 8% versions skipped calls with margin to spare."""
+    hl, dc, data, cdir, f, tok = invo_env
+    with open(cdir / "invo.toml", "a", encoding="utf-8") as fh:
+        fh.write("main_stop_pct = 0.0\n")
+    pid = f.add_user("nicush")[0]
+    bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
+    try:
+        dc.say("/invofollow nicush")
+        assert wait_for(lambda: bot.invo_watch.known.get("nicush") is not None, timeout=10)
+        w = {x.name: x for x in bot.invo_wallets()}
+        deciding, s8 = w["invo_risk_20pct"], w["invo_risk_20pct_stop8"]
+        for coin in ("ETH", "SOL"):                         # 1x: 200$ then the last 100$ of margin
+            f.open_call(pid, coin, long=True, leverage=1, size=1.0, entry=hl.mids[coin])
+            assert wait_for(lambda: coin in deciding.st.positions and coin in s8.st.positions, timeout=10)
+        f.open_call(pid, "BTC", long=True, leverage=1, size=1.0, entry=hl.mids["BTC"])
+        assert wait_for(lambda: "BTC" in s8.st.positions, timeout=10)
+        assert "BTC" not in deciding.st.positions          # no margin left there, but the call was still decided
     finally:
         stop_bot(bot, th)
 
