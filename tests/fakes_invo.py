@@ -32,7 +32,6 @@ class FakeInvo:
         self.calls: dict[str, list[dict]] = {}
         self.updated: dict[str, int] = {}               # portfolio id -> last edit (ms): its updatedAt
         self.closed: dict[str, list[dict]] = {}          # portfolio id -> [raw closed calls], newest first
-        self.ranked: list[str] = []                      # usernames on the Discover rankings
         self.port_meta: dict[str, dict] = {}             # portfolio id -> fields overriding the recorded template
         self.requests: list[tuple[str, dict]] = []
         self.valid_refresh = refresh_token
@@ -46,8 +45,6 @@ class FakeInvo:
         # real-money ("live") portfolios: shapes recorded 2026-10-12 from /dex/portfolio/... (read-only views)
         self.live: dict[str, dict] = {}                  # portfolio id -> overview numbers
         self.live_pos: dict[str, list[dict]] = {}        # portfolio id -> raw positions (open and closed), newest first
-        self.score_top: list[dict] = []                  # /analytics/score/user/top items
-        self.invo_score: dict[str, float] = {}           # portfolio id -> Invo's score (0-10)
         self.refuse_live = False                         # /dex/ views answer 403 (our account may not see them)
         self._n = itertools.count(1)
         self.lock = threading.Lock()
@@ -160,28 +157,6 @@ class FakeInvo:
             r = copy.deepcopy(fixture("invo_investments_open.json"))
             r["investmentsTicker"] = calls
             return r
-        if path == "/analytics/score/user/top":
-            return {"currentUser": None, "items": copy.deepcopy(self.score_top)}
-        if path == "/analytics/score/portfolio":
-            sc = self.invo_score.get(body.get("portfolioId"))
-            if sc is None:
-                return {"status": "pending", "detail": None}
-            part = {"score": 10, "scoreCap": 10, "isCapped": False, "capReason": None}
-            return {"status": "complete", "detail": {"portfolioId": body["portfolioId"], "score": sc, "baseScore": sc,
-                                                     "isCapped": False, "profitability": part, "risk": part,
-                                                     "consistency": part, "trackRecord": part}}
-        if path in ("/trending/get_portfolios_pl", "/trending/get_users"):
-            # rankings: real portfolio objects (as get_users_portfolios returns them), each with its trader as owner
-            pg = body.get("params") or body
-            page, size = int(pg.get("page", 1)), int(pg.get("size", 20))
-            names = self.ranked[(page - 1) * size: page * size]
-            tmpl = fixture("invo_users_portfolios.json")["portfolios"][0]
-            out = []
-            for n in names:
-                q = copy.deepcopy(tmpl)
-                q["owner"]["username"] = n
-                out.append(q)
-            return {"portfolios": out} if path.endswith("portfolios_pl") else {"users": [q["owner"] for q in out]}
         return {"success": False}
 
     def answer_get(self, path: str) -> dict:

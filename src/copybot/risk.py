@@ -76,15 +76,13 @@ class RiskGate:
     cfg: Config
     clock: callable = time.time
     order_times: collections.deque = field(default_factory=collections.deque)
-    # leader -> diversified wallet? (then every core perp may be copied from it, not only the main coins)
-    alts_ok: Callable[[str], bool] = field(default_factory=lambda: (lambda leader: False))
     # Invo "trader's exit" wallets: the copy uses the trader's leverage (at most risk.max_leverage) and the farthest
     # stop is a guard just before that leverage's liquidation (owner request 2026-10-14)
     follow_leverage: bool = False
     call_leverage: Callable[[], float | None] | None = None
 
     def coin_allowed(self, leader: str, coin: str) -> bool:
-        return coin in self.cfg.selection.main_coins or (is_core_perp(coin) and self.alts_ok(leader))
+        return is_core_perp(coin)
 
     # ---- sizing (from OUR risk limits, never from the leader's size) ---------------------------
     def stop_for(self, side: int, entry: float, leverage: float | None = None, asset: Asset | None = None) -> float:

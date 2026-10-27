@@ -1,8 +1,11 @@
 """The bot: one process, one trading loop (decisions + paper broker), worker threads for everything slow.
 
-Threads: trading loop (this module) | ws feed | health worker (clock + REST price fallback) |
-sync worker (leader reconcile + meta/funding) | scorer (leaderboard, fills, candles, scoring) |
-discord gateway + outbox. Workers only talk to the trading loop through one queue.
+Only the Invo book runs (owner request 2026-10-26: the Hyperliquid and FOMO books, the arena and the bot's own Invo
+search were removed). Hyperliquid still gives every price, order book and paper fill of the Invo copies.
+
+Threads: trading loop (this module) | ws feed (prices) | health worker (clock + REST price fallback) |
+sync worker (coin list + funding) | Invo watcher | discord gateway + outbox. Workers only talk to the trading loop
+through one queue.
 """
 from __future__ import annotations
 
@@ -18,15 +21,12 @@ import sys
 import threading
 import time
 import traceback
-import uuid
 from pathlib import Path
 
-from copybot import arena, config, hl, log, picks, cardfmt
+from copybot import config, hl, log, cardfmt
 from copybot.broker import PaperBroker
-from copybot.detector import Detector, Move
 from copybot.invo import (DELETED as INVO_DELETED, PREFIX as INVO, REPLACED_S as INVO_REPLACED_S,
                           RESIZE_MIN as INVO_RESIZE_MIN, InvoClient, Watcher as InvoWatcher)
-from copybot.invo_scorer import InvoScorer, copy_blockers, reason_text as invo_reason
 
 EMERGENCY_STOP_PCT = 30.0   # "trader's exit" Invo wallets: the farthest stop, only a guard (a normal trade never gets
                             # there), lowered for big copies to just before their liquidation (invo_emergency_stop)
@@ -39,12 +39,10 @@ def invo_emergency_stop(mult: float) -> float:
     return min(EMERGENCY_STOP_PCT, (1.0 / lev - 0.025) * 0.95 * 100)
 from copybot.feed import Clock, Feed
 from copybot.ledger import Ledger, now_ms
-from copybot.positions import PositionManager
-from copybot.risk import Health, RiskGate
-from copybot.selection import Plan, Scorer, rebalance, select
+from copybot.positions import Move
+from copybot.risk import Health
 from copybot.discord import DiscordUI
-from copybot.sol.runner import SolBot
-from copybot.chat import HELP, INVO_HELP
+from copybot.chat import HELP
 from copybot.wallets import SideWallet, boot_repair
 
 
@@ -93,31 +91,17 @@ class Bot:
         self.stop = threading.Event()
         self.budget = hl.RateBudget(rt.weight_per_min, rt.critical_reserve_weight)
         self.info = hl.Info(rt.info_url, self.budget)
+        # the bot's own ledger: start (genesis, BTC price then), restarts and the Discord card ids; every wallet
+        # has its own ledger in data/wallets/<name>/
         self.ledger = Ledger(self.data / "ledger.jsonl")
         self.st = self.ledger.replay()
         self.mids: dict[str, float] = {}
         self.assets: dict[str, hl.Asset] = {}
         self.feed = Feed(rt.ws_url, self.q)
         self.clock = Clock()
-        self.gate = RiskGate(cfg, alts_ok=lambda a: bool(self.score_dict(a).get("diversified")))
-        self.books: dict[str, tuple[float, object]] = {}   # coin -> (fetched at, book), shared with side wallets
-        self.broker = PaperBroker(cfg.broker, self.fresh_book)
-        self.pm = PositionManager(cfg, self.st, self.ledger, self.gate, self.broker, self.health, self.mids,
-                                  self.assets, notify=self.on_notify, score_of=self.score_of)
+        self.books: dict[str, tuple[float, object]] = {}   # coin -> (fetched at, book), shared by the wallets
         side_broker = PaperBroker(cfg.broker, self.recent_book)
-        # the Hyperliquid book (selection.enabled; off since 2026-10-12, owner: "only Invo"): its main wallet stays
-        # (ledger, cards) but paused, without side wallets, search or followed wallets' fills
-        self.hyper = cfg.selection.enabled
-        self.sides = [SideWallet(cfg, r, self.data, side_broker, self.health, self.mids, self.assets,
-                                 alts_ok=self.gate.alts_ok, score_of=self.score_of)
-                      for r in (cfg.risk.side_wallets_risk_pct if self.hyper else [])]
-        self.leader_value: dict[str, float] = {}   # followed leader -> perp value + spot stablecoins (every 5 min)
-        if cfg.risk.mirror_wallet and self.hyper:
-            m = cfg.risk.mirror_mult
-            self.sides.append(SideWallet(cfg, cfg.risk.mirror_limits_pct, self.data, side_broker, self.health,
-                                         self.mids, self.assets, alts_ok=self.gate.alts_ok, score_of=self.score_of,
-                                         name=f"mirror_x{m:g}", label=f"mirror x{m:g} (their % of account)",
-                                         sizer=self.mirror_size))
+        self.sides: list[SideWallet] = []                  # every Invo wallet
         self.invo: SideWallet | None = None          # the Invo calls wallet (needs INVO_TOKEN_FILE)
         self.invo_watch: InvoWatcher | None = None
         self.invo_calls: dict[tuple, str] = {}       # (wallet name, Invo call id) -> the coin we hold for it
@@ -130,27 +114,18 @@ class Bot:
         self._invo_close_why: str | None = None      # the trader's close reason while it is being mirrored
         self.invo_baseline_wait: dict[str, list] = {}  # trader -> its first read, held until Hyperliquid's coins load
         self.side_broker = side_broker
-        # the Invo arena's live groups (owner request 2026-10-20): each group of traders the arena's backtest liked
-        # best gets every Invo size x stop as its own wallets, in data/arena/wallets/ (arena_build)
-        self.arena_groups: list[dict] = []
-        self.arena_live: dict | None = None
         if cfg.invo.enabled and cfg.invo_token_file:
-            self.invo, self.invo_extra = self.invo_set("", "", self.data,
-                                                       dict(notify=self.on_invo_notify, pause_leaders=True))
+            self.invo, self.invo_extra = self.invo_set(dict(notify=self.on_invo_notify, pause_leaders=True))
             self.sides += [self.invo, *self.invo_extra]
-            if cfg.invo.arena and cfg.invo.arena_groups > 0:
-                self.arena_live = arena.load_live(self.data / "arena")
-                if self.arena_live:
-                    self.arena_build(self.arena_live, boot=False)
-            # watched: the followed traders AND the unfollowed ones we still hold a copy of (their exits are copied),
-            # and the arena groups' traders; rebuilt on the trading thread (invo_refresh_watched), read by the watcher
+            # watched: the followed traders AND the unfollowed ones we still hold a copy of (their exits are copied);
+            # rebuilt on the trading thread (invo_refresh_watched), read by the watcher
             self.invo_watched: frozenset[str] = frozenset()
             self.invo_watch = InvoWatcher(InvoClient(cfg.invo.api_base, cfg.invo_token_file,
                                                      min_interval_s=cfg.invo.request_gap_s), self.q,
                                           lambda: self.invo_watched, cfg.invo.poll_s,
-                                          cfg.invo.max_call_age_s, self.stop, skip=self.invo_watch_skip)
+                                          cfg.invo.max_call_age_s, self.stop, skip=self.invo_skip)
             self.invo_refresh_watched()
-            for x in self.all_invo_wallets():            # the call each open copy belongs to (ledger, audit 2026-10-11)
+            for x in self.invo_wallets():            # the call each open copy belongs to (ledger, audit 2026-10-11)
                 for p in x.st.positions.values():
                     link = x.st.invo_links.get(p.pos_id)
                     if link and p.leader.startswith(INVO):
@@ -159,55 +134,21 @@ class Bot:
                             self.invo_info[p.pos_id] = link["info"]
         elif cfg.invo.enabled:
             log.info("invo_off", why="INVO_TOKEN_FILE not set")
-        self.det = Detector()
         on_cmd = lambda c: self.q.put(("cmd", c))
         # Discord card ids are kept in the ledger as "dc:<key>" (since Telegram ran next to it until 2026-10-10)
         self.ui = DiscordUI(cfg, on_cmd, lambda k, m: self.q.put(("card", "dc:" + k, m)))
         cardfmt.set_utc_offset(cfg.discord.utc_offset_hours)
-        self.sol: SolBot | None = None
-        if cfg.sol.enabled:
-            self.sol = SolBot(cfg, self.ui, self.alert, restart=lambda: setattr(self, "restart_at", time.time() + 3))
-        self.scorer = Scorer(cfg, self.info, self.q, self.data / "cache")
-        # the daily Invo search: the same scoring as the wallets, on the Invo traders' calls (copybot/invo_scorer.py)
-        self.invo_search: InvoScorer | None = None
-        self.invo_scores: dict = {}
-        self.invo_reviewed = False         # a full Invo search has finished (cached or this run): picks shown daily
-        if self.invo is not None and cfg.invo.search:
-            self.invo_search = InvoScorer(cfg, self.invo_watch.client, self.scorer.params, self.invo_trade_coin,
-                                          self.scorer.candles, self.mids,
-                                          lambda: {a[len(INVO):] for a in self.invo.st.followed}, self.q,
-                                          self.data / "cache", self.stop, skip=self.invo_floor,
-                                          funding_of=self.scorer.funding)
-            self.invo_scores = dict(self.invo_search.scores)
-            self.invo_reviewed = bool(self.invo_scores)
-        # the Invo arena (copybot/arena.py, owner request 2026-10-19): after each search, on the calls it read
-        self.arena_res: dict | None = arena.load_result(self.data / "arena")
-        self.arena_busy = False
-        self.picks = picks.Store(self.data / "picks.json")
-        self.sol_booted = False
-        self.invo_search_pending = False   # /invosearch: re-pick the Invo traders when the search ends
-        # questions waiting for the owner's button (owner request 2026-10-12: "ask to drop and make the changes"):
-        # id -> {"kind": "drop" | "repick", ...}; in memory only (after a restart the next search asks again)
-        self.asks: dict[str, dict] = {}
-        self.started_s = time.time()     # the daily report waits a few minutes after a start (rankings load first)
-        self.ranks: dict[str, int] = {}
-        self.ranking: list[str] = []
-        self.scores: dict = {}
-        self.search_pending = False
         self.restart_at = 0.0        # /restart and /reset: stop the loop at this time (the outbox gets to flush)
-        self.reconcile_now = threading.Event()
         self.last_body: dict[str, str] = {}
         self.last_alert: dict[str, float] = {}
-        self.last_funding_meta_ms = 0
         self.live_cards: set[str] = set()
-        self.leaders_with_positions: set[str] = set()
         self.ws_down_since = 0.0     # websocket down since (0 = up); alerted only if it stays down
         self.ws_alerted = False
 
-    def invo_set(self, prefix: str, label_prefix: str, data_dir: Path, primary_kw: dict) -> tuple:
+    def invo_set(self, primary_kw: dict) -> tuple:
         """Every Invo size x every stop (owner request 2026-10-12): the trader-size wallet and the 1-20% risk wallets,
         each once per stop in invo.stops_pct (0 = the trader's exit). Returns (the trader-size wallet at the main stop,
-        the others); `prefix` names them (the arena's groups: "g1_"), `primary_kw` goes to the first one.
+        the others); `primary_kw` goes to the first one.
         A risk wallet risks its r% at ITS OWN stop (owner request 2026-10-13, "A": copies of r% x equity / stop; the
         trader's exit at its 30% guard), so a "20% risk" wallet never loses more than ~20% on one copy at any stop; it
         used to copy the 3%-stop notional at every stop (8% stop = 53% of the wallet). The trader-size versions keep
@@ -249,10 +190,9 @@ class Bot:
                     stop = s if s > 0 else invo_emergency_stop(mult)   # of a wallet risking it at this stop
                     level = risk * stop / base
                 primary = s == main and name == "invo_calls"
-                x = SideWallet(cfg, level, data_dir, self.side_broker, self.health, self.mids,
-                               self.assets, alts_ok=lambda leader: True, score_of=self.score_of,
-                               name=prefix + name + suffix(s), label=f"{label_prefix}{size_label} · {stop_word(s)}",
-                               sizer=sizer, cap=cap, own_leaders=True, **(primary_kw if primary else {}))
+                x = SideWallet(cfg, level, self.data, self.side_broker, self.health, self.mids,
+                               self.assets, name=name + suffix(s), label=f"{size_label} · {stop_word(s)}",
+                               sizer=sizer, cap=cap, **(primary_kw if primary else {}))
                 x.size_label, x.stop_label = size_label, stop_word(s)
                 gate_box.append(x.gate)
                 if s == 0:
@@ -261,7 +201,7 @@ class Bot:
                     x.gate.follow_leverage = True
                     x.gate.call_leverage = lambda: self._invo_call.leverage if self._invo_call else None
                 if s != main:
-                    x.base_name = prefix + name  # its main-stop version: the calls it copies (see invo_one)
+                    x.base_name = name           # its main-stop version: the calls it copies (see invo_one)
                 variants.append((x, s, stop))
                 if primary:
                     first = x
@@ -293,120 +233,6 @@ class Bot:
                 r.daily_loss_pct = r.weekly_loss_pct = 100.0
         return first, others
 
-    # ---- the arena's live groups (owner request 2026-10-20) ---------------------------------------------------
-    def arena_build(self, live: dict, boot: bool = True) -> None:
-        """One set of Invo wallets per live arena group (copybot/arena.py), each following the group's traders, only
-        in the portfolios the arena kept for them (frozen with the group). Built at start from data/arena/live.json,
-        or on the trading thread when the arena picks its first groups (`boot`: genesis and repair now)."""
-        d = self.data / "arena"
-        for g in live["groups"]:
-            slot = g["slot"]
-            first, others = self.invo_set(f"g{slot}_", f"G{slot} · ", d, {})
-            ws = [first, *others]
-            for w in ws:
-                w.arena_slot = slot
-                if boot:
-                    self.boot_side(w)
-                for n in g["picks"]:
-                    if INVO + n.lower() not in w.st.followed:
-                        w.rec({"ev": "follow", "leader": INVO + n.lower(), "reason": "arena group"})
-            keep = {n.lower(): set(v) for n, v in (g.get("portfolios") or {}).items()}
-            self.arena_groups.append({"slot": slot, "group": g, "primary": first, "wallets": ws, "keep": keep})
-            self.sides += ws
-        log.info("arena_wallets", groups=len(live["groups"]), wallets=sum(len(x["wallets"]) for x in self.arena_groups))
-
-    def arena_wallets(self) -> list:
-        return [w for g in self.arena_groups for w in g["wallets"]]
-
-    def all_invo_wallets(self) -> list:
-        """Every wallet copying Invo calls: the Invo book's own, then the arena groups'."""
-        return [*self.invo_wallets(), *self.arena_wallets()]
-
-    def arena_skip(self, name: str, portfolio_id: str) -> list:
-        """The arena groups copying this portfolio of `name` (frozen with the group)."""
-        return [g for g in self.arena_groups if portfolio_id in g["keep"].get(name.lower(), ())]
-
-    def invo_watch_skip(self, name: str, p) -> str | None:
-        """The watcher's filter: new calls of a portfolio no wallet copies are dropped there. The Invo book's rule
-        (invo_skip) for the traders it follows; an arena group's kept portfolios for its traders."""
-        if self.arena_skip(name, p.id):
-            return None
-        return self.invo_skip(name, p)
-
-    def invo_gaps(self) -> list[tuple[str, float]]:
-        """(coin, % we got in worse than the trader) of the Invo book's real copies (main wallet): the arena's delay
-        cost. From the `gap` field of the copy's link (since 2026-10-20), or read back from its card text before."""
-        if self.invo is None:
-            return []
-        st = self.invo.st
-        coins = {t["pos_id"]: t["coin"] for t in st.closed if "pos_id" in t}
-        coins.update({p.pos_id: p.coin for p in st.positions.values()})
-        out = []
-        for pid, link in st.invo_links.items():
-            coin = link.get("coin") or coins.get(pid)
-            gap = link.get("gap")
-            if gap is None:
-                info = link.get("info") or ""
-                m = re.search(r"([+\-−]?\d+(?:\.\d+)?)% (worse|better)", info)
-                if m:
-                    gap = abs(float(m.group(1).replace("−", "-"))) * (1 if m.group(2) == "worse" else -1)
-                elif "same price as theirs" in info:
-                    gap = 0.0
-            if coin and gap is not None:
-                out.append((coin, float(gap)))
-        return out
-
-    def arena_view(self) -> dict | None:
-        """The live groups and their wallets' results, for the /arena card (funding = paid)."""
-        if not self.arena_live:
-            return None
-        ws = []
-        for g in self.arena_groups:
-            for w in g["wallets"]:
-                st = w.st
-                ws.append({"slot": g["slot"], "size": w.size_label, "stop": w.stop_label, "equity0": st.equity0,
-                           "pnl": st.equity(self.mids) - st.equity0, "trades": len(st.closed),
-                           "wins": sum(1 for t in st.closed if t["pnl"] > 0), "open": len(st.positions),
-                           "fees": sum(t.get("fees", 0.0) for t in st.closed)
-                           + sum(p.fees for p in st.positions.values()),
-                           "funding": -(sum(t.get("funding", 0.0) for t in st.closed)
-                                        + sum(p.funding for p in st.positions.values()))})
-        return {**self.arena_live, "wallets": ws}
-
-    def arena_switch(self, groups: list[dict]) -> str:
-        """The owner switched the live groups (button under /arena): the arena wallets' open copies are closed at the
-        book, their ledgers archived to data/archive/arena-<stamp>/ and the new groups start at 300$ each."""
-        n = 0
-        for w in self.arena_wallets():
-            n += len(w.st.positions)
-            w.pm.flatten("arena groups switched")
-        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
-        arch = self.data / "archive" / f"arena-{stamp}"
-        old = {w.name for w in self.arena_wallets()}
-        for w in self.arena_wallets():
-            w.ledger.frozen = True
-            w.ledger.close()
-        self.sides = [w for w in self.sides if not hasattr(w, "arena_slot")]
-        self.invo_calls = {k: v for k, v in self.invo_calls.items() if k[0] not in old}
-        self.invo_decided = {k for k in self.invo_decided if k[0] not in old}
-        self.arena_groups = []
-        d = self.data / "arena" / "wallets"
-        moved = d.exists()
-        if moved:
-            arch.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(d), str(arch / "wallets"))
-        live_p = self.data / "arena" / "live.json"
-        if live_p.exists():
-            arch.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(live_p), str(arch / "live.json"))
-        self.arena_live = arena.new_live(groups, now_ms())
-        arena.save_live(self.data / "arena", self.arena_live)
-        self.arena_build(self.arena_live)
-        self.invo_refresh_watched()
-        log.info("arena_switched", closed=n, archive=arch.as_posix(), groups=len(groups))
-        return f"{n} open arena copies closed · old wallets saved in <code>{cardfmt.esc(arch.as_posix())}</code>" \
-            if moved else ""
-
     # ---- health ------------------------------------------------------------------------------------
     def health(self) -> Health:
         now = time.time()
@@ -421,7 +247,7 @@ class Bot:
         self.st.apply(ev)
         return ev
 
-    # ---- books: the main wallet always reads a fresh one; side wallets reuse it for a second -------------
+    # ---- books: a fresh one, reused by the other wallets for a second ------------------------------------
     def fresh_book(self, coin: str):
         b = self.info.book(coin, self.cfg.runtime.trading_timeout_s)
         self.books[coin] = (time.time(), b)
@@ -434,18 +260,13 @@ class Bot:
         return self.fresh_book(coin)
 
     def on_sides(self, what: str, fn) -> None:
-        """Run fn(side) for every side wallet; a failure in one is logged and never reaches the main wallet."""
+        """Run fn(wallet) for every wallet; a failure in one is logged and never reaches the others."""
         for w in self.sides:
-            if w.own_leaders and what in ("sync", "move", "reconcile", "pause", "resume", "flatten"):
-                continue
             try:
                 fn(w)
             except Exception as e:
                 log.exception("side_wallet_error", wallet=w.name, what=what)
-                self.alert(f"side wallet {w.name}: {what} failed ({type(e).__name__})", key=f"side:{w.name}:{what}")
-
-    def sync_sides(self) -> None:
-        self.on_sides("sync", lambda w: w.sync_leaders(self.st))
+                self.alert(f"wallet {w.name}: {what} failed ({type(e).__name__})", key=f"side:{w.name}:{what}")
 
     def alert(self, text: str, key: str | None = None, every_s: float = 600) -> None:
         k = key or text
@@ -471,160 +292,59 @@ class Bot:
             self.assets.update(self.info.meta(timeout=10))
         except Exception as e:
             log.warn("boot_meta_failed", err=str(e))
-        if not self.hyper and not self.st.entries_paused:   # no new Hyperliquid copies; open ones still exit
-            self.rec({"ev": "pause", "reason": "Hyperliquid book off"})
-        problems = boot_repair(self.st, self.rec, self.gate, "main")
-        if problems:
-            self.ui.send("⚠️ <b>Restart with uncertainty</b> · ⏸️ entries paused, exits and stops keep running\n"
-                         + "\n".join(f"• {cardfmt.esc(x)}" for x in problems[:10])
-                         + "\nCheck, then /hyperresume.")
-
         self.on_sides("boot", self.boot_side)
-        self.sync_sides()
         for key, mid in self.st.cards.items():
             if key.startswith("dc:"):                 # (keys without the prefix were Telegram messages)
                 self.ui.restore_card(key[3:], mid)
-        log.info("state", equity=round(self.st.equity(), 2), positions=len(self.st.positions),
-                 followed=len(self.st.followed), paused=self.st.entries_paused, trades=len(self.st.closed))
-        for p in self.st.positions.values():
-            log.info("position_restored", coin=p.coin, side=p.side, size=p.size, entry=p.entry_px, stop=p.stop_px,
-                     leader=p.leader)
-        lines = [f"⚡ Hyperliquid: {len(self.st.positions)} open · {_traders(len(self.st.followed))}"
-                 + (" · ⏸️ paused" if self.st.entries_paused else "") if self.hyper else
-                 "⚡ Hyperliquid book: off (Invo copies still use its prices)"
-                 + (f" · {len(self.st.positions)} old trade(s) still open until their exit" if self.st.positions
-                    else "")]
-        if self.sol:
-            try:
-                self.sol.boot()
-                self.sol_booted = True
-                lines.append(self.sol.start_line)
-            except Exception:
-                log.exception("sol_boot_failed")
-                lines.append("🪙 FOMO: failed to start (logged); the other books run")
+        lines = []
         if self.invo is not None:
             lines.append(f"🧾 Invo: {sum(len(w.st.positions) for w in self.invo_wallets())} open · "
                          f"{_traders(len(self.invo.st.followed))}" + (" · ⏸️ paused" if self.invo.st.entries_paused else ""))
-        # one start message for every book (owner request 2026-10-10)
+        else:
+            lines.append("🧾 Invo is off: save the bot's Invo login in a file and set INVO_TOKEN_FILE to it")
         self.ui.send("🤖 <b>Copybot started</b> (paper)\n" + "\n".join(lines))
 
     def boot_side(self, w) -> None:
-        """Genesis, boot and restart repair of one side wallet (also arena wallets built later)."""
+        """Genesis, boot and restart repair of one wallet."""
         if not w.st.genesis_ms:
             w.rec({"ev": "genesis", "equity0": w.cfg.risk.start_equity, "btc_px0": self.st.btc_px0})
         w.rec({"ev": "boot", "positions": len(w.st.positions), "followed": len(w.st.followed)})
         side_problems = boot_repair(w.st, w.rec, w.gate, w.name, self.assets)
         if side_problems:
-            self.ui.send(f"⚠️ <b>Side wallet {cardfmt.esc(w.label)} restarted with uncertainty</b> · ⏸️ its entries "
+            self.ui.send(f"⚠️ <b>Wallet {cardfmt.esc(w.label)} restarted with uncertainty</b> · ⏸️ its entries "
                          f"paused\n" + "\n".join(f"• {cardfmt.esc(x)}" for x in side_problems[:5])
-                         + ("\n/invoresume resumes the Invo wallets." if w.own_leaders else
-                            "\n/hyperresume resumes every Hyperliquid wallet."))
-        if self.st.entries_paused and not w.st.entries_paused and not w.own_leaders:
-            w.rec({"ev": "pause", "reason": self.st.pause_reason or "main wallet paused"})
+                         + "\n/invoresume resumes the Invo wallets.")
         log.info("side_wallet", wallet=w.name, equity=round(w.st.equity(), 2), positions=len(w.st.positions),
                  trades=len(w.st.closed), paused=w.st.entries_paused)
 
     def start_threads(self) -> None:
-        self.feed.set_users(self.wanted_users())
         self.feed.start()
         self.ui.start()
-        if self.sol:
-            threading.Thread(target=self.sol.run, kwargs={"booted": self.sol_booted}, name="sol", daemon=True).start()
         threading.Thread(target=self.health_worker, name="health", daemon=True).start()
         threading.Thread(target=self.sync_worker, name="sync", daemon=True).start()
         if self.invo_watch:
             self.sync_invo_extras()
             self.invo_watch.start()
-        if self.invo_search:
-            self.invo_search.start()
-        self.scorer.focus = set(self.st.followed)
-        if self.hyper:                 # (off: the Scorer object still serves candles and funding to the Invo search)
-            self.scorer.start()
-
-    def wanted_users(self) -> set[str]:
-        return (set(self.st.followed) if self.hyper else set()) | self.position_leaders()
-
-    def position_leaders(self) -> set[str]:
-        """Owners and backers of open positions in any wallet: their fills and positions must keep being watched."""
-        return {a for st in (self.st, *(w.st for w in self.sides)) for p in st.positions.values()
-                for a in (p.leader, *p.backers) if not a.startswith(INVO)}       # Invo traders: no HL address
-
-    def mirror_size(self, m, px: float, equity: float) -> float:
-        """Mirror wallet: the leader's new position as a share of its account value (leverage included), times
-        mirror_mult, of our equity; at least the minimum notional. Unknown account value: the fixed 1% risk size.
-        The wallet's RiskGate then clamps it like any other copy."""
-        r = self.cfg.risk
-        v = self.leader_value.get(m.leader, 0.0)
-        if v <= 0 or px <= 0:
-            log.info("mirror_size_fallback", leader=m.leader, coin=m.coin, why="account value unknown")
-            return equity * r.risk_per_trade_pct / 100 / (px * r.stop_pct / 100)
-        share = abs(m.end_pos) * (m.px or px) / v
-        notional = max(share * r.mirror_mult * equity, r.min_notional_usd * 1.05)
-        log.info("mirror_size", leader=m.leader, coin=m.coin, leader_pct=round(share * 100, 3),
-                 want_usd=round(notional, 2))
-        return notional / px
 
     def invo_record_rows(self) -> dict:
-        """Invo's own numbers for the portfolios of each followed trader whose calls are copied (from the watcher's
-        last read). Skipped ones are only counted: a portfolio that starts passing the rules is copied (and listed)
-        from then on by itself."""
+        """Invo's own numbers for the copied portfolios of each followed trader (from the watcher's last read)."""
         out = {}
         for name, ports in list((self.invo_watch.stats if self.invo_watch else {}).items()):
             ok = [p for p in ports if not self.invo_skip(name, p)]
-            rows = []
-            for p in ok[:4]:
-                ps = self.invo_portfolio_score(name, p.id) or {}
-                extra = (f" · ours {ps['score']:.0f}/100" if ps.get("eligible") else "") + (
-                    f" · Invo {ps['invo_score']:.1f}/10" if ps.get("invo_score") is not None else "")
-                rows.append((f"{'💵' if p.kind == 'live' else '✅'} {p.title.strip()[:24] or 'portfolio'}",
-                             f"{p.win_rate:.0f}% win · {p.pnl_pct:+,.0f}% · {p.closed} calls · {p.open_count} open"
-                             + (" · real money" if p.kind == "live" else "") + extra))
+            rows = [(f"{'💵' if p.kind == 'live' else '✅'} {p.title.strip()[:24] or 'portfolio'}",
+                     f"{p.win_rate:.0f}% win · {p.pnl_pct:+,.0f}% · {p.closed} calls · {p.open_count} open"
+                     + (" · real money" if p.kind == "live" else "")) for p in ok[:4]]
             if not ok and ports:
-                rows = [("Portfolios", f"🚫 none passes the rules yet ({len(ports)} skipped)")]
+                rows = [("Portfolios", f"🚫 all {len(ports)} blocked by you")]
             out[INVO + name] = rows
         return out
 
-    def invo_portfolio_score(self, name: str, pid: str) -> dict | None:
-        """The daily search's result for one portfolio of `name` (None = not scored per portfolio yet)."""
-        return ((self.invo_scores.get(name.lower()) or {}).get("by_portfolio") or {}).get(pid)
-
     def invo_skip(self, name: str, p) -> str | None:
-        """Why calls in this portfolio of `name` are not copied (None = they are). Owner request 2026-10-12: a
-        portfolio scored by the search is copied only if it passes OUR rules (per portfolio); a real-money ("live")
-        one that passes needs nothing else, a paper one must also pass the owner's paper floors. Not scored yet:
-        the floors, on its own numbers (a live portfolio's accuracy and real return)."""
+        """Why calls in this portfolio of `name` are not copied (None = they are). Every portfolio of a followed
+        trader is copied (owner request 2026-10-14, the only way since the search was removed 2026-10-26); only
+        /invoblock stops one."""
         if self.invo is not None and p.id in self.invo.st.blocked.get(INVO + name.lower(), {}):
             return "blocked by you"
-        if name.lower() in {u.strip().lstrip("@").lower() for u in self.cfg.invo.always_copy} or self.invo_picked(name):
-            return None                 # owner requests 2026-10-13 / 2026-10-14: copied whatever the floors and rules say
-        ps = self.invo_portfolio_score(name, p.id)
-        if ps is not None:              # owner request 2026-10-12: only a loss after our costs or bait stops it
-            hard = copy_blockers(ps.get("reasons"))
-            if hard:
-                return "fails our rules: " + ", ".join(invo_reason(r) for r in hard[:2])
-            if p.kind == "live":
-                return None
-        return self.invo_floors(p)
-
-    def invo_floor(self, name: str, p) -> str | None:
-        """The search's view of a portfolio before its own score: blocked, or a paper one below the owner's floors."""
-        if self.invo is not None and p.id in self.invo.st.blocked.get(INVO + name.lower(), {}):
-            return "blocked by you"
-        return None if p.kind == "live" or self.invo_picked(name) else self.invo_floors(p)
-
-    def invo_picked(self, name: str) -> bool:
-        """A trader the owner followed by hand (/invofollow): every portfolio of it is copied, only /invoblock stops one."""
-        return self.invo is not None and INVO + name.lower() in self.invo.st.picked
-
-    def invo_floors(self, p) -> str | None:
-        """The owner's portfolio floors (invo.min_portfolio_win_rate / min_portfolio_pnl_pct / min_portfolio_calls)."""
-        c = self.cfg.invo
-        if p.closed < c.min_portfolio_calls:
-            return f"only {p.closed} closed calls"
-        if p.win_rate < c.min_portfolio_win_rate * 100:
-            return f"win rate {p.win_rate:.0f}% < {c.min_portfolio_win_rate * 100:.0f}%"
-        if p.pnl_pct < c.min_portfolio_pnl_pct:
-            return f"return {p.pnl_pct:+.0f}% < {c.min_portfolio_pnl_pct:+.0f}%"
         return None
 
     def invo_command(self, c) -> None:
@@ -632,45 +352,31 @@ class Bot:
         if w is None:
             return self.ui.send("🧾 Invo is off: save the bot's Invo login in a file, set INVO_TOKEN_FILE to it and "
                                 "restart (see the README, Invo section).")
-        if c.name == "/invosearch":
-            s = self.invo_search
-            if s is None:
-                return self.ui.send("🧾 The Invo search is off (search = true in config/invo.toml, then /restart).")
-            self.invo_search_pending = True
-            if s.busy():
-                pr = s.progress
-                return self.ui.send(f"🔎 🧾 An Invo search is already running ({pr.get('done', 0)}/{pr.get('todo', 0)} "
-                                    "traders checked); I will re-pick the best when it finishes.")
-            s.req.set()
-            return self.ui.send("🔎 🧾 <b>Searching Invo now</b> (Discover rankings + the traders you follow, same rules "
-                                "as the wallets). It can take a while; when it ends I follow the best "
-                                f"{self.cfg.invo.max_traders} that pass and drop followed ones outside them.")
         if c.name == "/invoprogress":
             return self.ui.send("🧾 " + cardfmt.progress_text(w.st, self.mids, self.mids.get("BTC"), now_ms()))
         if c.name == "/invopause":
-            for x in self.all_invo_wallets():
+            for x in self.invo_wallets():
                 x.rec({"ev": "pause", "reason": "/invopause"})
-            return self.ui.send("⏸️ 🧾 <b>Invo copies paused</b> (every Invo wallet, the arena's too). Exits and stops keep running. "
+            return self.ui.send("⏸️ 🧾 <b>Invo copies paused</b> (every Invo wallet). Exits and stops keep running. "
                                 "/invoresume to continue.")
         if c.name == "/invoresume":
-            for x in self.all_invo_wallets():
+            for x in self.invo_wallets():
                 if x.st.uncertain:
                     x.rec({"ev": "ack", "items": list(x.st.uncertain)})
                 x.rec({"ev": "resume"})
-            return self.ui.send("▶️ 🧾 <b>Invo copies resumed</b> (every Invo wallet, the arena's too).")
+            return self.ui.send("▶️ 🧾 <b>Invo copies resumed</b> (every Invo wallet).")
         if c.name in ("/invoflatten", "/invoreset"):
             if not self.ui.check_pin(c.arg):
                 log.warn("invo_bad_pin", cmd=c.name)
                 return self.ui.send(f"⛔ Wrong or missing PIN. Usage: {c.name} &lt;PIN&gt;")
             if c.name == "/invoflatten":
                 n = 0
-                for x in self.all_invo_wallets():
+                for x in self.invo_wallets():
                     n += len(x.st.positions)
                     x.rec({"ev": "pause", "reason": "/invoflatten"})
                     x.pm.flatten("flatten")
-                return self.ui.send(f"🛑 🧾 <b>Invo flattened</b>: {n} trade(s) closed in the Invo wallets (the arena's "
-                                    "too). ⏸️ Invo copies "
-                                    "paused · /invoresume to continue.")
+                return self.ui.send(f"🛑 🧾 <b>Invo flattened</b>: {n} trade(s) closed in the Invo wallets. ⏸️ Invo "
+                                    "copies paused · /invoresume to continue.")
             n_open = sum(len(x.st.positions) for x in self.invo_wallets())
             if n_open:
                 return self.ui.send(f"⛔ 🧾 <b>Invo reset refused</b>: {n_open} open trade(s). Wait for them to close, "
@@ -681,43 +387,18 @@ class Bot:
                          f"<code>{cardfmt.esc(where)}</code>.\n🔄 Restarting… back in about 15 seconds.")
             self.restart_at = time.time() + 3
             return
-        if c.name in ("/invo", "/invotrades", "/invotraders", "/invowallets"):
-            key = {"/invo": "invo:status", "/invotrades": "invo:trades", "/invotraders": "invo:traders",
+        if c.name in ("/invostatus", "/invotrades", "/invotraders", "/invowallets"):
+            key = {"/invostatus": "invo:status", "/invotrades": "invo:trades", "/invotraders": "invo:traders",
                    "/invowallets": "invo:wallets"}[c.name]
             self.live_cards.add(key)
             self.last_body.pop(key, None)
             return self.ui.set_card(key, self.render_card(key, self.health(), now_ms()), new=True)
         if c.name in ("/invoblock", "/invounblock"):
             return self.invo_block(c)
-        if c.name == "/invoarena":
-            if not self.cfg.invo.arena:
-                return self.ui.send("🏟️ The arena is off (arena = true in config/invo.toml, then /restart).")
-            self.ui.send(arena.card(self.arena_res, self.arena_view(), now_ms(), self.cfg.discord.utc_offset_hours)
-                         + ("\n⏳ Updating now (after the Invo search)." if self.arena_busy else ""))
-            nxt = (self.arena_res or {}).get("next") or []
-            if self.arena_live and nxt and not arena.same_groups(self.arena_live, nxt) \
-                    and not any(a["kind"] == "arena_switch" for a in self.asks.values()):
-                # the live groups stay until the owner switches them (owner choice 2026-10-20)
-                n_open = sum(len(w.st.positions) for w in self.arena_wallets())
-                self.ask({"kind": "arena_switch", "groups": nxt},
-                         "❓ 🏟️ <b>Switch the arena's live groups to the backtest's best now?</b>\n"
-                         + "\n".join(f"• {cardfmt.esc(g['label'])}: {cardfmt.esc(', '.join(g['picks']))}" for g in nxt)
-                         + f"\nThe {len(self.arena_wallets())} arena wallets start again at "
-                           f"{cardfmt.fusd(self.cfg.risk.start_equity, sign=False)} each (the old ones are archived)"
-                         + (f"; their {n_open} open copies are closed now." if n_open else "."),
-                         [("yes", "🔄 Switch", 1), ("no", "✋ Keep the live groups", 2)])
-            return
         name = c.arg.strip().lstrip("@")
         if not re.fullmatch(r"[A-Za-z0-9_.]{2,40}", name):
             return self.ui.send(f"Usage: {c.name} &lt;Invo username&gt; (as in app.invoapp.com/&lt;username&gt;)")
         leader = INVO + name.lower()
-        if c.name == "/invoadd":
-            if self.invo_search is None:
-                return self.ui.send("🧾 The Invo search is off (search = true in config/invo.toml, then /restart): use "
-                                    f"/invofollow {cardfmt.esc(name)} to follow without the rules.")
-            self.invo_search.add_q.put(name.lower())
-            return self.ui.send(f"🔎 🧾 Checking @{cardfmt.esc(name)} with the strict rules now (its call history, about "
-                                "a minute); I will follow it if it passes and a slot is free.")
         if c.name == "/invounfollow":
             if leader not in w.st.followed:
                 return self.ui.send(f"🧾 @{cardfmt.esc(name)} is not followed.")
@@ -728,26 +409,16 @@ class Bot:
             return self.ui.send(f"➖ 🧾 <b>Unfollowed</b> @{cardfmt.esc(name)}"
                                 + (f" · {held} open copy still managed until its stop or its close" if held else ""))
         if leader in w.st.followed:
-            if leader not in w.st.picked:
-                w.rec({"ev": "pick", "leader": leader})
-                return self.ui.send(f"✅ 🧾 @{cardfmt.esc(name)} is already followed, and is now your pick: the search "
-                                    "will not drop it, and every portfolio of it is copied, whatever the rules say; "
-                                    f"/invoblock {cardfmt.esc(name)} &lt;portfolio&gt; stops one.")
-            return self.ui.send(f"✅ 🧾 @{cardfmt.esc(name)} is already followed (your pick: every portfolio is copied "
-                                "unless you /invoblock it).")
+            return self.ui.send(f"✅ 🧾 @{cardfmt.esc(name)} is already followed (every portfolio is copied unless you "
+                                "/invoblock it).")
         if len(w.st.followed) >= self.cfg.invo.max_traders:
             return self.ui.send(f"⛔ 🧾 Already following {len(w.st.followed)} Invo traders (the maximum): "
                                 "/invounfollow one first.")
-        w.rec({"ev": "follow", "leader": leader, "picked": True})   # the owner's pick: the search never drops it
+        w.rec({"ev": "follow", "leader": leader, "picked": True})
         self.sync_invo_extras()
-        if self.invo_search is not None:           # judge its portfolios one by one now (owner request 2026-10-12)
-            self.invo_search.add_q.put((name.lower(), True))
-        self.ui.send(f"➕ 🧾 <b>Following</b> @{cardfmt.esc(name)} on Invo (your pick: the search never drops it) · "
-                     "calls they open from now on are copied in every Invo wallet (/invowallets compares them). "
-                     "Calls already open are not copied."
-                     + f" Every portfolio of it is copied, whatever the rules say; /invoblock {cardfmt.esc(name)} "
-                       "&lt;portfolio&gt; stops one."
-                     + (" (Its portfolios are still scored, for /invotraders.)" if self.invo_search is not None else ""))
+        self.ui.send(f"➕ 🧾 <b>Following</b> @{cardfmt.esc(name)} on Invo · calls they open from now on are copied in "
+                     "every Invo wallet (/invowallets compares them). Calls already open are not copied. Every "
+                     f"portfolio of it is copied; /invoblock {cardfmt.esc(name)} &lt;portfolio&gt; stops one.")
 
     def invo_block(self, c) -> None:
         """/invoblock <user> <portfolio>: stop copying that portfolio of a followed trader (its open copies still follow
@@ -777,9 +448,7 @@ class Bot:
         if p.id not in w.st.blocked.get(leader, {}):
             return self.ui.send(f"🧾 {cardfmt.esc(p.title.strip())} of @{cardfmt.esc(user)} is not blocked.")
         w.rec({"ev": "invo_unblock", "leader": leader, "portfolio": p.id})
-        why = self.invo_skip(user, p)
-        self.ui.send(f"✅ 🧾 <b>Unblocked</b> @{cardfmt.esc(user)} · {cardfmt.esc(p.title.strip())}"
-                     + (f" · still skipped by the portfolio rules: {cardfmt.esc(why)}" if why else ""))
+        self.ui.send(f"✅ 🧾 <b>Unblocked</b> @{cardfmt.esc(user)} · {cardfmt.esc(p.title.strip())}")
 
     def invo_size(self, m, px: float, equity: float) -> float:
         """Invo calls wallet: the trader's exposure (portfolio share x leverage) x invo.size_mult of our equity,
@@ -826,9 +495,7 @@ class Bot:
         if self.invo is None:
             return
         names = {a[len(INVO):] for a in self.invo.st.followed}
-        for g in self.arena_groups:                        # the arena's live groups (owner request 2026-10-20)
-            names |= {a[len(INVO):] for a in g["primary"].st.followed}
-        for w in self.all_invo_wallets():
+        for w in self.invo_wallets():
             names |= {a[len(INVO):] for p in w.st.positions.values() for a in (p.leader, *p.backers)
                       if a.startswith(INVO)}
         if names != self.invo_watched:
@@ -862,7 +529,7 @@ class Bot:
             if coin is not None:
                 open_by.setdefault((coin, 1 if c.long else -1), []).append(c)
         by_id = {c.id: c for c in calls}
-        for w in self.all_invo_wallets():
+        for w in self.invo_wallets():
             # copies this trader backs (agreement, "B"): find its call again, or take the extra size off if it closed
             for p in [p for p in w.st.positions.values() if leader in p.backers]:
                 mine = open_by.get((p.coin, p.side), [])
@@ -991,9 +658,8 @@ class Bot:
         if self.invo is None:
             return
         main = leader in self.invo.st.followed
-        in_arena = any(leader in g["primary"].st.followed for g in self.arena_groups)
-        if not main and not in_arena and (kind == "invo_open" or not any(
-                p.leader == leader or leader in p.backers for w in self.all_invo_wallets()
+        if not main and (kind == "invo_open" or not any(
+                p.leader == leader or leader in p.backers for w in self.invo_wallets()
                 for p in w.st.positions.values())):
             return       # an unfollowed trader: only the exits and resizes of copies we still hold
         coin, fx = self.invo_trade_coin(call.ticker)
@@ -1005,21 +671,16 @@ class Bot:
                      their_stop_pct=round(stop_pct, 2) if stop_pct is not None else "none",
                      their_target_pct=round(target_pct, 2) if target_pct is not None else "none")
             if coin is None:
-                if not main:             # an arena group's trader: not worth a message
-                    return
                 return self.ui.send(f"🧾 Invo · @{cardfmt.esc(trader)} called {cardfmt.esc(call.ticker)}: not on "
                                     "Hyperliquid, not copied.")
         self.sync_invo_extras()
-        wallets = self.all_invo_wallets()
+        wallets = self.invo_wallets()
         if kind == "invo_open":
-            # the watcher lets a call through when ANY wallet set copies its portfolio: the Invo book's own rules
-            # (invo_skip) for its wallets, the portfolios each arena group kept for its own
             port = self.invo_watch.ports.get(call.portfolio_id) if self.invo_watch is not None else None
             why = self.invo_skip(trader, port) if port is not None else None
-            if main and why:
+            if why:
                 log.info("invo_skip", wallet=self.invo.name, trader=trader, coin=coin, why=why)
-            slots = {g["slot"] for g in self.arena_skip(trader, call.portfolio_id)}
-            wallets = [w for w in wallets if (w.arena_slot in slots if hasattr(w, "arena_slot") else why is None)]
+                return
         for w in wallets:
             try:
                 self.invo_one(w, kind, leader, trader, call, new, coin, fx)
@@ -1085,7 +746,7 @@ class Bot:
                     self.invo_info[p.pos_id] = info
                 w.rec({"ev": "invo_link", "pos_id": p.pos_id, "call": call.id, "info": info,
                        "portfolio": call.portfolio_id, "title": title, "live": call.live, "coin": coin,
-                       "gap": round(gap, 4)})   # (the gap measures the arena's delay cost, Bot.invo_gaps)
+                       "gap": round(gap, 4)})
                 if primary:
                     self.invo_card(p, force=True)
             return
@@ -1166,12 +827,6 @@ class Bot:
         self.ui.final_card(key, cardfmt.closed_card(t) + (f"\n{info}" if info else "\n🧾 Invo")
                            + (f"\n🏁 closed by the trader ({cardfmt.esc(why)})" if why else ""))
 
-    def score_dict(self, leader: str) -> dict:
-        return self.scores.get(leader) or self.scorer.scores.get(leader) or {}
-
-    def score_of(self, leader: str) -> float:
-        return float(self.score_dict(leader).get("score", 0.0))
-
     # ---- workers (never touch state: they only enqueue) ---------------------------------------------
     def health_worker(self) -> None:
         rt = self.cfg.runtime
@@ -1191,27 +846,14 @@ class Bot:
             self.stop.wait(1.0)
 
     def sync_worker(self) -> None:
-        rt = self.cfg.runtime
-        last_rec, last_meta, last_values = 0.0, 0.0, 0.0
+        """Hyperliquid's coin list (and its funding rates) once an hour, just after the hour."""
+        last_meta = 0.0
         while not self.stop.is_set():
             try:
                 hour_start = (time.time() // 3600) * 3600
                 if last_meta < hour_start + 5 and time.time() >= hour_start + 5 or time.time() - last_meta > 3600:
                     self.q.put(("meta", self.info.meta(timeout=10), int(time.time() * 1000)))
                     last_meta = time.time()
-                if self.reconcile_now.is_set() or time.time() - last_rec >= rt.reconcile_s:
-                    self.reconcile_now.clear()
-                    last_rec = time.time()
-                    for leader in sorted(self.leaders_with_positions):
-                        self.q.put(("leader_pos", leader, self.info.positions(leader, rt.trading_timeout_s)))
-                if self.cfg.risk.mirror_wallet and self.hyper and time.time() - last_values >= 300:
-                    last_values = time.time()
-                    for leader in sorted(self.st.followed):        # BULK class: never competes with exits
-                        try:
-                            self.leader_value[leader] = (self.info.account(leader, timeout=10).value
-                                                         + self.info.spot_usd(leader, timeout=10))
-                        except Exception as e:
-                            log.warn("leader_value_failed", leader=leader, err=f"{type(e).__name__}"[:60])
             except Exception as e:
                 log.warn("sync_worker", err=f"{type(e).__name__}: {e}"[:200])
             self.stop.wait(1.0)
@@ -1249,7 +891,6 @@ class Bot:
         mids, _ = self.feed.mids()
         self.mids.update(mids)
         # 1. exits first: stops on the latest prices
-        self.pm.check_stops()
         self.on_sides("stops", lambda w: w.pm.check_stops())
         # 2. events from workers
         deadline = time.time() + 0.2
@@ -1261,28 +902,14 @@ class Bot:
             self.handle(item)
             self.mids.update(self.feed.mids()[0])
         self.invo_refresh_watched()     # follows, drops and closes change who the Invo watcher reads
-        # 3. the daily picks report (picks.hour, local time), calendar marks for the loss limits, funding
-        if time.time() - self.started_s > 180 and                 picks.due(self.picks, time.time(), self.cfg.discord.utc_offset_hours, self.cfg.picks.hour):
-            try:
-                self.send_picks(daily=True)
-            except Exception:
-                log.exception("picks_failed")
-                self.picks.data["sent_day"] = picks.local_day(time.time(), self.cfg.discord.utc_offset_hours)
+        # 3. calendar marks for the loss limits
         now = now_ms()
-        eq = self.st.equity(self.mids)
-        for kind, key in (("day", day_key(now)), ("week", week_key(now))):
-            if self.st.marks.get(kind, {}).get("key") != key:
-                if kind == "day" and self.st.marks.get("day") and self.hyper:
-                    self.ui.send(cardfmt.progress_text(self.st, self.mids, self.mids.get("BTC"), now))
-                self.rec({"ev": "mark", "kind": kind, "key": key, "equity": eq})
 
         def marks(w):
             for kind, key in (("day", day_key(now)), ("week", week_key(now))):
                 if w.st.marks.get(kind, {}).get("key") != key:
                     w.rec({"ev": "mark", "kind": kind, "key": key, "equity": w.st.equity(self.mids)})
         self.on_sides("marks", marks)
-        self.leaders_with_positions = self.position_leaders()
-        self.feed.set_users(self.wanted_users())
         if self.ws_down_since and not self.ws_alerted and \
                 time.time() - self.ws_down_since >= self.cfg.runtime.ws_alert_after_s:
             self.ws_alerted = True
@@ -1291,16 +918,8 @@ class Bot:
 
     def handle(self, item) -> None:
         kind = item[0]
-        if kind == "fills":
-            ev, recv = item[1], item[2]
-            if ev.user not in self.wanted_users():
-                return
-            for m in self.det.on_fills(ev.user, ev.fills, snapshot=ev.snapshot):
-                self.pm.on_move(m)                                   # the main wallet always first
-                self.on_sides("move", lambda w: w.pm.on_move(m))
-        elif kind == "leader_pos":
-            self.pm.reconcile(item[1], item[2])
-            self.on_sides("reconcile", lambda w: w.pm.reconcile(item[1], item[2]))
+        if kind == "cmd":
+            self.command(item[1])
         elif kind == "meta":
             assets, at = item[1], item[2]
             self.assets.update(assets)
@@ -1311,9 +930,6 @@ class Bot:
                 except Exception:
                     log.exception("invo_error", kind="invo_baseline")
             hk = hour_key(at)
-            if self.st.marks.get("funding", {}).get("key") != hk and at % 3_600_000 < 600_000:
-                self.pm.apply_funding(self.assets, hk)
-                self.rec({"ev": "mark", "kind": "funding", "key": hk, "equity": self.st.equity(self.mids)})
 
             def funding(w):
                 if w.st.marks.get("funding", {}).get("key") != hk:
@@ -1322,7 +938,6 @@ class Bot:
             if at % 3_600_000 < 600_000:
                 self.on_sides("funding", funding)
         elif kind == "ws_up":
-            self.reconcile_now.set()   # anything missed while disconnected is caught by reconcile
             if item[1] > 1:
                 down = time.time() - self.ws_down_since if self.ws_down_since else 0.0
                 log.warn("ws_reconnected", n=item[1], down_s=round(down, 1))
@@ -1333,8 +948,6 @@ class Bot:
             # Hyperliquid closes it about every 3 h ("Expired") and we reconnect in seconds: no alert for that
             log.warn("ws_down")
             self.ws_down_since = self.ws_down_since or time.time()
-        elif kind == "cmd":
-            self.command(item[1])
         elif kind == "card":
             key, mid = item[1], item[2]
             if mid is None:
@@ -1342,12 +955,6 @@ class Bot:
                     self.rec({"ev": "card_drop", "key": key})
             elif self.st.cards.get(key) != mid:
                 self.rec({"ev": "card", "key": key, "msg_id": mid})
-        elif kind == "ranking":
-            self.on_ranking(item[1], item[2], item[3])
-        elif kind == "searched":
-            self.on_searched(item[1], item[3])
-        elif kind == "added":
-            self.on_added(*item[1:])
         elif kind in ("invo_open", "invo_close", "invo_resize", "invo_replace"):
             try:
                 self.on_invo(kind, item[1], item[2], *item[3:])
@@ -1362,13 +969,6 @@ class Bot:
             self.invo_refresh_watched()
         elif kind == "invo_drop":
             self.invo_drop(item[1], item[2])
-        elif kind == "invo_added":
-            self.on_invo_added(*item[1:])
-        elif kind == "invo_review":
-            self.on_invo_review(*item[1:])
-            self.arena_start()
-        elif kind == "arena_done":
-            self.on_arena(item[1])
         elif kind == "invo_unknown":
             self.ui.send(f"⚠️ 🧾 No Invo user called @{cardfmt.esc(item[1])}: /invounfollow {cardfmt.esc(item[1])} and "
                          "check the name (as in app.invoapp.com/&lt;username&gt;).")
@@ -1386,266 +986,8 @@ class Bot:
             else:
                 self.alert(f"Invo login refused ({item[2]}): no new Invo copies until a fresh token is saved in "
                            "INVO_TOKEN_FILE (open copies keep their stops)", key="invo_auth", every_s=3600)
-        elif kind == "review":
-            weekly, n_pre, n_scored, n_el = item[1:]
-            self.ui.send(f"🔎 <b>{'Weekly' if weekly else 'Daily'} review</b> · {n_pre} passed the pre-screen · "
-                         f"{n_scored} fully scored · {n_el} eligible")
-            if weekly:
-                self.ui.send(cardfmt.progress_text(self.st, self.mids, self.mids.get("BTC"), now_ms()))
         elif kind == "alert":
             self.alert(item[1])
-
-    # ---- daily picks (copybot/picks.py) ----------------------------------------------------------------
-    def hyper_book(self, n: int) -> picks.Book:
-        sc = self.scores or self.scorer.scores
-        rank = [a for a in self.ranking if sc.get(a, {}).get("eligible")][:n]
-        es = []
-        for a in rank:
-            s = sc[a]
-            es.append(picks.Entry(a, cardfmt.short(a), s.get("score", 0), (
-                f"{s.get('win_rate', 0) * 100:.0f}% win · PF {min(s.get('profit_factor', 0), 99):.1f} · "
-                f"{s.get('trades', 0)} trades · biggest drop {s.get('max_dd', 0) * 100:.0f}% · "
-                + ("all perps" if s.get("diversified") else "main coins")), f"/hyperadd {a}", a in self.st.followed))
-        gone = {}
-        for a in (self.picks.prev("hyper") or {}).get("ids", []):
-            s = sc.get(a)
-            if s and not s.get("eligible"):
-                gone[a] = "fails: " + ", ".join(r.replace("_", " ") for r in s.get("reasons", [])[:3])
-            elif a in self.ranks:
-                gone[a] = f"still passes, now #{self.ranks[a]}"
-        n_el = sum(1 for s in sc.values() if s.get("eligible"))
-        status = f"{len(sc)} wallets fully scored · {n_el} pass every rule"
-        if self.st.followed:
-            status += f" · you follow {len(self.st.followed)}"
-        return picks.Book("hyper", "🔷 Hyperliquid", es, status, gone)
-
-    def invo_book(self, n: int) -> picks.Book:
-        sc = self.invo_scores
-        rank = [k for _, k in sorted((-v.get("score", 0), k) for k, v in sc.items() if v.get("eligible"))][:n]
-        followed = {a[len(INVO):] for a in self.invo.st.followed} if self.invo else set()
-        es = [picks.Entry(k, "@" + k, sc[k]["score"], self.invo_best_text(sc[k]) + (
-            f"{sc[k].get('win_rate', 0) * 100:.0f}% win · PF {min(sc[k].get('profit_factor', 0), 99):.1f} · "
-            f"{sc[k].get('trades', 0)} calls · typical bet {sc[k].get('exposure', 0) * 100:.0f}% of their "
-            f"portfolio (leverage included) · median hold {sc[k].get('median_hold_min', 0) / 60:.1f} h"),
-            f"/invofollow {k}", k in followed) for k in rank]
-        gone = {}
-        for k in (self.picks.prev("invo") or {}).get("ids", []):
-            s = sc.get(k)
-            if s and not s.get("eligible"):
-                gone[k] = "fails: " + ", ".join(invo_reason(r) for r in s.get("reasons", [])[:3])
-        n_el = sum(1 for s in sc.values() if s.get("eligible"))
-        pr = self.invo_search.progress if self.invo_search else {}
-        if pr.get("phase") == "scoring":
-            status = f"search running: {pr['done']}/{pr['todo']} traders checked"
-        elif pr.get("phase") == "discovering":
-            status = "search running: reading Invo's rankings"
-        else:
-            status = f"{len(sc)} traders checked · {n_el} pass every rule"
-        return picks.Book("invo", "🧾 Invo", es, status, gone)
-
-    @staticmethod
-    def invo_best_text(s: dict) -> str:
-        """"portfolio X (real money, Invo 9.5/10) · 2 of 3 copied · " for a per-portfolio search result."""
-        best = (s.get("by_portfolio") or {}).get(s.get("best_portfolio") or "")
-        if not best:
-            return ""
-        tags = (["real money"] if best.get("kind") == "live" else []) + (
-            [f"Invo {best['invo_score']:.1f}/10"] if best.get("invo_score") is not None else [])
-        return (f"{cardfmt.esc(best.get('title') or 'portfolio')}" + (f" ({', '.join(tags)})" if tags else "")
-                + f" · {s.get('copyable_portfolios', 0)} of {len(s['by_portfolio'])} portfolios copied · ")
-
-    def send_picks(self, daily: bool) -> None:
-        """The picks report, one message per book. Daily: it becomes the baseline the next report compares with."""
-        n = self.cfg.picks.top_n
-        books = [self.hyper_book(n)] if self.hyper else []
-        if self.sol:
-            books.append(self.sol.picks_book(n, self.picks.prev("fomo")))
-        if self.invo is not None:
-            books.append(self.invo_book(n) if self.invo_search else
-                         picks.Book("invo", "🧾 Invo", [], "the Invo search is off (invo.search = false)"))
-        day = picks.local_day(time.time(), self.cfg.discord.utc_offset_hours)
-        for b in books:
-            self.ui.send(picks.render(b, self.picks.prev(b.key), day, n))
-        if daily:
-            self.picks.save_day(day, books)
-        log.info("picks_sent", daily=daily, **{b.key: len(b.entries) for b in books})
-
-    def on_invo_review(self, n_cands: int, scores: dict, fails: dict, scored: list | None = None) -> None:
-        """An Invo search ended. A followed trader read in THIS search whose portfolios have been all skipped
-        `drop_after_fails` searches in a row is proposed for a drop: the owner answers with a button (owner request
-        2026-10-12, after a search dropped every trader). The owner's picks (/invofollow, Keep) are never proposed."""
-        first = not self.invo_reviewed       # (a /invofollow check may have scored one trader already)
-        self.invo_reviewed = True
-        self.invo_scores = scores
-        w = self.invo
-        if w is None:
-            return
-        if first:      # the very first Invo search: show its result now instead of at the next daily report
-            day = picks.local_day(time.time(), self.cfg.discord.utc_offset_hours)
-            self.ui.send(picks.render(self.invo_book(self.cfg.picks.top_n), self.picks.prev("invo"), day,
-                                      self.cfg.picks.top_n))
-        asked = {a.get("name") for a in self.asks.values() if a["kind"] == "drop"}
-        for leader in list(w.st.followed):
-            name = leader[len(INVO):]
-            if leader in w.st.picked or name in asked or name not in (scored if scored is not None else scores):
-                continue
-            if fails.get(name, 0) >= self.cfg.invo.drop_after_fails:
-                why = self.invo_none_copied(scores.get(name) or {})
-                self.ask({"kind": "drop", "name": name},
-                         f"❓ 🧾 <b>Drop @{cardfmt.esc(name)}?</b> None of its portfolios would be copied, "
-                         f"{fails[name]} searches in a row: {cardfmt.esc(why)}. Its open copies keep running either way.",
-                         [("yes", "🗑️ Drop", 4), ("no", "✅ Keep (my pick)", 3)])
-        if self.invo_search_pending:
-            self.invo_search_pending = False
-            self.invo_repick(n_cands)
-
-    def arena_start(self) -> None:
-        """The arena (copybot/arena.py) on its own thread after an Invo search: the backtest of every group x size x
-        stop, the best groups now and the replay of the live ones. It reads only the calls the search saved and cached
-        Hyperliquid prices; the result comes back as ("arena_done", result or None). The delay cost is measured on
-        the Invo book's real copies (invo_gaps)."""
-        if self.invo is None or not self.cfg.invo.arena or self.arena_busy:
-            return
-        self.arena_busy = True
-        follows = sorted(a[len(INVO):] for a in self.invo.st.followed)
-        c = self.cfg.invo
-        delay = arena.delay_cost(self.invo_gaps(), c.arena_delay_bps, c.arena_delay_margin_bps)
-        params = arena.Params.of(self.cfg, self.scorer.params.cost_bps, delay)
-        live = self.arena_live
-
-        def work() -> None:
-            res = None
-            try:
-                res = arena.run(self.data / "cache", self.data / "arena", self.invo_trade_coin, self.scorer.candles,
-                                params, now_ms(), follows, funding_of=self.scorer.funding, live=live, delay=delay,
-                                groups=c.arena_groups)
-            except Exception:
-                log.exception("arena_failed")
-            self.q.put(("arena_done", res))
-        threading.Thread(target=work, name="arena", daemon=True).start()
-
-    def on_arena(self, res: dict | None) -> None:
-        """An arena run ended. No live groups yet: the best ones start copying now (owner request 2026-10-20: "get
-        the best ones from the backtest and we use them for live"); later ones only change on the owner's click."""
-        self.arena_busy = False
-        if res is None:
-            return
-        self.arena_res = res
-        bt = res.get("backtest") or {}
-        d = res.get("delay") or {}
-        log.info("arena_done", traders=bt.get("traders", 0), windows=len(bt.get("starts") or []),
-                 groups=len(res.get("next") or []), delay_bps=d.get("bps"), delay_measured=d.get("measured"))
-        nxt = (res.get("next") or [])[:self.cfg.invo.arena_groups]
-        if self.arena_live is None and nxt and self.cfg.invo.arena_groups > 0:
-            self.arena_live = arena.new_live(nxt, now_ms())
-            arena.save_live(self.data / "arena", self.arena_live)
-            self.arena_build(self.arena_live)
-            self.invo_refresh_watched()
-            self.ui.send(f"🏁 <b>Arena live</b>: the backtest's {len(nxt)} best groups now copy their traders' new "
-                         f"calls, each in {len(self.arena_groups[0]['wallets'])} wallets (every size × stop, "
-                         f"{cardfmt.fusd(self.cfg.risk.start_equity, sign=False)} each, paper). They stay until you "
-                         "switch them (/arena).\n"
-                         + arena.card(res, self.arena_view(), now_ms(), self.cfg.discord.utc_offset_hours))
-
-    def on_invo_added(self, name: str, s: dict | None, quiet: bool = False) -> None:
-        """/invoadd result: follow at once if it passes every rule and a slot is free, else say why not. `quiet`
-        (after /invofollow): only record it and say which of its portfolios are copied."""
-        w, who = self.invo, f"@{cardfmt.esc(name)}"
-        if quiet:
-            if s is not None:
-                self.invo_scores = {**self.invo_scores, name: s}
-                per = s.get("by_portfolio") or {}
-                yes = [x["title"] or "portfolio" for x in per.values() if x.get("copy")]
-                return self.ui.send(f"🧾 {who}: " + (f"copying {', '.join(cardfmt.esc(t) for t in yes)}" if yes else
-                                    "no portfolio passes the rules, so nothing is copied for now")
-                                    + f" ({len(per)} with calls checked).")
-            return
-
-        if s is None:
-            return self.ui.send(f"⚠️ 🧾 /invoadd {who}: no Invo user by that name, or its calls could not be read.")
-        self.invo_scores = {**self.invo_scores, name: s}
-        if not s.get("eligible"):
-            why = ", ".join(invo_reason(r) for r in s.get("reasons", [])[:4])
-            return self.ui.send(f"❌ 🧾 /invoadd {who} fails the strict rules: {cardfmt.esc(why)}. Not followed "
-                                f"(/invofollow {cardfmt.esc(name)} follows it anyway).")
-        leader = INVO + name
-        if leader in w.st.followed:
-            if leader in w.st.paused_leaders:
-                w.rec({"ev": "follow", "leader": leader})
-                self.sync_invo_extras()
-                return self.ui.send(f"▶️ 🧾 /invoadd {who} passes ({s['score']:.0f}/100): its pause is lifted.")
-            return self.ui.send(f"✅ 🧾 /invoadd {who} passes ({s['score']:.0f}/100) and is already followed.")
-        if len(w.st.followed) >= self.cfg.invo.max_traders:
-            return self.ui.send(f"✅ 🧾 /invoadd {who} passes ({s['score']:.0f}/100), but you already follow "
-                                f"{len(w.st.followed)}: /invounfollow one first.")
-        w.rec({"ev": "follow", "leader": leader})
-        self.sync_invo_extras()
-        self.ui.send(f"➕ 🧾 <b>Following</b> {who} · passes every rule ({s['score']:.0f}/100, "
-                     f"{s.get('win_rate', 0) * 100:.0f}% win, PF {min(s.get('profit_factor', 0), 99):.1f}, "
-                     f"{s.get('trades', 0)} calls). Calls it opens from now on are copied.")
-
-    def invo_none_copied(self, s: dict) -> str:
-        """Why none of a trader's portfolios is copied, in a few words per portfolio."""
-        out = []
-        for x in (s.get("by_portfolio") or {}).values():
-            hard = copy_blockers(x.get("reasons"))
-            why = (", ".join(invo_reason(r) for r in hard[:2]) if hard else
-                   "not active" if not x.get("active") else "below your floors or blocked")
-            out.append(f"{(x.get('title') or 'portfolio')[:24]}: {why}")
-        return "; ".join(out[:4]) or "no portfolio with calls"
-
-    # ---- questions answered with a button ----------------------------------------------------------
-    def ask(self, what: dict, text: str, buttons: list[tuple[str, str, int]]) -> None:
-        """Post a question with buttons (answer id, label, Discord style); the click comes back as /button."""
-        aid = uuid.uuid4().hex[:10]
-        self.asks[aid] = {**what, "text": text}
-        self.ui.set_card(f"ask:{aid}", text, buttons=[(f"ask:{aid}:{a}", label, st) for a, label, st in buttons])
-
-    def on_button(self, cid: str) -> None:
-        _, aid, ans = (cid.split(":") + ["", ""])[:3]
-        a = self.asks.pop(aid, None)
-        if a is None:
-            return self.ui.send("⌛ That question is no longer open (answered already, or the bot restarted since); "
-                                "the next search asks again if it still applies.")
-        key = f"ask:{aid}"
-        w = self.invo
-        if a["kind"] == "drop":
-            name, leader = a["name"], INVO + a["name"]
-            if w is None or leader not in w.st.followed:
-                return self.ui.final_card(key, a["text"] + "\n➖ Not followed any more: nothing to do.")
-            if ans == "yes":
-                held = sum(1 for p in w.st.positions.values() if p.leader == leader)
-                w.rec({"ev": "unfollow", "leader": leader, "reason": "dropped by you after failed searches"})
-                self.sync_invo_extras()
-                self.invo_watch.forget(name)
-                return self.ui.final_card(key, a["text"] + f"\n➖ <b>Dropped</b> @{cardfmt.esc(name)}"
-                                          + (f" · {held} open copy still managed" if held else "")
-                                          + f" · /invofollow {cardfmt.esc(name)} brings it back")
-            w.rec({"ev": "pick", "leader": leader})
-            return self.ui.final_card(key, a["text"] + f"\n✅ <b>Kept</b> @{cardfmt.esc(name)} as your pick: the search "
-                                      "will not ask about it again (/invounfollow drops it).")
-        if a["kind"] == "arena_switch":
-            if ans != "yes" or self.invo is None:
-                return self.ui.final_card(key, a["text"] + "\n✋ Kept the live groups.")
-            done = self.arena_switch(a["groups"])
-            return self.ui.final_card(key, a["text"] + "\n🔄 <b>Switched</b>: "
-                                      + ", ".join(f"G{g['slot']}" for g in self.arena_live["groups"])
-                                      + " copy from now on" + (f" · {done}" if done else ""))
-        if a["kind"] == "repick":
-            if ans != "yes":
-                return self.ui.final_card(key, a["text"] + "\n❌ Kept your Invo traders as they are.")
-            joins = [n for n in a["joins"] if INVO + n not in w.st.followed]
-            drops = [n for n in a["drops"] if INVO + n in w.st.followed and INVO + n not in w.st.picked]
-            for name in drops:
-                w.rec({"ev": "unfollow", "leader": INVO + name, "reason": "not in the best of /invosearch"})
-                self.invo_watch.forget(name)
-            room = self.cfg.invo.max_traders - len(w.st.followed)
-            for name in joins[:max(room, 0)]:
-                w.rec({"ev": "follow", "leader": INVO + name})
-            self.sync_invo_extras()
-            return self.ui.final_card(key, a["text"] + "\n✅ <b>Done</b>: " + (
-                ", ".join([f"➕ @{cardfmt.esc(n)}" for n in joins[:max(room, 0)]]
-                          + [f"➖ @{cardfmt.esc(n)}" for n in drops]) or "nothing left to change"))
 
     def invo_drop(self, leader: str, why: str) -> None:
         """The Invo wallet's copies of this trader hit the leader pause rules (copy drawdown or losing streak, as for
@@ -1662,154 +1004,9 @@ class Bot:
                      + (f" · {held} open copy still managed" if held else "")
                      + f" · /invofollow {cardfmt.esc(name)} brings it back")
 
-    def invo_repick(self, n_cands: int) -> None:
-        """/invosearch finished: PROPOSE following the best that pass every rule (up to `invo.max_traders` with the
-        owner's picks, which always stay) and dropping the other followed ones; the owner applies it with a button
-        (owner request 2026-10-12). Their open copies keep running until they close. Nobody passing changes nothing."""
-        w, sc = self.invo, self.invo_scores
-        picks_ = {a[len(INVO):] for a in w.st.picked if a in w.st.followed}
-        best = [k for _, k in sorted((-v.get("score", 0), k) for k, v in sc.items() if v.get("eligible"))]
-        best = [k for k in best if k not in picks_][: max(self.cfg.invo.max_traders - len(picks_), 0)]
-        if not best:
-            return self.ui.send(f"🔎 🧾 <b>Invo search finished</b> · {n_cands} traders checked, nobody passes every "
-                                "rule: keeping your current Invo traders.")
-        now = {a[len(INVO):] for a in w.st.followed}
-        drops, joins = sorted(now - set(best) - picks_), [k for k in best if k not in now]
-        head = (f"🔎 🧾 <b>Invo search finished</b> · {n_cands} traders checked · the best that pass every rule: "
-                + ", ".join(f"@{cardfmt.esc(k)} ({sc[k]['score']:.0f})" for k in best))
-        if not joins and not drops:
-            return self.ui.send(head + "\nYou already follow them: nothing to change.")
-        self.ask({"kind": "repick", "joins": joins, "drops": drops},
-                 head + (f"\n➕ follow: {', '.join('@' + cardfmt.esc(k) for k in joins)}" if joins else "")
-                 + (f"\n➖ drop: {', '.join('@' + cardfmt.esc(k) for k in drops)} (open copies run until they close)"
-                    if drops else "") + ("\nYour picks stay." if picks_ else "") + "\n<b>Apply?</b>",
-                 [("yes", "✅ Apply", 3), ("no", "❌ Keep as is", 2)])
-
-    # ---- selection ----------------------------------------------------------------------------------
-    def on_ranking(self, ranking: list[str], n_scored: int, scores: dict) -> None:
-        self.ranking = list(ranking)
-        self.ranks = {a: i + 1 for i, a in enumerate(ranking)}
-        self.scores = scores
-        now = now_ms()
-        if now - int(self.st.sel.get("at", 0)) < self.cfg.selection.rescore_minutes * 60_000 * 0.9:
-            return   # a ranking re-published right after a restart is not a new cycle
-        plan = select(self.st.sel, ranking, self.st.followed, set(self.st.paused_leaders), self.st.dropped, now, self.cfg,
-                      keep=self.st.picked)
-        self.apply_plan(plan)
-        self.rec({"ev": "sel", "state": plan.state})
-        if not ranking and self.cfg.selection.auto_follow:     # report-only (default): the daily picks say it
-            self.alert("no eligible wallet this cycle: following nobody new", key="no_eligible", every_s=6 * 3600)
-
-    def on_searched(self, ranking: list[str], scores: dict) -> None:
-        """The /search review finished: re-pick the best traders with what it found."""
-        self.ranking, self.scores = list(ranking), scores
-        self.ranks = {a: i + 1 for i, a in enumerate(ranking)}
-        if not self.search_pending:
-            return
-        self.search_pending = False
-        if not ranking:
-            self.ui.send("🔎 <b>Search finished</b> · no eligible wallet found: keeping your current traders.")
-            return
-        self.repick("🔎 <b>Search finished</b>")
-
-    def on_added(self, a: str, screened: dict | None, score: dict | None, ranking: list[str], scores: dict) -> None:
-        """/hyperadd result: follow at once if it passes every rule and a slot is free, else say why not."""
-        self.ranking, self.scores = list(ranking), scores
-        self.ranks = {x: i + 1 for i, x in enumerate(ranking)}
-        who = f"<code>{cardfmt.short(a)}</code>"
-        if screened is None:
-            self.ui.send(f"⚠️ /hyperadd {who}: could not read its trades from Hyperliquid. Try again in a minute.")
-        elif not screened.get("ok"):
-            self.ui.send(f"❌ /hyperadd {who} did not pass the first check: {cardfmt.esc(screened.get('reason', '?'))}. "
-                         "Not followed.")
-        elif not score or not score.get("eligible"):
-            why = ", ".join((score or {}).get("reasons") or ["not scored"])
-            self.ui.send(f"❌ /hyperadd {who} fails the strict rules: {cardfmt.esc(why)}. Not followed.")
-        elif a in self.st.paused_leaders:          # no blacklist: the owner's re-add lifts the pause
-            self.rec({"ev": "follow", "leader": a, "rank": self.ranks.get(a)})
-            self.sync_sides()
-            self.ui.send(f"▶️ /hyperadd {who} passes ({score.get('score', 0):.0f}/100): its pause is lifted, copying "
-                         "again.")
-        elif a in self.st.followed:
-            self.ui.send(f"✅ /hyperadd {who} passes ({score.get('score', 0):.0f}/100) and is already followed.")
-        elif len(self.st.followed) >= self.cfg.risk.max_leaders:
-            self.ui.send(f"✅ /hyperadd {who} passes ({score.get('score', 0):.0f}/100), but you already follow "
-                         f"{len(self.st.followed)}. It is in the ranking now: /hypersearch re-picks the best.")
-        else:
-            self.apply_plan(Plan([a], [], {}))
-
-    def repick(self, title: str) -> None:
-        plan = rebalance(self.ranking, self.st.followed, set(self.st.paused_leaders), self.st.dropped, now_ms(),
-                         self.cfg, keep=self.st.picked)
-        if not plan.joins and not plan.drops:
-            self.ui.send(f"{title} · no change: you already follow the best {len(self.st.followed)} "
-                         f"({len(self.ranking)} eligible).")
-            return
-        self.ui.send(f"{title} · following {len(plan.joins)} new, dropping {len(plan.drops)}.")
-        self.apply_plan(plan)
-
-    def apply_plan(self, plan: Plan) -> None:
-        scores = self.scores
-        for a, why in plan.drops:
-            self.rec({"ev": "unfollow", "leader": a, "reason": why})
-            held = sum(1 for p in self.st.positions.values() if p.leader == a)
-            log.info("leader_dropped", leader=a, reason=why, open_copies=held)
-            self.ui.send(f"➖ <b>Dropped</b> <code>{cardfmt.short(a)}</code> · {cardfmt.esc(why)}"
-                         + (f" · {held} copy still managed until exit" if held else ""))
-        for a in plan.joins:
-            self.rec({"ev": "follow", "leader": a, "rank": self.ranks.get(a)})
-            s = scores.get(a, {})
-            log.info("leader_followed", leader=a, rank=self.ranks.get(a), score=s.get("score"))
-            self.ui.send(f"➕ <b>Following</b> <code>{cardfmt.short(a)}</code> · rank #{self.ranks.get(a)}\n" + cardfmt.pre([
-                ("Score", f"{s.get('score', 0):.0f}/100"),
-                ("Coins", "all perps 🎲 (diversified)" if s.get("diversified") else "main coins"),
-                ("Trades", str(s.get("trades", "-"))),
-                ("Win", f"{s.get('win_rate', 0) * 100:.0f}%"),
-                ("PF", cardfmt.pf_text(s.get("profit_factor", 0))),
-                ("Avg per trade", f"{s.get('copy_edge_bps', 0) / 100:+.2f}% after our costs"),
-                ("Biggest drop", f"{s.get('max_dd', 0) * 100:.0f}%"),
-            ]))
-        self.sync_sides()
-        self.scorer.focus = set(self.st.followed)
-
-    # ---- notifications from the position manager -----------------------------------------------------
-    def on_notify(self, kind: str, **kw) -> None:
-        if kind in ("opened", "updated"):
-            p = self.st.positions.get(kw["coin"])
-            if p:
-                self.card_for(p, force=True)
-        elif kind == "closed":
-            t = kw["trade"]
-            key = f"pos:{t['pos_id']}"
-            self.last_body.pop(key, None)
-            self.ui.final_card(key, cardfmt.closed_card(t))
-        elif kind == "consensus":
-            p = self.st.positions.get(kw["coin"])
-            if p:
-                self.card_for(p, force=True)
-                extra = f"+{cardfmt.fusd(kw['size'] * p.entry_px, sign=False)} size" if kw["size"] else "no extra size"
-                self.ui.send(f"🤝 <b>{cardfmt.esc(p.coin)}</b> {cardfmt.side_tag(p.side)} · "
-                             f"<code>{cardfmt.short(kw['leader'])}</code> agrees with <code>{cardfmt.short(p.leader)}</code>"
-                             f" · {extra}")
-        elif kind == "handover":
-            p = self.st.positions.get(kw["coin"])
-            if p:
-                self.card_for(p, force=True)
-            self.ui.send(f"🔁 <b>{cardfmt.esc(kw['coin'])}</b> kept: <code>{cardfmt.short(kw['prev'])}</code> exited, "
-                         f"<code>{cardfmt.short(kw['leader'])}</code> still holds and now leads the copy")
-        elif kind == "conflict":
-            self.ui.send(f"⚔️ <b>{cardfmt.esc(kw['coin'])}</b> conflict: switching to <code>{cardfmt.short(kw['leader'])}</code>"
-                         f" (score {kw['score']:.0f}) over <code>{cardfmt.short(kw['holder'])}</code>"
-                         f" (score {kw['holder_score']:.0f})")
-        elif kind == "leader_paused":
-            self.sync_sides()
-            self.ui.send(f"⏸️ <b>Leader paused</b> <code>{cardfmt.short(kw['leader'])}</code> · "
-                         f"{cardfmt.esc(kw['reason'])}\nNo new copies from it; open copies keep mirroring exits.")
-
-    def card_for(self, p, force: bool = False, prefix: str = "pos:", extra: str = "", fmt=None) -> None:
+    def card_for(self, p, force: bool, prefix: str, extra: str, fmt) -> None:
         key = f"{prefix}{p.pos_id}"
         mark = self.mids.get(p.coin)
-        fmt = fmt or cardfmt.trade_card
         body = fmt(p, mark, 0) + extra
         if not force and self.last_body.get(key) == body:
             return   # nothing changed: no edit (the time stamp alone is not a change)
@@ -1824,8 +1021,6 @@ class Bot:
                       fmt=cardfmt.invo_trade_card)
 
     def refresh_ui(self) -> None:
-        for p in list(self.st.positions.values()):
-            self.card_for(p)
         if self.invo is not None:
             for p in list(self.invo.st.positions.values()):
                 self.invo_card(p)
@@ -1838,7 +1033,7 @@ class Bot:
                 self.ui.set_card(key, self.render_card(key, h, now_ms()))
 
     def render_card(self, key: str, h, now: float) -> str:
-        if key.startswith("invo:") and self.invo is not None:
+        if self.invo is not None:
             w = self.invo
             if key == "invo:wallets":
                 return cardfmt.invo_wallets_card([(x.size_label, x.stop_label, x.st) for x in self.invo_wallets()],
@@ -1846,149 +1041,20 @@ class Bot:
             if key == "invo:trades":
                 return cardfmt.trades_card(w.st, self.mids, now, title="🧾 <b>Invo trades</b>", infos=self.invo_info)
             if key == "invo:traders":
-                return cardfmt.traders_card(w.st, self.mids, {}, {}, now, title="🧾 <b>Invo traders</b>",
-                                          extra=self.invo_record_rows())
+                return cardfmt.traders_card(w.st, self.mids, now, extra=self.invo_record_rows())
             return cardfmt.invo_text(w.st, self.mids, self.invo_watch, now)
-        if key == "status":
-            return cardfmt.status_card(self.st, self.mids, h, now, self.mids.get("BTC"))
-        if key == "trades":
-            return cardfmt.trades_card(self.st, self.mids, now)
-        if key == "traders":
-            return cardfmt.traders_card(self.st, self.mids, self.ranks, self.scores, now)
-        if key == "wallets":
-            return cardfmt.wallets_card([(self.cfg.risk.risk_per_trade_pct, self.st, True)]
-                                      + [(w.risk_pct, w.st, False, w.label) for w in self.sides if not w.own_leaders],
-                                      self.mids, now)
-        return cardfmt.leaders_card(self.st, self.ranks, now, self.scores)
+        return "🧾 Invo is off: set INVO_TOKEN_FILE to the bot's Invo login file, then restart."
 
     # ---- commands ------------------------------------------------------------------------------------
     def command(self, c) -> None:
-        now = now_ms()
-        if c.name == "/button":               # a click on a question's button (DiscordUI, owner only)
-            return self.on_button(c.arg)
-        if c.name.startswith("/fomo"):
-            if self.sol:
-                self.sol.q.put(("cmd", c))
-            else:
-                self.ui.send("🪙 FOMO is off: set enabled = true in config/sol.toml, then restart.")
-            return
+        """Every accepted name is canonical here (chat.canon): /invo<verb>, /help or /restart."""
         if c.name.startswith("/invo"):
             return self.invo_command(c)
-        if c.name == "/help" and not self.hyper and not self.sol:
-            return self.ui.send(INVO_HELP)
-        if c.name == "/help":
-            return self.ui.send(HELP + ("" if self.hyper else "\n\n⚡ Hyperliquid is off (enabled = true in "
-                                        "config/selection.toml, then restart)")
-                                + ("" if self.sol else ("\n" if not self.hyper else "\n\n") + "🪙 FOMO is off (enabled = true in config/sol.toml, then "
-                                   "restart)"))
-        if not self.hyper and c.name not in ("/picks", "/restart", "/flatten"):
-            return self.ui.send("⚡ The Hyperliquid book is off: only Invo runs. To turn it back on: "
-                                "enabled = true in config/selection.toml, then /restart.")
-        if c.name in ("/status", "/trades", "/traders", "/wallets"):
-            key = c.name[1:]
-            self.live_cards.add(key)
-            self.last_body.pop(key, None)
-            self.ui.set_card(key, self.render_card(key, self.health(), now), new=True)
-        elif c.name == "/progress":
-            self.ui.send(cardfmt.progress_text(self.st, self.mids, self.mids.get("BTC"), now))
-        elif c.name == "/pause":
-            self.rec({"ev": "pause", "reason": "/pause"})
-            self.on_sides("pause", lambda w: w.rec({"ev": "pause", "reason": "/pause"}))
-            self.ui.send("⏸️ <b>Entries paused.</b> Exits and stops keep running. /hyperresume to continue.")
-        elif c.name == "/resume":
-            if self.st.uncertain:
-                self.rec({"ev": "ack", "items": list(self.st.uncertain)})
-            self.rec({"ev": "resume"})
-
-            def resume(w):
-                if w.st.uncertain:
-                    w.rec({"ev": "ack", "items": list(w.st.uncertain)})
-                w.rec({"ev": "resume"})
-            self.on_sides("resume", resume)
-            self.ui.send("▶️ <b>Entries resumed</b> (every Hyperliquid wallet).")
-        elif c.name == "/search":
-            if not self.ranking:
-                self.ui.send("🔎 The ranking is not ready yet (the bot just started). Try again in a minute.")
-                return
-            self.repick("🔎 <b>Search</b> · re-picked from the wallets checked so far")
-            self.search_pending = True
-            self.scorer.search_req.set()
-            self.ui.send("🔎 Checking for new wallets in the background; I will re-pick again when it finishes.")
-        elif c.name in ("/follow", "/unfollow"):
-            self.hyper_follow(c)
-        elif c.name == "/add":
-            a = c.arg.strip()
-            if not re.fullmatch(r"0x[0-9a-fA-F]{40}", a):
-                self.ui.send("Usage: /hyperadd 0x… (a Hyperliquid wallet address, 0x and 40 hex characters)")
-                return
-            self.scorer.add_q.put(a.lower())
-            self.ui.send(f"🔎 Checking <code>{cardfmt.short(a.lower())}</code> with the strict rules now (about a "
-                         "minute); I will follow it if it passes and a slot is free.")
-        elif c.name == "/picks":
-            self.send_picks(daily=False)
-        elif c.name == "/restart":
+        if c.name == "/restart":
             self.ui.send("🔄 <b>Restarting</b>… back in about 15 seconds.")
             self.restart_at = time.time() + 3
-        elif c.name == "/reset":
-            if not self.ui.check_pin(c.arg):
-                log.warn("reset_bad_pin")
-                self.ui.send("⛔ Wrong or missing PIN. Usage: /hyperreset &lt;PIN&gt;")
-                return
-            wallets = [self.st, *(w.st for w in self.sides if not w.own_leaders)]
-            n_open = sum(len(st.positions) for st in wallets)
-            if n_open:
-                self.ui.send(f"⛔ <b>Reset refused</b>: {n_open} open trade(s). Wait for them to close, or "
-                             f"/hyperflatten &lt;PIN&gt; first.")
-                return
-            where = self.reset_wallets()
-            self.ui.send(f"♻️ <b>Reset done</b> · every Hyperliquid wallet is back to "
-                         f"{cardfmt.fusd(self.cfg.risk.start_equity, sign=False)}, traders kept. Old history saved in "
-                         f"<code>{cardfmt.esc(where)}</code>.\n🔄 Restarting… back in about 15 seconds.")
-            self.restart_at = time.time() + 3
-        elif c.name == "/flatten":
-            if not self.ui.check_pin(c.arg):
-                log.warn("flatten_bad_pin")
-                self.ui.send("⛔ Wrong or missing PIN. Usage: /hyperflatten &lt;PIN&gt;")
-                return
-            n = len(self.st.positions)
-            self.rec({"ev": "pause", "reason": "/flatten"})
-            self.pm.flatten("flatten")
-
-            def flatten(w):
-                w.rec({"ev": "pause", "reason": "/flatten"})
-                w.pm.flatten("flatten")
-            self.on_sides("flatten", flatten)
-            self.ui.send(f"🛑 <b>Flattened</b> {n} position(s) (and every Hyperliquid side wallet). ⏸️ Entries paused · "
-                         f"/hyperresume to continue.")
-
-    def hyper_follow(self, c) -> None:
-        """/hyperfollow 0x… follows a wallet you picked WITHOUT the strict rules (kept through re-ranking and restarts,
-        still paused after a bad streak of copies); /hyperunfollow 0x… stops following one (open copies exit
-        normally). Not a blacklist either way."""
-        a = c.arg.strip().lower()
-        verb = "/hyperfollow" if c.name == "/follow" else "/hyperunfollow"
-        if not re.fullmatch(r"0x[0-9a-f]{40}", a):
-            return self.ui.send(f"Usage: {verb} 0x… (a Hyperliquid wallet address, 0x and 40 hex characters)")
-        who = f"<code>{cardfmt.short(a)}</code>"
-        if c.name == "/unfollow":
-            if a not in self.st.followed:
-                return self.ui.send(f"{who} is not followed.")
-            held = sum(1 for p in self.st.positions.values() if p.leader == a)
-            self.rec({"ev": "unfollow", "leader": a, "reason": "/hyperunfollow"})
-            self.sync_sides()
-            self.scorer.focus = set(self.st.followed)
-            return self.ui.send(f"➖ <b>Unfollowed</b> {who}" + (f" · {held} open copy still managed until exit"
-                                                                  if held else ""))
-        if a in self.st.followed and a in self.st.picked and a not in self.st.paused_leaders:
-            return self.ui.send(f"✅ {who} is already followed (your pick).")
-        if a not in self.st.followed and len(self.st.followed) >= self.cfg.risk.max_leaders:
-            return self.ui.send(f"⛔ Already following {len(self.st.followed)} traders (the maximum): /hyperunfollow "
-                                "one first.")
-        self.rec({"ev": "follow", "leader": a, "picked": True})
-        self.sync_sides()
-        self.scorer.focus = set(self.st.followed)
-        self.ui.send(f"➕ <b>Following</b> {who} (your pick, without the strict rules) · its trades from now on are "
-                     "copied; it stays followed through re-ranking, and is only paused after a bad streak of copies.")
+            return
+        self.ui.send(HELP)
 
     def invo_reset(self) -> str:
         """/invoreset: archive the Invo wallets' ledgers and start fresh ones that keep the followed traders. The caller
@@ -2015,50 +1081,17 @@ class Bot:
         log.info("invo_reset", archive=arch.parent.as_posix(), followed=len(follows))
         return arch.parent.as_posix()
 
-    def reset_wallets(self) -> str:
-        """/hyperreset: archive the Hyperliquid ledgers (main + its side wallets; not the Invo wallets) and start fresh
-        ones that keep the followed leaders (with their 'since' and owner picks), pauses, drop cooldowns and selection
-        streaks. Nothing is deleted. The caller restarts the process."""
-        st = self.st
-        seed = [{"ev": "genesis", "equity0": self.cfg.risk.start_equity,
-                 "btc_px0": self.mids.get("BTC") or st.btc_px0}]
-        seed += [{"ev": "unfollow", "leader": a, "reason": "kept across /reset", "ts": t} for a, t in st.dropped.items()]
-        seed += [{"ev": "follow", "leader": a, "ts": t, **({"picked": True} if a in st.picked else {})}
-                 for a, t in st.followed.items()]
-        seed += [{"ev": "leader_pause", "leader": a, "reason": why} for a, why in st.paused_leaders.items()]
-        seed.append({"ev": "sel", "state": st.sel})
-        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
-        arch = self.data / "archive" / f"reset-{stamp}"
-        arch.mkdir(parents=True, exist_ok=True)
-        seed.append({"ev": "note", "text": f"reset; previous history in {arch.as_posix()}"})
-        hl_sides = [w for w in self.sides if not w.own_leaders]
-        for lg in (self.ledger, *(w.ledger for w in hl_sides)):
-            lg.frozen = True       # nothing more is written to the old files before the restart
-            lg.close()
-        shutil.move(str(self.data / "ledger.jsonl"), str(arch / "ledger.jsonl"))
-        for w in hl_sides:
-            d = self.data / "wallets" / w.name
-            if d.exists():
-                (arch / "wallets").mkdir(exist_ok=True)
-                shutil.move(str(d), str(arch / "wallets" / w.name))
-        fresh = Ledger(self.data / "ledger.jsonl")
-        for ev in seed:
-            fresh.append(ev)
-        fresh.close()
-        log.info("reset", archive=arch.as_posix(), followed=len(st.followed))
-        return arch.as_posix()
-
     def heartbeat(self) -> None:
         h = self.health()
-        log.info("heartbeat", equity=round(self.st.equity(self.mids), 2), positions=len(self.st.positions),
-                 followed=len(self.st.followed), paused=self.st.entries_paused, uncertain=len(self.st.uncertain),
-                 trades=len(self.st.closed), mids_age_s=round(h.mids_age_s, 1), feed=h.feed_connected,
+        w = self.invo.st if self.invo is not None else self.st
+        log.info("heartbeat", equity=round(w.equity(self.mids), 2), positions=len(w.positions),
+                 followed=len(w.followed), paused=w.entries_paused, uncertain=len(w.uncertain),
+                 trades=len(w.closed), mids_age_s=round(h.mids_age_s, 1), feed=h.feed_connected,
                  feed_age_s=round(h.feed_age_s, 1), clock_ok=h.clock_ok, clock_offset_ms=round(h.clock_offset_ms),
-                 clock_why=h.clock_why, budget=round(self.budget.tokens), scored=len(self.scorer.scores),
-                 screened=len(self.scorer.screened))
+                 clock_why=h.clock_why, budget=round(self.budget.tokens))
 
     def log_lag(self) -> None:
-        lags = self.st.lags_ms
+        lags = self.invo.st.lags_ms if self.invo is not None else []
         if lags:
             log.info("lag_stats", n=len(lags), p50_ms=round(statistics.median(lags)),
                      p95_ms=round(cardfmt.pctl(lags, 0.95)))
@@ -2067,9 +1100,6 @@ class Bot:
         self.stop.set()
         self.feed.stop.set()
         self.ui.shutdown()
-        self.scorer.stop.set()
-        if self.sol:
-            self.sol.shutdown()
         self.ledger.close()
         for w in self.sides:
             w.ledger.close()
@@ -2079,7 +1109,7 @@ DEFAULT_INVO_TOKEN = os.path.join("secrets", "invo.token")   # used when INVO_TO
 
 
 def main(argv: list[str] | None = None) -> None:
-    ap = argparse.ArgumentParser(description="Hyperliquid copy-trading bot - PAPER MODE ONLY")
+    ap = argparse.ArgumentParser(description="Invo calls copy-trading bot - PAPER MODE ONLY")
     ap.add_argument("--config", default="config")
     args = ap.parse_args(argv)
     try:
@@ -2087,7 +1117,7 @@ def main(argv: list[str] | None = None) -> None:
     except config.ConfigError as e:
         print(f"config error: {e}", file=sys.stderr)
         raise SystemExit(2)
-    for s in (cfg.pin, cfg.dc_token, cfg.helius_key):
+    for s in (cfg.pin, cfg.dc_token):
         log.add_secret(s)
     log.setup(cfg.runtime.log_dir)
     if not cfg.invo_token_file and os.path.exists(DEFAULT_INVO_TOKEN):

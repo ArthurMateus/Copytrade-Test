@@ -1,7 +1,7 @@
 import pytest
 
 from copybot import hl
-from copybot.detector import Detector
+from tests.detector import Detector
 from copybot.ledger import Ledger
 from tests.fakes import make_fill
 from tests.rig import LEADER, OTHER, Rig
@@ -367,27 +367,6 @@ def test_reconcile_owner_flat_hands_over(rig):
     assert rig.st.positions["BTC"].leader == OTHER
 
 
-def test_only_main_coins_are_copied_but_exits_always_work(rig):
-    rig.leader_trades(LEADER, rig.fill(LEADER, "ETH", 10, "B"))
-    rig.cfg.selection.main_coins = ["BTC"]
-    rig.leader_trades(LEADER, rig.fill(LEADER, "SOL", 10, "B"))
-    assert "SOL" not in rig.st.positions
-    rig.leader_trades(LEADER, rig.fill(LEADER, "ETH", 10, "A"))    # ETH left the list: the exit still runs
-    assert "ETH" not in rig.st.positions
-
-
-def test_diversified_leader_is_copied_outside_the_main_coins(rig):
-    rig.cfg.selection.main_coins = ["BTC"]
-    rig.leader_trades(LEADER, rig.fill(LEADER, "DOGE", 1000, "B"))
-    assert "DOGE" not in rig.st.positions
-    rig.leader_trades(LEADER, rig.fill(LEADER, "DOGE", 1000, "A"))     # leader flat again
-    rig.alts.add(LEADER)                                               # its wallet turns out diversified
-    rig.leader_trades(LEADER, rig.fill(LEADER, "DOGE", 1000, "B"))
-    assert rig.st.positions["DOGE"].leader == LEADER
-    rig.leader_trades(OTHER, rig.fill(OTHER, "DOGE", 1000, "B"))      # OTHER is not diversified: no backer
-    assert not rig.st.positions["DOGE"].backers
-
-
 def test_refused_add_is_skipped_without_error(rig):
     rig.leader_trades(LEADER, rig.fill(LEADER, "ETH", 10, "B"))
     s = rig.st.positions["ETH"].size
@@ -397,15 +376,16 @@ def test_refused_add_is_skipped_without_error(rig):
     assert any(k == "skip" and kw.get("action") == "add" for k, kw in rig.events)
 
 
-# ---- side wallets (same moves, another risk level) --------------------------------------------------------
+# ---- wallets at another risk level (same moves) -----------------------------------------------------------
 def side_rig(rig, risk):
     from copybot.wallets import SideWallet
     w = SideWallet(rig.cfg, risk, rig.path.parent, rig.broker, rig.health, rig.mids, rig.assets,
-                   alts_ok=lambda a: False, score_of=lambda a: 0.0)
+                   name=f"risk_{risk:g}pct", label=f"{risk:g}% risk")
     w.rec({"ev": "genesis", "equity0": 300, "btc_px0": 100_000})
     for kind, key in (("day", "d"), ("week", "w")):
         w.rec({"ev": "mark", "kind": kind, "key": key, "equity": 300})
-    w.sync_leaders(rig.st)
+    for a in rig.st.followed:
+        w.rec({"ev": "follow", "leader": a})
     return w
 
 
@@ -433,17 +413,6 @@ def test_side_wallet_copies_the_same_move_at_its_own_risk(rig):
     assert w.st.closed[-1]["pnl"] == pytest.approx(5 * rig.st.closed[-1]["pnl"], rel=0.15)
     st2 = Ledger(rig.path.parent / "wallets" / "risk_5pct" / "ledger.jsonl").replay()   # restart-safe
     assert st2.closed == w.st.closed and not st2.uncertain
-    w.ledger.close()
-
-
-def test_side_wallet_follows_main_pauses_and_drops(rig):
-    w = side_rig(rig, 20.0)
-    rig.rec({"ev": "leader_pause", "leader": LEADER, "reason": "5 consecutive losses"})
-    rig.rec({"ev": "unfollow", "leader": OTHER, "reason": "x"})
-    w.sync_leaders(rig.st)
-    assert LEADER in w.st.paused_leaders and OTHER not in w.st.followed
-    trade_both(rig, w, LEADER, rig.fill(LEADER, "BTC", 1, "B"))
-    assert not w.st.positions and not rig.st.positions
     w.ledger.close()
 
 

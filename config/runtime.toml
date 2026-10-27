@@ -1,7 +1,6 @@
 # Endpoints, folders and timing.
 info_url = "https://api.hyperliquid.xyz/info"
 ws_url = "wss://api.hyperliquid.xyz/ws"
-leaderboard_url = "https://stats-data.hyperliquid.xyz/Mainnet/leaderboard"
 data_dir = "data"             # ledger.jsonl + download cache
 log_dir = "logs"
 tick_s = 0.25                 # trading loop period

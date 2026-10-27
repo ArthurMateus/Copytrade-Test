@@ -7,14 +7,6 @@ from copybot import hl
 from tests.fakes import FakeHL, fixture, make_fill
 
 
-def test_leaderboard_rows_parse():
-    rows = hl.parse_leaderboard(fixture("leaderboard_sample.json"))
-    assert len(rows) >= 200
-    r = rows[0]
-    assert r.address.startswith("0x") and r.address == r.address.lower()
-    assert r.account_value > 0 and r.month.vlm > 0 and r.all_time.vlm >= r.month.vlm
-
-
 def test_fills_parse_and_position_arithmetic():
     fills = hl.parse_fills(fixture("user_fills_full_page.json")["fills"])
     assert len(fills) == 2000
@@ -58,30 +50,9 @@ def test_book_parse():
         hl.parse_book(None)
 
 
-def test_candles_parse():
-    cs = hl.parse_candles(fixture("candle_snapshot_eth_1h.json"))
-    assert len(cs) > 10
-    assert all(c.l <= min(c.o, c.c) <= max(c.o, c.c) <= c.h for c in cs)
-    assert all(b.t - a.t == 3_600_000 for a, b in zip(cs, cs[1:]))
-
-
-def test_hash_coin_candles_answer_500():
-    assert fixture("candle_snapshot_hash_coin_error.json")["status"] == 500
-
-
 def test_clearinghouse_positions_parse():
     pos = hl.parse_positions(fixture("clearinghouse_state.json"))
     assert pos and all(isinstance(v, float) and v != 0 for v in pos.values())
-
-
-def test_clearinghouse_account_parse():
-    raw = fixture("clearinghouse_state.json")
-    acc = hl.parse_account(raw)
-    assert acc.value == float(raw["marginSummary"]["accountValue"])
-    assert {p.coin: p.szi for p in acc.positions} == hl.parse_positions(raw)
-    btc = next(p for p in acc.positions if p.coin == "BTC")
-    assert btc.upnl == 727.086276 and btc.value == 193372.344386
-    assert any(p.upnl < 0 for p in acc.positions)
 
 
 def test_meta_parse():
@@ -115,21 +86,6 @@ def test_fake_responses_match_real_shapes():
         fake.positions["0xa"] = {"ETH": -2.0}
         assert info.positions("0xa", 2) == {"ETH": -2.0}
         assert "BTC" in info.meta()
-    finally:
-        fake.close()
-
-
-def test_fills_paging_inclusive_dedupe_by_tid():
-    fake = FakeHL()
-    try:
-        t0 = 1_700_000_000_000
-        # 4500 fills, with several sharing the page-boundary timestamp
-        fake.fills["0xu"] = [make_fill("BTC", 100, 0.1, "B", 0.0, t=t0 + (i // 3) * 1000, tid=i + 1)
-                             for i in range(4500)]
-        info = hl.Info(fake.info_url, hl.RateBudget(100000, 0))
-        fills, complete = hl.fetch_fills_history(info, "0xu", t0, t0 + 10**10)
-        assert complete
-        assert len(fills) == 4500 and len({f.tid for f in fills}) == 4500
     finally:
         fake.close()
 

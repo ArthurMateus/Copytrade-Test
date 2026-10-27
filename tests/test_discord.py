@@ -8,7 +8,8 @@ from copybot import config, log
 from copybot.discord import BLURPLE, GREEN, RED, DiscordUI, color_for, embed, html_to_md
 from copybot.runner import Bot
 from tests.fakes import FakeDiscord, FakeHL
-from tests.test_e2e import LEADER, PIN, env_for, leader_fill, seed_ledger, wait_for, write_config
+from tests.fakes_invo import FakeInvo
+from tests.test_e2e import PIN, env_for, seed_ledger, wait_for, write_config
 
 
 def dc_cfg(fake: FakeDiscord, **env):
@@ -16,7 +17,6 @@ def dc_cfg(fake: FakeDiscord, **env):
                                      "DISCORD_OWNER_ID": fake.owner, "COPYBOT_PIN": PIN, **env})
     cfg.discord.api_base, cfg.discord.gateway_url = fake.api_base, fake.gateway_url
     cfg.discord.edit_min_interval_s, cfg.discord.min_send_interval_s = 0.3, 0.02
-    cfg.selection.enabled = cfg.sol.enabled = True     # every book's commands (the owner runs only Invo)
     return cfg
 
 
@@ -53,20 +53,19 @@ def test_slash_commands_registered_and_only_the_owner_commands(dc):
     fake, ui, cmds, _ = dc
     assert wait_for(lambda: fake.commands is not None and fake.connected())
     names = {c["name"] for c in fake.commands}
-    assert {"hyperstatus", "hypertrades", "hypertraders", "hyperwallets", "hyperflatten", "hyperpause", "hyperresume",
-            "hyperreset", "fomostatus", "fomotrades", "fomotraders", "fomowallets", "fomoreset", "invostatus",
-            "invoreset", "help"} <= names
-    assert "status" not in names and "flatten" not in names            # Discord lists the clear /hyper* and /fomo* names
-    flat = next(c for c in fake.commands if c["name"] == "hyperflatten")
+    assert {"status", "trades", "traders", "wallets", "follow", "block", "flatten", "pause", "resume", "reset",
+            "help", "restart"} <= names
+    assert not any(n.startswith(("hyper", "fomo", "invo")) for n in names)   # only Invo, without the prefix
+    flat = next(c for c in fake.commands if c["name"] == "flatten")
     assert flat["options"][0]["name"] == "pin" and flat["options"][0]["required"]
     assert fake.identified[0]["intents"] == 0
-    fake.interact("hyperstatus")                              # /hyperstatus is /status for the bot
+    fake.interact("status")                                   # /status is /invostatus for the bot
     c = cmds.get(timeout=5)
-    assert c.name == "/status" and c.arg == ""
-    fake.interact("hyperflatten", {"pin": PIN})
+    assert c.name == "/invostatus" and c.arg == ""
+    fake.interact("flatten", {"pin": PIN})
     c = cmds.get(timeout=5)
-    assert c.name == "/flatten" and c.arg == PIN
-    fake.interact("hyperstatus", user="1234")                     # someone else in the server
+    assert c.name == "/invoflatten" and c.arg == PIN
+    fake.interact("status", user="1234")                          # someone else in the server
     assert wait_for(lambda: any("Only the owner" in r["data"]["content"] for r in fake.replies))
     assert cmds.empty()
     assert all(r["data"]["flags"] == 64 for r in fake.replies)   # every answer is private (ephemeral)
@@ -111,9 +110,9 @@ def test_owner_only_and_the_pin_is_never_logged(dc, tmp_path):
     log.add_secret(PIN)
     assert wait_for(fake.connected)
     fake.say("/status", user="999")                          # a stranger
-    fake.say(f"/hyperflatten {PIN}")
+    fake.say(f"/flatten {PIN}")
     c = cmds.get(timeout=5)
-    assert c.name == "/flatten" and c.arg == PIN and cmds.empty()
+    assert c.name == "/invoflatten" and c.arg == PIN and cmds.empty()
     for h in log.log.handlers:
         h.flush()
     text = (tmp_path / "copybot.log").read_text(encoding="utf-8")
@@ -153,14 +152,16 @@ def test_gateway_reconnects_after_a_drop(dc):
 
 # ---- the whole bot on Discord -----------------------------------------------------------------------
 def test_full_bot_on_discord(tmp_path):
-    hl, fake = FakeHL(), FakeDiscord()
+    hl, fake, f = FakeHL(), FakeDiscord(), FakeInvo()
     data = tmp_path / "data"
     data.mkdir()
     cdir = write_config(tmp_path, hl, fake, data)
-    (cdir / "discord.toml").write_text(f'api_base = "{fake.api_base}"\ngateway_url = "{fake.gateway_url}"\n'
-                                       f'edit_min_interval_s = 0.3\nmin_send_interval_s = 0.02\n', encoding="utf-8")
+    (cdir / "invo.toml").write_text(f'api_base = "{f.url}"\npoll_s = 1.0\n', encoding="utf-8")
+    tok = tmp_path / "invo.token"
+    tok.write_text("REFRESH0", encoding="utf-8")
+    pid = f.add_user("nicush")[0]
     seed_ledger(data)
-    cfg = config.load(cdir, env=env_for(fake))
+    cfg = config.load(cdir, env={**env_for(fake), "INVO_TOKEN_FILE": str(tok)})
     log.setup(str(data / "logs"))
     for s in (cfg.pin, cfg.dc_token):
         log.add_secret(s)
@@ -168,36 +169,34 @@ def test_full_bot_on_discord(tmp_path):
     th = threading.Thread(target=bot.run, daemon=True)
     th.start()
     try:
-        assert wait_for(lambda: LEADER in hl.subscribed_users() and bot.health().clock_ok and fake.connected())
+        assert wait_for(lambda: bot.health().clock_ok and fake.connected())
         assert wait_for(lambda: any("Copybot started" in m["description"] for m in fake.sent))
-        hl.push_fills(LEADER, [leader_fill(hl, "ETH", 50, "B")])
+        fake.interact("follow", {"wallet": "nicush"})
+        assert wait_for(lambda: bot.invo_watch.known.get("nicush") is not None, timeout=10)
+        f.open_call(pid, "ETH", long=True, leverage=5, size=0.05, entry=3000.0)
         # the live trade card, as Discord markdown in an embed
-        assert wait_for(lambda: any("**ETH** ⬆️ LONG" in m["description"] for m in fake.sent))
+        assert wait_for(lambda: any("**ETH** ⬆️ LONG" in m["description"] for m in fake.sent), timeout=10)
         card = next(m["id"] for m in fake.sent if "**ETH** ⬆️ LONG" in m["description"])
         hl.mids["ETH"] = 3030.0
         assert wait_for(lambda: "3,030" in fake.text(card) or "3030" in fake.text(card))
-        fake.interact("hypertrades")
-        assert wait_for(lambda: any("💼 **Trades** · 1 open" in m["description"] for m in fake.sent))
+        fake.interact("trades")
+        assert wait_for(lambda: any("🧾 **Invo trades** · 1 open" in m["description"] for m in fake.sent))
         # restart keeps editing the same Discord card (its id is in the ledger under dc:)
-        assert wait_for(lambda: f"dc:pos:{bot.st.positions['ETH'].pos_id}" in bot.st.cards)
+        assert wait_for(lambda: f"dc:invo:pos:{bot.invo.st.positions['ETH'].pos_id}" in bot.st.cards)
         # /flatten with the PIN from Discord closes everything; the PIN never reaches the log or the channel
-        fake.interact("hyperflatten", {"pin": PIN})
-        assert wait_for(lambda: not bot.st.positions and bot.st.entries_paused)
+        fake.interact("flatten", {"pin": PIN})
+        assert wait_for(lambda: not bot.invo.st.positions and bot.invo.st.entries_paused)
         assert wait_for(lambda: "✅ WIN" in fake.text(card) or "❌ LOSS" in fake.text(card))
         for h in log.log.handlers:
             h.flush()
         text = (data / "logs" / "copybot.log").read_text(encoding="utf-8")
-        assert PIN not in text and fake.token not in text and "event=discord_command cmd=/flatten" in text
+        assert PIN not in text and fake.token not in text and "event=discord_command cmd=/invoflatten" in text
         assert not any(PIN in m["description"] for m in fake.sent)
+        assert not any("/invo" in m["description"] for m in fake.sent)        # the short names only
     finally:
         bot.stop.set()
         th.join(5)
         bot.shutdown()
         hl.close()
         fake.close()
-
-
-def test_only_invo_messages_use_the_short_command_names():
-    from copybot.chat import invo_name, short_names
-    assert short_names("/invofollow x · /invotraders · /invotrades · /invoblock a b") ==         "/follow x · /traders · /trades · /block a b"
-    assert [invo_name(n) for n in ("/status", "/wallets", "/flatten", "/block", "/hyperflatten")] ==         ["/invo", "/invowallets", "/invoflatten", "/invoblock", None]
+        f.close()

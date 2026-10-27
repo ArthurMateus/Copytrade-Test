@@ -167,7 +167,7 @@ def invo_trade_card(p: Position, mark: float | None, now_ms: float) -> str:
 REASONS ={"leader_close": "the trader closed", "leader_flip": "the trader reversed", "stop": "🛑 stop-loss hit",
            "trail_stop": "🔒 trailing stop (profit locked)",
            "leader_reduce": "the trader reduced", "reconcile_leader_flat": "the trader closed (caught by check)",
-           "flatten": "/hyperflatten", "leader_reopened": "stale copy", "reconcile_leader_reduced": "check",
+           "flatten": "/invoflatten", "leader_reopened": "stale copy", "reconcile_leader_reduced": "check",
            "conflict_better_leader": "⚔️ a better trader took the other side", "backer_close": "🤝 backer closed",
            "backer_flip": "🤝 backer reversed", "reconcile_backer_flat": "🤝 backer closed (caught by check)"}
 
@@ -204,31 +204,6 @@ def lag_line(st: State) -> str:
     return f"usually {p50 / 1000:.1f}s · slowest {p95 / 1000:.1f}s"
 
 
-def status_card(st: State, mids: dict, health, now_ms: float, btc_px: float | None) -> str:
-    eq = st.equity(mids)
-    pnl = eq - st.equity0
-    day = st.marks.get("day", {}).get("equity") or st.equity0
-    bh = (btc_px / st.btc_px0 - 1) * 100 if btc_px and st.btc_px0 else None
-    if st.entries_paused or st.uncertain:
-        state = f"⏸️ new copies paused: {st.pause_reason or 'uncertain state'}"
-    else:
-        state = "▶️ copying"
-    ok = lambda good, bad: "✅" if good else f"⚠️ {bad}"
-    conn = (f"prices {ok(health.mids_age_s < 5, f'{health.mids_age_s:.0f}s old')} · "
-            f"trades feed {ok(health.feed_connected and health.feed_age_s < 30, f'{health.feed_age_s:.0f}s')} · "
-            f"clock {ok(health.clock_ok, health.clock_why)}")
-    return f"📊 <b>Status</b> · {esc(state)}\n" + pre([
-        ("Wallet", f"{fusd(eq, sign=False)} of {fusd(st.equity0, sign=False)} · {money(pnl, st.equity0)}"),
-        ("Today", money(eq - day, day)),
-        ("Just holding BTC", fpct(bh) if bh is not None else "-"),
-        ("Open trades", f"{len(st.positions)} · at most {fusd(st.total_risk(), sign=False)} at risk"),
-        ("Traders", f"{len(st.followed)} followed" + (f" ({len(st.paused_leaders)} paused)" if st.paused_leaders else "")),
-        ("Closed trades", str(len(st.closed))),
-        ("Copy speed", lag_line(st)),
-        ("Connection", conn),
-    ]) + "\n" + updated(now_ms)
-
-
 def trades_card(st: State, mids: dict, now_ms: float, title: str = "💼 <b>Trades</b>",
                 infos: dict | None = None) -> str:
     """/trades (and /invotrades): every open copy at the live price, plus the result against the starting wallet."""
@@ -262,43 +237,14 @@ def trades_card(st: State, mids: dict, now_ms: float, title: str = "💼 <b>Trad
     return "\n".join(out)
 
 
-def by_rank(leaders, ranks: dict[str, int]) -> list[str]:
-    """Unique leaders, best rank first; unranked ones (no longer eligible) last."""
-    return sorted(dict.fromkeys(leaders), key=lambda a: (ranks.get(a) or 10**6, a))
-
-
-def pf_text(pf: float) -> str:
-    """Profit factor = money won on winning trades / money lost on losing trades."""
-    if pf >= 99:
-        return "no losing trade"
-    return f"{pf:.2f} (wins {fusd(pf, sign=False)} per 1$ lost)"
-
-
-def leaders_card(st: State, ranks: dict[str, int], now_ms: float, scores: dict | None = None) -> str:
-    lines = []
-    leaders = list(st.followed) + [p.leader for p in st.positions.values() if p.leader not in st.followed]
-    for a in by_rank(leaders, ranks):
-        s = st.leader_stats.get(a)
-        cum = s.cum if s else 0.0
-        flag = " ⏸️" if a in st.paused_leaders else ("" if a in st.followed else " ⏳")
-        r = ranks.get(a)
-        sc = (scores or {}).get(a, {}).get("score")
-        lines.append(f"{dot(cum)} {'#' + str(r) if r else '–'} <code>{short(a)}</code>{flag} · "
-                     f"{f'{sc:.0f}/100' if sc else 'no score'} · {_n(s.trades if s else 0, 'trade')} · {fusd(cum)}")
-    if not lines:
-        return "👥 <b>Leaders</b>\nNone followed (no eligible wallet yet).\n" + updated(now_ms)
-    return "👥 <b>Leaders</b> · rank · score · copied trades · made for you\n" + "\n".join(lines) + "\n" + updated(now_ms)
-
-
-def traders_card(st: State, mids: dict, ranks: dict[str, int], scores: dict | None, now_ms: float,
-                 title: str = "👥 <b>Traders</b>", extra: dict | None = None) -> str:
-    """/traders (and /invotraders): every followed (or still held) leader with what copying it has earned us.
-    `extra`: leader -> more (label, value) rows; with it, the score tag is left out (Invo traders have no score)."""
-    scores = scores or {}
-    leaders = list(st.followed) + [a for p in st.positions.values() for a in (p.leader, *p.backers)
-                                   if a not in st.followed]
+def traders_card(st: State, mids: dict, now_ms: float, title: str = "🧾 <b>Invo traders</b>",
+                 extra: dict | None = None) -> str:
+    """/invotraders: every followed (or still held) trader with what copying it has earned us. `extra`: leader ->
+    more (label, value) rows (Invo's own numbers of its copied portfolios)."""
+    leaders = list(dict.fromkeys(list(st.followed) + [a for p in st.positions.values() for a in (p.leader, *p.backers)
+                                                      if a not in st.followed]))
     blocks, grand = [], 0.0
-    for a in by_rank(leaders, ranks):
+    for a in leaders:
         mine = [t for t in st.closed if t["leader"] == a]
         wins = sum(1 for t in mine if t["pnl"] > 0)
         realized = sum(t["pnl"] for t in mine)
@@ -307,11 +253,6 @@ def traders_card(st: State, mids: dict, ranks: dict[str, int], scores: dict | No
         live = sum(net_pnl(p, mids.get(p.coin)) for p in held)
         made = realized + live
         grand += made
-        sc = scores.get(a, {})
-        r = ranks.get(a)
-        tag = "" if extra is not None else (f"#{r} · " if r else "") + (f"{sc['score']:.0f}/100" if sc.get("score")
-                                                                       else "no score")
-        tag += " 🎲" if sc.get("diversified") else ""
         flag = " ⏸️ paused" if a in st.paused_leaders else ("" if a in st.followed else " ⏳ no longer followed")
         rows = [
             ("Made for you", money(made, st.equity0)),
@@ -321,57 +262,17 @@ def traders_card(st: State, mids: dict, ranks: dict[str, int], scores: dict | No
         ]
         if mine:
             rows.append(("Best", f"{fusd(max(t['pnl'] for t in mine))} · worst {fusd(min(t['pnl'] for t in mine))}"))
-        if sc:
-            rows.append(("Their record", f"{sc.get('trades', 0)} trades · {sc.get('win_rate', 0) * 100:.0f}% win"))
-            rows.append(("Profit factor", pf_text(sc.get("profit_factor", 0))))
-            if sc.get("open_losers"):
-                rows.append(("Holding losers", f"{sc['open_losers']} open · {sc.get('open_loss_pct', 0) * 100:.0f}% of account"))
         rows += (extra or {}).get(a, [])
         if a in st.followed and now_ms:
             rows.append(("Following for", dur(now_ms - st.followed[a])))
         if a in st.paused_leaders:
             rows.append(("Paused because", st.paused_leaders[a]))
-        blocks.append(f"\n{dot(made)} <code>{short(a)}</code>" + (f" · {esc(tag)}" if tag else "") + f"{flag}\n"
-                      + pre(rows))
+        blocks.append(f"\n{dot(made)} <code>{short(a)}</code>{flag}\n" + pre(rows))
     if not blocks:
         return f"{title}\nNone followed yet.\n" + updated(now_ms)
     head = (f"{title} · {len(st.followed)} followed\n"
             f"{dot(grand)} <b>Copying them made: {fusd(grand)} ({fpct(grand / st.equity0 * 100)})</b>")
     return "\n".join([head, *blocks, updated(now_ms)])
-
-
-def wallets_card(wallets: list, mids: dict, now_ms: float,
-                 title: str = "💰 <b>Wallets</b> · same traders, different risk per trade") -> str:
-    """/wallets: the same copies at different risk levels, best result first.
-    `wallets` = [(risk_pct, State, is_main)] or [(risk_pct, State, is_main, label)]."""
-    from copybot.wallets import max_drop_pct
-    rows = []
-    for risk, st, main, *label in wallets:
-        eq = st.equity(mids)
-        rows.append((eq - st.equity0, risk, st, main, eq, label[0] if label else ""))
-    rows.sort(key=lambda x: (-x[0], x[1]))
-    medals = ["🥇", "🥈", "🥉"]
-    out = [title]
-    for i, (pnl, risk, st, main, eq, label) in enumerate(rows):
-        n = len(st.closed)
-        wins = sum(1 for t in st.closed if t["pnl"] > 0)
-        live = sum(net_pnl(p, mids.get(p.coin)) for p in st.positions.values())
-        medal = medals[i] if i < 3 and abs(pnl) > 0.005 else "▫️"
-        name = (label or f"{risk:g}% risk") + (" (main)" if main else "")
-        state = " ⏸️" if st.entries_paused or st.uncertain else ""
-        body = [
-            ("Result", money(pnl, st.equity0)),
-            ("Wallet", fusd(eq, sign=False)),
-            ("Trades", f"{n} · {wins} won, {n - wins} lost" + (f" ({wins / n * 100:.0f}%)" if n else "")),
-            ("Open", f"{_n(len(st.positions), 'trade')} · {fusd(live)}"),
-            ("Biggest drop", f"−{max_drop_pct(st, mids):.1f}%"),
-        ]
-        refused = st.counters.get("opens_refused", 0) + st.counters.get("skipped_min_notional", 0)
-        if refused:
-            body.append(("Not taken", f"{refused} (limits)"))
-        out.append(f"\n{medal} <b>{esc(name)}</b>{state}\n" + pre(body))
-    out.append(updated(now_ms))
-    return "\n".join(out)
 
 
 def invo_wallets_card(wallets: list, mids: dict, now_ms: float, n: int = 3) -> str:
@@ -413,16 +314,6 @@ def invo_wallets_card(wallets: list, mids: dict, now_ms: float, n: int = 3) -> s
     return "\n".join(out)
 
 
-def positions_text(st: State, mids: dict) -> str:
-    if not st.positions:
-        return "📭 No open trades."
-    lines = []
-    for p in st.positions.values():
-        net = net_pnl(p, mids.get(p.coin))
-        lines.append(f"{dot(net)} <b>{esc(p.coin)}</b> {side_tag(p.side)} · {fusd(net)} · stop {fpx(p.stop_px)}")
-    return f"📂 <b>Open trades</b> ({len(st.positions)})\n" + "\n".join(lines)
-
-
 def progress_text(st: State, mids: dict, btc_px: float | None, now_ms: float) -> str:
     n = len(st.closed)
     eq = st.equity(mids)
@@ -451,7 +342,7 @@ def progress_text(st: State, mids: dict, btc_px: float | None, now_ms: float) ->
                                 f"({st.counters.get('reconcile_exits', 0)} caught by the checks)"),
         ("Copy speed", (f"{med:.1f}s {'✅' if med <= 5 else '⚠️'}") if med is not None else "-"),
         ("Too small to copy", str(st.counters.get("skipped_min_notional", 0))),
-    ]) + ("\n⚠️ <i>Every copy so far was a long: check /hypertraders. The followed traders may all be long right now "
+    ]) + ("\n⚠️ <i>Every copy so far was a long: check /invotraders. The followed traders may all be long right now "
           "(shorts are copied the same way).</i>" if one_sided else "") \
         + "\n<i>A few dozen paper trades show the bot works, not that an edge exists.</i>"
 

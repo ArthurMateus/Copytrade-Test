@@ -1,9 +1,9 @@
-# copybot: copy-trading in paper mode (Hyperliquid, FOMO, Invo)
+# copybot: copying Invo traders' calls in paper mode
 
-This bot copies traders on **simulated** $300 wallets, in three books that run together:
-- ⚡ **Hyperliquid**: wallets from the Hyperliquid leaderboard, scored with strict rules.
-- 🪙 **FOMO / Solana**: FOMO memecoin traders, followed on the Solana chain.
-- 🧾 **Invo**: the trade calls Invo traders post, traded at Hyperliquid prices.
+This bot copies the trade calls Invo traders post onto **simulated** $300 wallets. The copies use Hyperliquid's real
+prices, order books and fees. Since 2026-10-26 this is the only book: the Hyperliquid wallet book, the FOMO / Solana
+book, the Invo arena and the bot's own Invo search were removed at the owner's request. You pick the traders; the daily
+fight-and-merge report on the Claude PC suggests them.
 
 **It runs in PAPER MODE ONLY.** It has no signing library and no key handling, and it never calls an order
 endpoint. A test enforces this (`tests/test_safety.py`). It is controlled from Discord. New to this project (or a new
@@ -15,7 +15,8 @@ Claude chat)? Read `context.md` for the current state, then `CLAUDE.md` for the 
 setx DISCORD_BOT_TOKEN  "<the bot's token>"
 setx DISCORD_CHANNEL_ID "<the channel it posts in>"
 setx DISCORD_OWNER_ID   "<your Discord user id>"
-setx COPYBOT_PIN        "<a PIN for /flatten>"
+setx COPYBOT_PIN        "<a PIN for /flatten and /reset>"
+setx INVO_TOKEN_FILE    "C:\Users\gedeo\Copytrade-test\secrets\invo.token"
 # open a NEW terminal so the variables are visible, then:
 uv run copybot
 ```
@@ -26,233 +27,78 @@ For unattended runs, restart the bot automatically if it crashes. It is designed
 while ($true) { uv run copybot; Start-Sleep 10 }
 ```
 
-Discord is the bot's only chat (Telegram was removed on 2026-10-10): create a bot at
-https://discord.com/developers/applications (scopes `bot` + `applications.commands`; permissions View Channels, Send
-Messages, Embed Links, Read Message History). The commands appear as slash commands; only the owner can use them, and
-replies to commands are private. Card times follow `utc_offset_hours` in `config/discord.toml`.
+Discord is the bot's only chat: create a bot at https://discord.com/developers/applications (scopes `bot` +
+`applications.commands`; permissions View Channels, Send Messages, Embed Links, Read Message History). The commands
+appear as slash commands; only the owner can use them, and replies to commands are private. Card times follow
+`utc_offset_hours` in `config/discord.toml`.
 
 **Updating** (the bot keeps running the old code until it restarts): in a second PowerShell window run
 `cd C:\Users\gedeo\Copytrade-test` then `git pull`, then send `/restart` in Discord; the loop starts the new code.
 
-Keep the PC from sleeping. State lives in `data/ledger.jsonl` (append-only, fsync on every write) and the
-download cache lives in `data/cache/`. Logs go to `logs/copybot.log` (rotating, key=value, no secrets).
-Settings are in `config/*.toml`. Every limit has a documented range, and the bot refuses to start when a
-value is outside it.
+Keep the PC from sleeping. Each wallet's state lives in `data/wallets/<name>/ledger.jsonl` (append-only, fsync on every
+write); `data/ledger.jsonl` keeps the bot's own start events and the Discord card ids. Logs go to `logs/copybot.log`
+(rotating, key=value, no secrets). Settings are in `config/*.toml` (`risk`, `broker`, `discord`, `runtime`, `invo`).
+Every limit has a documented range, and the bot refuses to start when a value is outside it or a key is unknown.
 
-Run the tests: `uv run pytest` (about 5 minutes; this includes real-process kill -9 restarts).
+Run the tests: `uv run pytest` (about 4 minutes; this includes real-process kill -9 restarts).
 
-## What it does
+## Commands
 
-| Part | Module |
+| Command | What it does |
 |---|---|
-| Append-only ledger; restart = replay of the same events | `ledger.py` |
-| The one risk gate every order passes | `risk.py` |
-| Paper fills that walk the real L2 book: 0.045% taker fee, slippage, hourly funding | `broker.py` |
-| Open/add/reduce/close/flip mirroring, stop at entry, reconcile, leader pause | `positions.py` |
-| Leader fill detection from `startPosition` (websocket `userFills`) | `detector.py` |
-| Websocket feed (15-user cap) and exchange-clock estimate | `feed.py` |
-| Pre-screen, first-page screen, 180-day score (deterministic) | `scoring.py` |
-| Hysteresis, background scorer, disk cache | `selection.py` |
-| Commands, outbox and in-place edited cards; Discord transport; card rendering | `chat.py`, `discord.py`, `cardfmt.py` |
-| Threads and the trading loop | `runner.py` |
-| Invo: client, watcher, daily search | `invo.py`, `invo_scorer.py` |
-| Invo arena: recipes, backtest of every size × stop, live groups | `arena.py` |
-| Daily picks report | `picks.py` |
-| FOMO / Solana book | `sol/` (see below) |
+| `/status` | the book at a glance: wallet, P&L, Invo login, health (live card) |
+| `/trades` | open copies at live prices, P&L against the $300 start (live) |
+| `/traders` | followed traders, their copied portfolios and what copying them made (live) |
+| `/wallets` | every size × stop combination: the 3 best, the 3 worst, the average per stop (live) |
+| `/progress` | success metrics (longs and shorts separately) |
+| `/follow <user>` | follow an Invo trader: every portfolio of it is copied (at most `invo.max_traders`) |
+| `/unfollow <user>` | stop following it (its open copies still follow its exits) |
+| `/block <user> <portfolio>` | stop copying one portfolio (matched by the start of its name); `/unblock` undoes it |
+| `/pause`, `/resume` | stop / allow new copies (exits and stops always run) |
+| `/flatten <PIN>` | close every copy and pause |
+| `/reset <PIN>` | every wallet back to $300, traders kept, old history archived (refused while a copy is open) |
+| `/help`, `/restart` | the list, a restart (the loop above starts it again) |
 
-Commands (Discord slash commands). Three books run at the same time in one process (Hyperliquid, FOMO / Solana and
-Invo calls), and every book has the SAME 13 commands (owner request 2026-10-10): put the book in front of the verb,
-e.g. `/hypertrades`, `/fomoadd <wallet>`, `/invofollow <user>`. Each book's commands act on that book only.
+The older `/invo…` names (`/invofollow`, `/invowallets` ...) still work but are not listed. Each copy gets one
+message, which is edited until it becomes the final ✅/❌ summary.
 
-| Verb | `/hyper…` · `/fomo…` · `/invo…` |
-|---|---|
-| `status` | the book at a glance: wallet, P&L, health (FOMO: also cash, fees, loss limits) (live card) |
-| `trades` | open trades at live prices and P&L against the $300 start (live) |
-| `traders` | followed traders: score, copied trades, wins/losses, money made (FOMO: also the search progress) (live) |
-| `wallets` | the same trades at other risk levels, compared (Hyperliquid also the **mirror x10** wallet; Invo the trader-size wallet next to 1/2/5/10/20%) (live) |
-| `progress` | success metrics (longs and shorts separately) |
-| `search` | look for traders now and follow the best 7 (the daily search only reports: see daily picks) |
-| `add <wallet or user>` | check ONE trader with the strict rules now; followed at once if it passes and a slot is free, else the bot says which rules failed |
-| `follow <wallet or user>` | follow a trader YOU picked, without the rules (kept through re-ranking and restarts, still paused by its own bad copy results) |
-| `unfollow <wallet or user>` | stop following it (its open copies exit normally) |
-| `pause`, `resume` | stop / allow new copies in that book (exits and stops always run) |
-| `flatten <PIN>` | close every trade of that book and pause it |
-| `reset <PIN>` | that book back to the start ($300, no history, traders kept, old history archived; refused while a trade is open) |
+## How a call is copied
 
-Invo only: `/invoblock <user> <portfolio>` stops copying one portfolio of a followed trader (`/invounblock` undoes
-it). Calls are also only copied from a trader's portfolios with at least 80% wins, +100% return (doubled) and 20 closed calls
-(`config/invo.toml`); `/invotraders` lists the copied (✅) portfolios; one that starts passing is copied by itself.
+Invo (Involio, app.invoapp.com) traders post calls in their portfolios: coin, long/short, leverage, entry, take-profit,
+stop-loss and size as a share of the portfolio (paper portfolios), or real trades in "live" (real-money) portfolios.
+Invo never shows a trader's Hyperliquid address, so the calls themselves are the signal.
+- The watcher reads each followed trader in turn, one request every `invo.request_gap_s` (0.5 s), and sees a new call
+  on its next read. A call at most `invo.max_call_age_s` old when first seen is copied; calls already open when we
+  start watching a trader are never copied.
+- Every wallet gets the call through its own risk gate, filled on Hyperliquid's real order book with its 0.045% fee
+  (Invo's own price is only shown as "their entry", and the card says how much later and worse we got in).
+- When the trader closes (or Invo closes it at their target or stop) we close. When the trader adds or trims, every
+  copy grows or shrinks in the same proportion. A second followed trader calling the same coin and side adds size.
+- A trader whose copies lose too much (`invo.pause_dd_pct` of the wallet, or 5 losses in a row) is dropped at once;
+  `/follow` brings it back.
 
-Plus `/picks`, `/help` and `/restart`. Older names (`/hyperwallet`, `/hyperpositions`, `/hyperleaders`, `/fomowallet`,
-`/fomoleaders` ...) still work as aliases but are no longer listed.
-Each open trade gets one message, which is edited until it becomes the final ✅/❌ summary. A reset restarts the
-process, so run the bot in the restart loop below. `/hyperreset`, `/fomoreset` and `/invoreset` each touch only their own book.
-
-**Daily picks (since 2026-10-10): the bot reports, you follow.** The searches no longer follow anyone by themselves
-(`auto_follow = false` in `config/selection.toml` and `config/sol.toml`). Every day at 13:00 (your time,
-`config/picks.toml`) the bot sends one message per book (Hyperliquid, FOMO, Invo) with the best 7 traders that pass
-every rule (fewer when fewer pass), each with the command that follows it (`/hyperadd 0x…`, `/fomoadd …`,
-`/invofollow …`, tap it to copy), compared with the day before: 🆕 new, ✅ still in, ❌ left (and why). `/picks` sends the
-same report at any time. Bad traders still leave by themselves: paused after a bad streak of copies, or no longer
-passing the rules (Hyperliquid/FOMO: 2 hourly checks; Invo: 2 daily searches). That is not a blacklist: adding one again
-(`/hyperadd`, `/fomoadd`, `/invofollow`) works at once, and lifts its pause if it passes. `/hypersearch` and
-`/fomosearch` still re-pick the best 7 at once when YOU ask for it.
-
-**Is the trader losing right now?** Besides the long history, a Hyperliquid wallet is only eligible if it is not in a bad
-stretch: at most 3% of its account lost in 7 days (open losses count), 1.5% in 24 hours, no more than 4 losing round
-trips in a row, at least 45% of its last 15 round trips won, and no drop above 10% of its hourly equity within 7 days
-(`config/selection.toml`, with hard ranges).
-
-### Design choices the spec left open
-- **Copy size:** each open risks 1% of equity: size = 1% × equity / (3% stop distance), which is about $100 notional at $300.
-  After that our target is `k × leader position`, so adds, reduces and closes stay proportional to the leader. Adds are clamped by the 1.5% per-symbol and 10% total risk caps.
-  More fills of the order that opened the position do not add; they only re-anchor `k`.
-- **Main coins only:** BTC, ETH, SOL, XRP, BNB, DOGE, ADA, AVAX, LINK, LTC (`config/selection.toml`, `main_coins`). Wallets are scored only on these coins, and the risk gate refuses entries on anything else. Exits always work. **Exception 🎲:** a wallet that makes money in at least 3 coins, with no coin above half of its profit, is scored on all its perp trades and copied in every Hyperliquid perp, memecoins included (`alt_min_coins`, `alt_max_coin_share`).
-- **One net position per coin, as on the exchange.** When a second followed leader opens the **same side** on a coin we hold, we treat it as agreement 🤝: we add 0.5% extra risk (still capped at 1.5% per coin), and if the first leader exits while the second still holds, the position is handed over instead of closed. When a leader opens the **opposite side** ⚔️, the leader with the higher wallet score wins: we switch only if the newcomer scores strictly higher.
-- **Stops start 3% from the fill price.** Leverage is the highest value (≤10x and ≤ the coin's maximum) that still keeps liquidation at least 3× the stop distance away.
-- **Trailing stop (since 2026-10-10):** once a trade is 3% in profit, its stop follows the price 3% behind the best price, never below break-even (fees included), so a winner cannot turn into a loss. The card shows "🔒 trailing" (`risk.trail_after_pct`, `trail_pct`; 0 = off).
-- **Exits are never refused.** Stale prices, a paused bot, uncertain state, or the 30 orders/min limit all block entries only. If the book cannot be fetched, an exit fills at mid ± 20 bps.
-- **Missed websocket fills** are caught by reconciling against `clearinghouseState` every 60 s and right after any reconnect.
-- **Leader pause:** a leader is paused after 5 consecutive losing copies, or when its copy drawdown exceeds 10% of its allocation (equity / 7). The next cycle drops it (Invo traders at once). You can add it back yourself at any time.
-- **Wallet score 1–100:** a daily review screens pre-screened wallets until the top 100 are fully scored. Wallets that cannot be copied are rejected; every other wallet gets points out of 100 (edge after costs 25, profit factor 15, monthly consistency 15, number of trades 15, win rate 10, max drawdown 10, current drawdown 5, concentration 5). A wallet's money is its perp account plus the USDC in its spot wallet. The top 7 that pass every rule are reported daily; you follow them.
-- **Live account check:** every time a wallet is scored (followed leaders every hour), its open positions are read. A losing position it keeps open counts as a lost trade in its win rate and profit factor, so a trader cannot look good by never closing losers. A wallet whose open losses exceed `max_open_loss` (15%) of its account, or whose perp account is empty, is not eligible, and a followed one leaves after 2 cycles.
-- **Reviews:** the scorer rescores the followed leaders and the top 15 every hour. A daily review downloads the leaderboard again and screens up to 2000 pre-screened wallets (it stops once 100 are scored). A screen result is kept for 7 days.
-- **Restart with doubt:** if the ledger has a torn line, an order intent with no result, or a position without a valid stop, the bot pauses entries of that wallet, sends a Discord alert and keeps running stops and exits. `/hyperresume` (or `/invoresume` for the Invo wallets, `/fomoresume`) acknowledges the problem.
-
-## Solana memecoin book (FOMO traders, followed on-chain)
-
-A second **paper-only** book copies FOMO traders (Solana memecoins), next to the Hyperliquid one. It has its own $300,
-ledger (`data/sol/ledger.jsonl`), risk gate and scoring. It never signs, never holds a key and never sends a
-transaction: fills are simulated from the real DexScreener pool price and liquidity. It needs no FOMO login.
-
-**Where the traders come from (found 2026-10-08).** FOMO's own API refuses programs (Cloudflare answers
-`{"authorization":false}` even for public pages), and the wallet address FOMO shows for a trader is not the wallet that
-trades (listed addresses with thousands of FOMO swaps have no on-chain transactions). But FOMO pays the network fee of
-every user swap, so each FOMO trade is a public Solana transaction co-signed by FOMO's fee payer
-(`AgmLJBMD…zN51`, `sol.fomo_fee_payer`) and by the trader's **real** wallet. The bot samples that flow to find active
-FOMO traders, reads their swaps from the chain, ranks them with the strict scoring, follows the best 7 and gets an
-instant websocket alert when one of them trades. Copy tools such as CopyFomo also copy FOMO traders on-chain.
-
-| Part | Module |
-|---|---|
-| Solana RPC client, swap parser, FOMO trader discovery, websocket alerts | `sol/chain.py` |
-| Strict scoring from on-chain swaps | `sol/scoring.py` |
-| Background scorer (discovery + history), disk cache | `sol/scorer.py` |
-| DexScreener prices/liquidity + paper broker (price impact + 1% swap fee) | `sol/market.py` |
-| The Solana risk gate | `sol/risk.py` |
-| Leader swap detector + position manager (open/add/reduce/close, stop at entry) | `sol/trader.py` |
-| Threads, selection, commands | `sol/runner.py`, `sol/fmt.py` |
-
-**Data sources and cost.** With `HELIUS_API_KEY` set, everything goes to Helius (free plan: 1M credits a month,
-10 requests a second): live alerts over its websocket, a safety poll every 120 s (`poll_leader_s`), and the search.
-The search reads histories with Helius' `getTransactionsForAddress` (100 transactions per call, 10 credits); if your
-plan refuses it, one by one (1 credit each), retrying bulk 6 hours later (log `sol_bulk_unavailable`). It may spend at
-most `helius_daily_credits` (30,000) a day; past that it continues on the free public endpoint, so a search can never
-use up the month. Without a key everything runs on the free public endpoint, which only allows about one transaction a
-second: following works, but a search of 200 traders takes days.
-
-**How a wallet is chosen.** A search (`/fomosearch`, at start, then daily) opens `discover_pages x discover_per_page`
-(600) random FOMO transactions, keeps the `max_candidates` (200) traders that moved the most USD, and reads up to 30 days
-of their swaps (`history_days`; a wallet whose newest 2,000 transactions cover less than 21 days is skipped as too busy,
-which costs one cheap call). Every rule in `config/sol.toml` must pass (>= 40 round trips, win rate >= 40%, profit
-factor >= 1.5, 3 of the last 4 weeks positive, no single trade > 20% or token > 30% of the profit, median hold >= 60 s so
-it is not a sniper, open bag <= 30% of its buys, drawdown limits, and a positive copy edge after OUR fees, slippage and
-entry lag). A daily search only reports (daily picks); `/fomosearch` searches now and follows the best 7 at once
-(followed traders outside them are dropped, their open copies still exit normally; an empty search drops nobody).
-`/fomostatus` and `/fomotraders` show the search progress ("scoring 37/200 FOMO traders · 2 pass so far"). Swaps
-priced in SOL instead of USDC (about 1 in 40 FOMO trades) are not seen.
-
-**Without Helius: FOMO daily picks by Claude.** The free public Solana endpoint is too slow for a search, so a scheduled
-Claude task (13:00, on the PC with the Claude app) reads FOMO's own leaderboards in your signed-in Chrome, scores every
-trader with the same FOMO rules (`tools/fomo_picks.py`), finds their real wallets, and updates a private report page
-with a ready `/fomoadd <wallet>` for each pick. FOMO shows only a trader's last 100 swaps, so a trader that fails only
-the history-length rules is listed as "promising" and the bot's `/fomoadd` checks its full 30 days.
-
-**Risk (spot, no leverage).** 1% of the book per trade with a 30% stop = about $9.5 notional at $300; max 6% of the book in
-one token; entries refused below $25k pool liquidity (or when DexScreener has no liquidity figure), when the price or
-the leader feed is stale, or when the Helius key is refused. Exits are never refused. Memecoins can gap through a stop:
-the paper fill uses the pool price when the stop is seen.
-
-### Setup (Windows PowerShell)
-1. **Helius key (recommended).** Free account at https://dashboard.helius.dev, copy the API key, then:
-   ```powershell
-   setx HELIUS_API_KEY "paste-key-here"
-   ```
-   Open a NEW terminal. Check it without showing it:
-   `[Environment]::GetEnvironmentVariable("HELIUS_API_KEY", "User").Length` (about 36).
-2. **Discord (optional).** Already set up for the Hyperliquid side (see above): the Solana commands show up as slash
-   commands next to the others, and the Solana cards are posted and edited in place on Discord too.
-3. `uv run copybot` (or the restart loop). The start message says where live trades come from.
-
-Commands: the `/fomo...` column of the table above (only the owner can use them). `/fomosearch` runs a review now.
-
-**Limits to know.** FOMO's fee payer address is FOMO's own choice and could change; if `/fomosearch` finds no traders,
-it probably did (the log shows `sol_discovered traders=0`). Copy lag is the websocket alert plus one read (seconds); it is
-measured and shown in `/fomoprogress`. Re-record the Solana test data with `tools/record_chain.py`.
-
-## Invo calls wallet (Invo traders' posted trades, on paper)
-
-Invo (Involio, app.invoapp.com) traders post trade calls in PAPER portfolios: coin, long/short, leverage, entry,
-take-profit, stop-loss and size as a share of their portfolio. Invo never shows a trader's Hyperliquid address, so the
-bot copies the calls themselves, in its own paper wallet **"invo calls"** ($300, compared with the other Invo wallets
-in `/invowallets`), at live Hyperliquid prices and fees (Invo's own price is only shown as "their entry"):
-- a call that appears while we watch (and is at most `invo.max_call_age_s` old) is opened with exposure = their size x
-  their leverage x `invo.size_mult` of our equity (at least $10, at most `invo.max_risk_pct` = 2% of our equity at
-  our 3% stop, i.e. $200 on $300, also after the trader adds), through the wallet's own RiskGate (limits of a 5%
-  wallet, our 3% stop); calls already open when we start watching a trader are never copied;
-- when the trader closes the call (or Invo closes it at its target/stop), we close.
-Commands: the `/invo…` set (see the table above), e.g. `/invoadd <user>` (rules checked), `/invofollow <user>`,
-`/invounfollow <user>`, `/invotraders`, plus `/invoblock` / `/invounblock`. Each copy also gets its own live card,
-which turns into the final summary when it closes. New calls are seen within about 5-10 seconds (`invo.poll_s`).
-Adds and partial closes are mirrored: when the trader raises or trims a call's committed size, our copies grow or
-shrink in the same proportion.
-
-**Risk-level wallets.** Next to "invo calls" (sized like the trader), five more Invo wallets copy the same calls at a
-FIXED risk of 1%, 2%, 5%, 10% and 20% of their own $300 per trade (our 3% stop: $100 to $2,000 per copy),
-`invo.risk_wallets_pct`; `/invowallets` compares the six. The FOMO book likewise has side wallets at 2/5/10/20%
-(`sol.side_wallets_risk_pct`, the main FOMO wallet is 1%), compared by `/fomowallets`; Hyperliquid has 2/5/10/20% and
-mirror x10 (`/hyperwallets`). Side wallets follow the same traders, post no trade cards, and their limits scale with
-their level.
+**The wallets (18).** Every size × every stop, all on the same calls:
+- sizes: the trader's size (`invo_calls`: their size × leverage of our equity, real-money calls × `live_size_mult`,
+  capped at `max_risk_pct`), and fixed 1/2/5/10/20% risk (`risk_wallets_pct`: r% of the wallet lost if its stop is hit);
+- stops: 3%, 8% and the trader's exit (`stops_pct`; the trader's exit has only a guard just before liquidation at the
+  trader's leverage, at most 10x). `main_stop_pct` picks the wallets that keep the plain names and decide which calls
+  are copied; the others are `<name>_stop3`, `_stop8` or `_trader`.
 
 **Use a SEPARATE Invo account for the bot.** The bot logs in with a refresh token; every renewal replaces it, so the
 bot and a browser sharing one login keep logging each other out, and if Invo objects to automated reading only that
 account is affected.
 
-**The daily Invo search.** Invo traders are scored with the SAME rules and points as Hyperliquid wallets: each of
-their closed calls of the last 180 days becomes one trade (their size x leverage, what it made), open calls count at
-live prices (only portfolios that pass the portfolio rules count), and `scoring.full_score` applies win rate >= 45%, profit factor >= 2, no single trade above 30% of the
-profit, drawdowns, this week / today, losing streak, recent win rate, edge after our costs (our 3% stop checked on 1h
-candles) and score >= 70. Invo-only rules on top: most calls on coins Hyperliquid lists, calls not shorter than 15
-minutes (median), a call in the last 14 days. Candidates come from Invo's Discover rankings (trending, this month,
-all time, trending users; together only about 66-70 different traders) plus the traders you follow. It reads with the bot's own Invo login, about one request a
-second, once a day (`config/invo.toml`: `search`, `max_candidates`, ...). The very first search starts when the bot
-starts and its result is posted as soon as it ends.
+### Design choices
+- **Stops are set at entry.** Exits are never refused: stale prices, a paused bot, uncertain state, or the 30
+  orders/min limit all block entries only. If the book cannot be fetched, an exit fills at mid ± 20 bps.
+- **Leverage** is the highest value (≤10x and ≤ the coin's maximum) that still keeps liquidation at least 3× the stop
+  distance away; the trader's-exit wallets take the trader's leverage (at most 10x).
+- **Restart with doubt:** if a wallet's ledger has a torn line, an order intent with no result, or a position without a
+  valid stop, that wallet's entries pause, Discord gets an alert and stops and exits keep running. `/resume`
+  acknowledges the problem.
+- **Copies closed while the bot was off** are found at the restart: a copy whose call is gone is closed then.
 
-**The Invo arena (`/arena`).** Instead of choosing traders by hand: which group of at most 10 Invo traders makes a
-$300 paper wallet the most money in 2 weeks, and in which size and stop? After each daily search the bot tests 84
-groups (most money made, best profit factor, highest win rate, hot hand, steady, the bot's floors, most active; each
-with 3, 5, 7 or 10 traders and a 14, 30 or 60-day look-back), each in all 18 wallets the Invo book runs (trader size
-and 1/2/5/10/20% risk, each with a 3% stop, an 8% stop and the trader's exit), against random traders, the traders you
-follow, and the best possible picks in hindsight.
-- **Backtest:** for every past 2-week window, each group is picked using only what happened before that window, then
-  copies those traders' calls inside it, sized like the live Invo wallets. Every entry and every exit that follows the
-  trader pays our delay (about 5 s after the trader): the price gap the bot measured on its real Invo copies, plus a
-  margin (`arena_delay_bps` until 20 copies have measured it). Fees, slippage, funding and the delay are counted apart.
-- **The arena's own choice:** at each window, the 3 groups with the best backtest so far, measured on a window they had
-  not seen yet. That is the honest answer to "does using the backtest's best groups work?".
-- **Live:** the 3 best groups (`arena_groups`) copy their traders' new calls on Hyperliquid's real book, each in its own
-  18 wallets ($300 each, `data\arena\wallets\`), through the same risk gate and limits as the Invo book. They stay
-  until you switch them: `/arena` asks with a button when the backtest's best groups have changed (the old arena
-  wallets are archived in `data\archive\arena-<date>\`).
-- `/arena` shows the live wallets (3 best and 3 worst of group × size × stop, the average per stop and per group, fees
-  and funding) and the backtest (3 best and 3 worst combinations, the average per stop, the honest check).
-  `arena = false` in `config/invo.toml` turns it off, `arena_groups = 0` keeps only the backtest.
-- It reads no extra data from Invo for the backtest (it uses the calls the daily search already reads); the live groups'
-  traders are read like followed ones (3 groups of up to 10 traders: Invo rounds take longer, about 0.5 s per extra
-  trader). Trust the live wallets over the backtest: the backtest only sees traders who are on Invo's rankings today,
-  with deleted calls gone, so it looks better than reality.
-
-### Setup (once)
+### Setup of the Invo login (once)
 1. In Chrome, open an **Incognito window** (Ctrl+Shift+N), go to https://app.invoapp.com and sign in with the bot's
    Invo account.
 2. Press F12, open **Console**, type `allow pasting` and Enter if Chrome asks, then paste this and press Enter:
@@ -267,21 +113,20 @@ follow, and the best possible picks in hindsight.
    the bot as usual. The token lasts about a year and is renewed by the bot itself.
 If Invo refuses the login later, the bot alerts on Discord; repeat steps 1-4.
 
-## Findings from the real API (recorded in `tests/fixtures`, re-record with `tools/record_samples.py`)
-- One websocket can track at most **15 users** (`"Cannot track more than 15 total users."`).
-- Live `userFills` messages have no `isSnapshot` key, and `hash` can be all zeros.
-- Spot fills (`@107`) have `dir` set to `Buy`/`Sell`. Builder perps like `xyz:TSLA` show up in fills and are ignored.
-- The `#140` candles request answers HTTP 500.
+## Findings from the real API (recorded in `tests/fixtures`)
+- Hyperliquid closes the websocket about every 3 h ("Expired"); the bot reconnects in seconds. Only an outage longer
+  than `runtime.ws_alert_after_s` (60 s) alerts on Discord. New copies wait while it is down; exits keep working.
 - This PC's clock was about **1.4 s ahead** of the exchange (±0.15 s). The offset is measured and corrected.
-- Most of the top pre-screened wallets fail the first-page screen as too fast or HFT. Zero eligible wallets is a valid outcome: the daily picks then say nobody passes.
+- Invo answers "too many requests" (429) when read too fast: the bot then doubles its spacing (up to 3 s) and eases back
+  after a calm minute (log `invo_throttled`).
 
 ## Success metrics (fixed before running)
 - 50–100 copied trades in 2–4 weeks.
-- 0 missed exits and 0 unexplained position mismatches. Exits caught by reconcile are counted separately.
-- Median copy lag ≤ 5 s, measured from the leader's fill time on the exchange clock to our paper fill. Every copy is logged, and `/status` shows p50/p95.
+- 0 missed exits and 0 stop-less positions.
+- Median copy lag ≤ 5 s from the trader's call to our paper fill. Every copy is logged (`invo_entry_gap`).
 - Paper P&L after fees, funding and slippage, compared with holding BTC from the first start.
 
 **Kill criterion:** P&L clearly negative after costs over ≥ 50 trades, or any unexplained missed exit or
-stop-less position. `/hyperprogress` (and `/fomoprogress`, `/invoprogress`) shows all of these.
+stop-less position. `/progress` shows all of these.
 
 A few dozen paper trades show that the bot works and that a profit is plausible. They do not prove an edge exists.

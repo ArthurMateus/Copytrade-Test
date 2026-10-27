@@ -1,4 +1,4 @@
-"""Invo (Involio) posted trade calls, copied on paper by the "invo calls" side wallet (owner request 2026-10-09).
+"""Invo (Involio) posted trade calls, copied on paper by the Invo wallets (owner request 2026-10-09).
 
 Invo is a social trading app: traders post "calls" (coin, long/short, leverage, entry, take-profit, stop-loss, size as a
 share of their portfolio) in portfolios that are PAPER portfolios (`"type": "paper"`, verified by Invo against market
@@ -15,14 +15,7 @@ API (recorded from the web app 2026-10-09, tests/fixtures/invo_*.json), all POST
                                          -> {"investmentsTicker": [{"id", "ticker", "directionLong", "leverage",
                                              "entryPrice", "priceTarget", "stopLoss", "positionSize", "isOpen",
                                              "createdAt", "closedAt", "closingPrice", "reasonClosed", ...}]}
-  /v1_0/trending/get_portfolios_pl       {"filter": "trending"|"month"|"all_time", "params": {"page", "size"}}
-  /v1_0/trending/get_users               {"page", "size"}       (the Discover rankings; the daily Invo search reads
-                                         only the usernames in them: `usernames`)
-Invo score and real-money portfolios (read 2026-10-12 from the app's code and answers; base WITHOUT /v1_0):
-  POST /analytics/score/user/top        {"listType": "all"} -> {"items": [{"rank", "user": {"id", "username"},
-                                         "topPortfolio": {"id", "title", "type", "score" (0-10), "percentPnl"}}]}
-  POST /analytics/score/portfolio       {"portfolioId"} -> {"detail": {"score", "profitability"/"risk"/"consistency"/
-                                         "trackRecord": {"score", "capReason"}, "isCapped", "netReturn30d"...}}
+Real-money portfolios (read 2026-10-12 from the app's code and answers; base WITHOUT /v1_0):
   "live" portfolios trade real money on Hyperliquid through Invo; /v1_0 shows them empty (0 calls, 0% win), their
   trades are only in (GET, read only; the other /dex/ endpoints place trades and are never called):
   GET /dex/portfolio/live/<id>/overview  -> {"data": {"accuracyPct", "allTimePnl": {"pct"}, "closedCount",
@@ -147,25 +140,6 @@ def parse_user(body: dict) -> tuple[str, str] | None:
     return (u["id"], u.get("username", "")) if u.get("id") else None
 
 
-def usernames(body) -> list[str]:
-    """Every username in a ranking answer, in order, once (portfolios carry their trader as `owner`, user lists carry
-    users). Read structurally so a wrapper key we have not recorded yet does not lose the list."""
-    out: list[str] = []
-
-    def walk(x):
-        if isinstance(x, dict):
-            u = x.get("username")
-            if isinstance(u, str) and u and u.lower() not in out:
-                out.append(u.lower())
-            for v in x.values():
-                walk(v)
-        elif isinstance(x, list):
-            for v in x:
-                walk(v)
-    walk(body)
-    return out
-
-
 def parse_portfolios(body: dict) -> list[Portfolio]:
     out = []
     for p in (body or {}).get("portfolios") or []:
@@ -202,27 +176,6 @@ def parse_live_overview(body: dict, p: Portfolio) -> Portfolio:
     return replace(p, win_rate=_f(d.get("accuracyPct")) or 0.0, closed=int(d.get("closedCount") or 0),
                    pnl_pct=_f((d.get("allTimePnl") or {}).get("pct")) or 0.0, open_count=int(ot.get("count") or 0),
                    open_assets=tuple(ot.get("assets") or ()))
-
-
-def parse_score_top(body: dict) -> list[dict]:
-    """Invo's score leaderboard: [{"user", "portfolio", "title", "kind", "score"}] (one portfolio per trader)."""
-    out = []
-    for it in (body or {}).get("items") or []:
-        u, p = it.get("user") or {}, it.get("topPortfolio") or {}
-        if u.get("username") and p.get("id"):
-            out.append({"user": str(u["username"]).lower(), "portfolio": p["id"], "title": p.get("title") or "",
-                        "kind": p.get("type") or "", "score": _f(p.get("score"))})
-    return out
-
-
-def parse_portfolio_score(body: dict) -> dict:
-    """Invo's score of one portfolio: {"score", "capped", "caps": [reasons]} ({} when not computed)."""
-    d = (body or {}).get("detail") or {}
-    if d.get("score") is None:
-        return {}
-    caps = [str((d.get(k) or {}).get("capReason")) for k in ("profitability", "risk", "consistency", "trackRecord")
-            if (d.get(k) or {}).get("capReason")]
-    return {"score": float(d["score"]), "capped": bool(d.get("isCapped")), "caps": caps}
 
 
 def parse_calls(body: dict) -> list[Call]:
@@ -441,20 +394,6 @@ class InvoClient:
         if cursor:
             params["cursor"] = cursor
         return parse_live_positions(self.get(f"/dex/portfolio/position/{portfolio_id}/list", params), portfolio_id)
-
-    def score_top(self) -> list[dict]:
-        return parse_score_top(self.post("/analytics/score/user/top", {"listType": "all"}, root=True))
-
-    def portfolio_score(self, portfolio_id: str) -> dict:
-        return parse_portfolio_score(self.post("/analytics/score/portfolio", {"portfolioId": portfolio_id}, root=True))
-
-    def ranking(self, flt: str, page: int, size: int = 20) -> list[str]:
-        """Usernames on one page of a Discover portfolio ranking ("trending", "month", "all_time")."""
-        return usernames(self.post("/trending/get_portfolios_pl", {"filter": flt, "params": {"page": page, "size": size}}))
-
-    def trending_users(self, page: int, size: int = 20) -> list[str]:
-        return usernames(self.post("/trending/get_users", {"page": page, "size": size}))
-
 
 class Watcher:
     """Polls the followed Invo traders and turns their calls into events for the trading loop:

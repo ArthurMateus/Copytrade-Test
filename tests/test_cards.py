@@ -1,7 +1,6 @@
 """Card rendering (pure functions in copybot/cardfmt.py)."""
 from copybot import cardfmt
 from copybot.ledger import Position, State
-from copybot.risk import Health
 
 
 def test_trade_card_has_every_field():
@@ -22,21 +21,14 @@ def test_trade_card_has_every_field():
     assert "❌ LOSS" in cardfmt.closed_card({**t, "pnl": -1.0})
 
 
-def test_status_leaders_progress_render():
+def test_progress_render():
     st = State(equity0=300, btc_px0=100_000, genesis_ms=0)
-    st.followed = {"0x" + "a" * 40: 0}
-    st.marks = {"day": {"key": "d", "equity": 300}}
-    h = Health(now_ms=0, mids_age_s=0.2, clock_ok=True, feed_age_s=1, feed_connected=True)
-    s = cardfmt.status_card(st, {}, h, 0, 101_000)
-    assert "Wallet" in s and "300.00$" in s and "▶️ copying" in s and "+1.00%" in s
-    st.entries_paused, st.pause_reason = True, "daily loss"
-    assert "⏸️" in cardfmt.status_card(st, {}, h, 0, None)
-    assert "⚪ – <code>0xaaaa…aaaa</code>" in cardfmt.leaders_card(st, {}, 0)
+    st.followed = {"invo:bob": 0}
     assert "too early" in cardfmt.progress_text(st, {}, None, 0)
 
 
 def test_trades_and_traders_cards():
-    a, b = "0x" + "a" * 40, "0x" + "b" * 40
+    a, b = "invo:alice", "invo:bob"
     st = State(equity0=300, btc_px0=100_000, genesis_ms=0)
     st.followed = {a: 0, b: 0}
     st.positions["BTC"] = Position(pos_id="BTC-1", coin="BTC", side=1, size=0.001, entry_px=100_000.0,
@@ -51,25 +43,13 @@ def test_trades_and_traders_cards():
     assert "🟢 <b>Total: +3.45$ (+1.15%)</b>" in t        # wallet: 1.45 realized + 2.00 open, vs $300
     assert "2 trades (1 won, 1 lost)" in t and "1h00m" in t
     assert "No open trades" in cardfmt.trades_card(State(equity0=300), {}, 0)
-    tr = cardfmt.traders_card(st, mids, {a: 1}, {a: {"score": 94.5, "diversified": True, "win_rate": 0.77,
-                                                    "profit_factor": 2.1}}, 3_600_000)
-    assert "👥 <b>Traders</b> · 2 followed" in tr and "#1 · 94/100 🎲" in tr
+    tr = cardfmt.traders_card(st, mids, 3_600_000, extra={a: [("✅ Main", "80% win")]})
+    assert "🧾 <b>Invo traders</b> · 2 followed" in tr and "<code>@alice</code>" in tr and "Main: <b>80% win" in tr
     assert "2 trades · 1 won, 1 lost (50%)" in tr and "backs 1" in tr
-    assert tr.index(a[-4:]) < tr.index(b[-4:])            # ranked before unranked
+    assert tr.index("@alice") < tr.index("@bob")         # in the order they were followed
     assert "Made for you: <b>🟢 +3.45$" in tr             # 1.50 closed + 1.95 open
     assert "🟢 <b>Copying them made: +3.45$" in tr
-    assert "None followed" in cardfmt.traders_card(State(equity0=300), {}, {}, {}, 0)
-
-
-def test_traders_are_listed_by_rank_with_history_and_pf():
-    a, b, c = ("0x" + x * 40 for x in "abc")
-    st = State(equity0=300)
-    st.followed = {a: 0, b: 0, c: 0}                      # followed in this order ...
-    sc = {a: {"score": 60, "trades": 153, "win_rate": 0.77, "profit_factor": 2.5},
-          b: {"score": 90, "trades": 40, "win_rate": 1.0, "profit_factor": 99.0}}
-    tr = cardfmt.traders_card(st, {}, {b: 1, a: 2}, sc, 0)
-    assert tr.index("bbbb") < tr.index("aaaa") < tr.index("cccc")   # ... listed by rank, unranked last
-    assert "153 trades · 77% win" in tr and "2.50 (wins 2.50$ per 1$ lost)" in tr and "no losing trade" in tr
+    assert "None followed" in cardfmt.traders_card(State(equity0=300), {}, 0)
 
 
 def test_invo_trade_card_is_short_and_shows_leverage():

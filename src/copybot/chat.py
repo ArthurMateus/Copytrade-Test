@@ -21,73 +21,44 @@ from dataclasses import dataclass, field
 from copybot import log
 from copybot.config import Config
 
-# Three books with the SAME 13 commands each (owner request 2026-10-10): /<book><verb> for book in hyper, fomo, invo and
-# verb in VERBS. `canon` turns every name into the one canonical name a book's handler uses: Hyperliquid's are the
-# short originals (/status, /trades ...), FOMO's and Invo's keep their prefix (/fomo = /fomostatus, /invo = /invostatus).
-# Older names (/hyperpositions, /fomoleaders, /fomowallet ...) are kept as aliases of the new ones.
-BOOKS = ("hyper", "fomo", "invo")
-VERBS = ("status", "trades", "traders", "wallets", "progress", "search", "add", "follow", "unfollow", "pause", "resume",
-         "flatten", "reset")
-HYPER_COMMANDS = tuple(f"/hyper{v}" for v in VERBS)
-FOMO_COMMANDS = tuple(f"/fomo{v}" for v in VERBS)
+# Only the Invo book runs (owner request 2026-10-26: the Hyperliquid and FOMO books, the arena and the bot's own Invo
+# search were removed). Discord lists the short names (/status, /follow, /block ...); `canon` turns every accepted name
+# into the canonical /invo<verb> the bot handles. The /invo… names and a few older names still work (not listed).
+VERBS = ("status", "trades", "traders", "wallets", "progress", "follow", "unfollow", "block", "unblock", "pause",
+         "resume", "flatten", "reset")
 INVO_COMMANDS = tuple(f"/invo{v}" for v in VERBS)
-INVO_EXTRA = ("/invoblock", "/invounblock",      # Invo only: block one portfolio of a followed trader
-              "/invoarena")                      # ... and the arena (copybot/arena.py)
-ALIASES = {f"/hyper{v}": f"/{v}" for v in VERBS}
-ALIASES.update({"/fomostatus": "/fomo", "/invostatus": "/invo",
-                # older names
-                "/hyperwallet": "/wallets", "/hyperpositions": "/trades", "/hyperleaders": "/traders",
-                "/positions": "/trades", "/leaders": "/traders",
-                "/block": "/invoblock", "/unblock": "/invounblock", "/arena": "/invoarena",   # (only Invo has them)
-                "/fomowallet": "/fomo", "/fomopositions": "/fomotrades", "/fomoleaders": "/fomotraders"})
-COMMANDS = tuple(dict.fromkeys(("/help", "/restart", "/picks", "/fomo", "/invo") + tuple(f"/{v}" for v in VERBS)
-                               + tuple(ALIASES) + FOMO_COMMANDS + INVO_COMMANDS + INVO_EXTRA))
+ALIASES = {f"/{v}": f"/invo{v}" for v in VERBS}
+ALIASES.update({"/invo": "/invostatus", "/positions": "/invotrades", "/leaders": "/invotraders"})
+COMMANDS = tuple(dict.fromkeys(("/help", "/restart") + tuple(ALIASES) + INVO_COMMANDS))
 # what Discord shows in its slash-command list
-SLASH_COMMANDS = ("/help", "/restart", "/picks") + HYPER_COMMANDS + FOMO_COMMANDS + INVO_COMMANDS + INVO_EXTRA
-PIN_COMMANDS = ("/flatten", "/reset", "/fomoflatten", "/fomoreset", "/invoflatten", "/invoreset")
-# take a wallet address (or Invo username) as their argument
-WALLET_COMMANDS = ("/add", "/follow", "/unfollow", "/fomoadd", "/fomofollow", "/fomounfollow", "/invoadd",
-                   "/invofollow", "/invounfollow", "/invoblock", "/invounblock")
+SLASH_COMMANDS = ("/help", "/restart") + tuple(f"/{v}" for v in VERBS)
+PIN_COMMANDS = ("/invoflatten", "/invoreset")
+# take an Invo username (block / unblock: the username, then the portfolio) as their argument
+WALLET_COMMANDS = ("/invofollow", "/invounfollow", "/invoblock", "/invounblock")
+_INVO_WORDS = re.compile(r"/invo(" + "|".join(VERBS) + r")\b")
 
 
 def canon(name: str) -> str:
     return ALIASES.get(name, name)
 
 
-# Only Invo runs (owner request 2026-10-12: "just wallets, traders, etc"): with the Hyperliquid book off, the short
-# names are Invo's (/wallets = /invowallets, /block = /invoblock); the /invo… names keep working (not listed).
-INVO_ONLY_COMMANDS = ("/help", "/restart", "/picks") + tuple(f"/{v}" for v in VERBS) + ("/block", "/unblock", "/arena")
-_INVO_WORDS = re.compile(r"/invo(" + "|".join(VERBS + ("block", "unblock", "arena")) + r")\b")
-
-
-def invo_name(name: str) -> str | None:
-    """A short name typed while only Invo runs -> the Invo command's canonical name (None: not a short book name)."""
-    v = name[1:]
-    if v in VERBS or v in ("block", "unblock", "arena"):
-        return canon(f"/invo{v}")
-    return None
-
-
 def short_names(text: str) -> str:
-    """Messages while only Invo runs: "/invofollow x" -> "/follow x" (what the owner types now)."""
+    """Outgoing messages: "/invofollow x" -> "/follow x" (what the owner types)."""
     return _INVO_WORDS.sub(r"/\1", text)
 
 
-INVO_HELP = ("🤖 <b>Copybot (paper)</b> · 🧾 Invo calls (copied on Hyperliquid prices)\n\n"
-             "status – the book at a glance (live)\n"
-             "trades – open trades at live prices (live)\n"
-             "traders – followed traders and what copying them made (live)\n"
-             "wallets – every size × stop combination, best and worst (live)\n"
-             "progress – success metrics\n"
-             "search – look for traders now (asks before changing anything)\n"
-             "add &lt;user&gt; – check it with the strict rules, follow it if it passes\n"
-             "follow &lt;user&gt; – follow it as your pick (never dropped by the search) · unfollow &lt;user&gt;\n"
-             "block · unblock &lt;user&gt; &lt;portfolio&gt; – stop / restart copying one portfolio\n"
-             "arena – the best groups of ≤10 traders in every size × stop: live wallets + backtest\n"
-             "pause · resume – new copies (exits and stops always run)\n"
-             "flatten &lt;PIN&gt; – close every trade and pause · reset &lt;PIN&gt; – back to the start, traders kept\n\n"
-             "Examples: /wallets · /follow nicush · /block nicush Kitchen\n"
-             "/picks – the best traders (also daily at 13h) · /restart – restart the bot")
+HELP = ("🤖 <b>Copybot (paper)</b> · 🧾 Invo calls (copied on Hyperliquid prices)\n\n"
+        "status – the book at a glance (live)\n"
+        "trades – open trades at live prices (live)\n"
+        "traders – followed traders and what copying them made (live)\n"
+        "wallets – every size × stop combination, best and worst (live)\n"
+        "progress – success metrics\n"
+        "follow &lt;user&gt; – copy every portfolio of an Invo trader · unfollow &lt;user&gt;\n"
+        "block · unblock &lt;user&gt; &lt;portfolio&gt; – stop / restart copying one portfolio\n"
+        "pause · resume – new copies (exits and stops always run)\n"
+        "flatten &lt;PIN&gt; – close every trade and pause · reset &lt;PIN&gt; – back to the start, traders kept\n\n"
+        "Examples: /wallets · /follow nicush · /block nicush Kitchen\n"
+        "/restart – restart the bot")
 
 
 class ChatError(Exception):
@@ -267,19 +238,3 @@ class ChatUI:
                 del self.cards[c.key]
         self.on_card_id(c.key, None)
 
-
-HELP = ("🤖 <b>Copybot (paper)</b> · three books, the same commands in each\n"
-        "Put the book in front: <b>/hyper</b>… (Hyperliquid) · <b>/fomo</b>… (FOMO / Solana) · <b>/invo</b>… (Invo calls)\n\n"
-        "status – the book at a glance (live)\n"
-        "trades – open trades at live prices, P&amp;L vs the start (live)\n"
-        "traders – followed traders and what copying them made (live)\n"
-        "wallets – the same trades at other risk levels, compared (live)\n"
-        "progress – success metrics\n"
-        "search – look for traders now and follow the best 7\n"
-        "add &lt;wallet or user&gt; – check it with the strict rules, follow it if it passes\n"
-        "follow &lt;wallet or user&gt; – follow it without the rules (your pick) · unfollow &lt;…&gt;\n"
-        "pause · resume – new copies in that book (exits and stops always run)\n"
-        "flatten &lt;PIN&gt; – close every trade of that book and pause it\n"
-        "reset &lt;PIN&gt; – that book back to the start (no open trades), traders kept\n\n"
-        "Examples: /hypertrades · /fomoadd &lt;wallet&gt; · /invofollow &lt;user&gt;\n"
-        "/picks – the best traders of each book (also daily at 13h) · /restart – restart the bot")

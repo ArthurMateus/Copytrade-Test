@@ -32,31 +32,4 @@ stops_pct = [3.0, 8.0, 0.0]
 # a copy stays open until the trader closes it (only the guard above). Changing it: /flatten, then /reset <PIN>.
 main_stop_pct = 0.0
 aliases = {}              # Invo ticker -> Hyperliquid coin when the names differ, e.g. { MATIC = "POL" }
-# Portfolio filter: the daily search scores EACH portfolio with our rules and only passing ones are copied. A paper
-# portfolio must also have at least this win rate, this % return (Invo's P&L of the portfolio) and this many closed
-# calls; a real-money ("live") one that passes our rules does not. Not scored yet: these floors on its own numbers.
-# /invoblock <user> <portfolio> blocks one by hand.
-min_portfolio_win_rate = 0.80   # 0.80 = 80%                                                          [0, 1]
-min_portfolio_pnl_pct = 100.0   # the portfolio's total return on Invo, % (100 = doubled)                          [-100, 100000]
-min_portfolio_calls = 20        # fewer closed calls: too new to judge, skipped                         [0, 10000]
-# Traders whose portfolios are ALWAYS copied, skipping the floors above and our rules (/block still works).
-always_copy = ["bluespire", "solarflare"]
-# The daily Invo search: Invo's Discover rankings -> each trader's closed calls -> the SAME scoring as Hyperliquid
-# wallets (win rate, profit factor, no single trade > 30% of profit, drawdowns, score >= 70 ...), shown in the
-# daily picks (13h, /picks). It only reports: you follow with /invofollow.
-search = true
-review_hours = 24.0       # one search per this many hours                                          [1, 168]
-discover_pages = 20       # pages of 20 read from each Discover ranking                             [0, 20]
-max_candidates = 1000     # traders scored per search (followed ones are always re-checked)        [0, 1000]
-history_days = 180        # closed calls this old count                                             [30, 180]
-max_calls = 600           # closed calls read per trader at most                                    [50, 5000]
-min_hl_share = 0.5        # at least this share of its calls on coins Hyperliquid lists             [0, 1]
-min_hold_min = 15.0       # median call at least this long (shorter cannot be copied)               [0, 1440]
-max_idle_days = 14.0      # its newest call at most this old                                        [1, 90]
-arena = true              # after each search: which groups of <=10 traders make 300$ the most in 2 weeks, in every
-                          # size x stop above (backtest on the calls the search read: no extra Invo data); /arena
-arena_groups = 3          # the backtest's best groups copied live, each in every size x stop (paper; they stay until
-                          # you switch them under /arena; each group's traders are also read by the watcher)  [0, 6]
-arena_delay_bps = 10.0    # the backtest's cost of our late entry and exit (0.10%) until 20 real copies measure it [0, 200]
-arena_delay_margin_bps = 5.0   # added to the measured (or the above) cost, to stay on the safe side        [0, 100]
-drop_after_fails = 2     # none of a followed trader's portfolios copied this many daily searches in a row: Discord asks you to drop it (buttons); /invofollow picks are never asked  [1, 10]   # fixed-risk Invo wallets next to the trader-size one (/invowallets)
+# Every portfolio of a followed trader is copied; /block <user> <portfolio> stops one by hand.

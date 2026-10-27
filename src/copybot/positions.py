@@ -16,21 +16,59 @@ Several leaders on one coin (we still hold ONE net position per coin, owned by o
   conflict   another followed leader opens the OPPOSITE side -> the leader with the higher wallet score wins:
              if the newcomer scores higher than every leader on our side we close and copy the newcomer,
              otherwise its trade is skipped. Ties keep the position we hold.
-Only the configured main coins are copied, plus any perp for leaders whose wallet is diversified.
+Invo calls (copybot/invo.py) become synthetic moves: an open from 0 to the call's committed exposure, adds and trims
+to the new exposure, a close back to 0.
 """
 from __future__ import annotations
 
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 from typing import Callable
 
 from copybot import log
 from copybot.broker import NoBook, PaperBroker, funding_payment
 from copybot.config import Config
-from copybot.detector import Move
 from copybot.hl import Asset
 from copybot.ledger import Ledger, Position, State
 from copybot.risk import Health, Order, RiskGate
+
+EPS = 1e-12
+
+
+@dataclass
+class Move:
+    leader: str
+    coin: str
+    start_pos: float
+    end_pos: float
+    time_ms: int          # last fill time (exchange clock)
+    first_time_ms: int
+    oid: int              # order id of the first fill
+    oids: tuple
+    px: float             # leader's vwap
+    n_fills: int
+    tids: tuple = field(default=(), repr=False)
+
+    @property
+    def kind(self) -> str:
+        s, e = self.start_pos, self.end_pos
+        if abs(s) < EPS and abs(e) < EPS:
+            return "none"
+        if abs(s) < EPS:
+            return "open"
+        if abs(e) < EPS:
+            return "close"
+        if (s > 0) != (e > 0):
+            return "flip"
+        if abs(e) > abs(s) + EPS:
+            return "add"
+        if abs(e) < abs(s) - EPS:
+            return "reduce"
+        return "none"
+
+    @property
+    def new_side(self) -> int:
+        return 1 if self.end_pos > 0 else -1 if self.end_pos < 0 else 0
 
 
 class PositionManager:

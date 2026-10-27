@@ -60,54 +60,45 @@ def test_scaled_side_wallet_config():
     big = c.scaled(base, 20.0)
     assert big.risk.daily_loss_pct == 100 and big.risk.weekly_loss_pct == 100
     assert big.risk.stop_pct == base.risk.stop_pct and big.risk.max_leverage == base.risk.max_leverage
-    assert base.risk.risk_per_trade_pct == 1.0 and base.risk.side_wallets_risk_pct == [2.0, 5.0, 10.0, 20.0]
+    assert base.risk.risk_per_trade_pct == 1.0
 
 
-@pytest.mark.parametrize("bad", ["[0.0]", "[60.0]", "[2.0, 2.0]", "[1.0]", '["x"]'])
-def test_side_wallet_levels_are_validated(tmp_path, bad):
+@pytest.mark.parametrize("bad", ["[0.0]", "[60.0]", "[2.0, 2.0]", '["x"]'])
+def test_invo_risk_wallet_levels_are_validated(tmp_path, bad):
     import shutil
     for f in Path("config").glob("*.toml"):
         shutil.copy(f, tmp_path / f.name)
-    p = tmp_path / "risk.toml"
-    p.write_text(p.read_text(encoding="utf-8").replace("side_wallets_risk_pct = [2.0, 5.0, 10.0, 20.0]",
-                                                        f"side_wallets_risk_pct = {bad}"), encoding="utf-8")
+    p = tmp_path / "invo.toml"
+    text = p.read_text(encoding="utf-8")
+    assert "risk_wallets_pct = [1.0, 2.0, 5.0, 10.0, 20.0]" in text
+    p.write_text(text.replace("risk_wallets_pct = [1.0, 2.0, 5.0, 10.0, 20.0]", f"risk_wallets_pct = {bad}"),
+                 encoding="utf-8")
     with pytest.raises(config.ConfigError):
         config.load(tmp_path, env={})
 
 
-def test_solana_and_discord_sections_load_with_documented_ranges(tmp_path):
+def test_only_the_invo_book_is_configured(tmp_path):
+    """Owner request 2026-10-26: the Hyperliquid book (selection.toml), FOMO (sol.toml), the daily picks and the bot's
+    own Invo search are gone; a leftover file of theirs is ignored, a leftover key in a kept file refuses to start."""
     import shutil
     d = tmp_path / "config"
     shutil.copytree("config", d)
+    assert sorted(f.name for f in d.glob("*.toml")) == ["broker.toml", "discord.toml", "invo.toml", "risk.toml",
+                                                        "runtime.toml"]
     cfg = config.load(d, env={})
-    assert not cfg.sol.enabled and not cfg.selection.enabled and cfg.sol.stop_pct == 30.0   # only Invo runs
-    assert cfg.invo.max_traders == 10
-    (d / "sol.toml").write_text("stop_pct = 99.0\n", encoding="utf-8")
-    with pytest.raises(config.ConfigError, match="sol.stop_pct"):
-        config.load(d, env={})
-    (d / "sol.toml").write_text("not_a_key = 1\n", encoding="utf-8")
+    assert cfg.invo.max_traders == 10 and not hasattr(cfg, "sol") and not hasattr(cfg, "selection")
+    for key in ("search", "arena", "always_copy"):
+        assert not hasattr(cfg.invo, key)
+    (d / "invo.toml").write_text("search = false\n", encoding="utf-8")
     with pytest.raises(config.ConfigError, match="unknown key"):
-        config.load(d, env={})
-    (d / "sol.toml").write_text("join_rank = 6\ndrop_rank = 5\n", encoding="utf-8")
-    with pytest.raises(config.ConfigError, match="drop_rank"):
         config.load(d, env={})
 
 
 def test_new_secrets_come_from_the_environment_and_never_appear_in_public_config():
-    env = {"HELIUS_API_KEY": " SECRETVALUE ", "DISCORD_BOT_TOKEN": "DCTOKEN", "DISCORD_CHANNEL_ID": "1",
-           "DISCORD_OWNER_ID": "2"}
+    env = {"DISCORD_BOT_TOKEN": "DCTOKEN", "DISCORD_CHANNEL_ID": "1", "DISCORD_OWNER_ID": "2",
+           "INVO_TOKEN_FILE": " secrets/invo.token "}
     cfg = config.load("config", env=env)
-    assert (cfg.helius_key, cfg.dc_token, cfg.dc_channel_id, cfg.dc_owner_id) == ("SECRETVALUE", "DCTOKEN", "1", "2")
+    assert (cfg.dc_token, cfg.dc_channel_id, cfg.dc_owner_id) == ("DCTOKEN", "1", "2")
+    assert cfg.invo_token_file == "secrets/invo.token"
     shown = str(config.public_dict(cfg)) + repr(cfg)
-    assert "SECRETVALUE" not in shown and "DCTOKEN" not in shown
-
-
-def test_strict_scoring_thresholds_cannot_be_loosened_past_their_ceilings(tmp_path):
-    import shutil
-    d = tmp_path / "config"
-    shutil.copytree("config", d)
-    for line in ("min_win_rate = 0.1", "max_drawdown = 0.9", "min_positive_weeks = 1", "max_open_buy_share = 0.9",
-                 "min_profit_factor = 1.0"):
-        (d / "sol.toml").write_text(line + "\n", encoding="utf-8")
-        with pytest.raises(config.ConfigError):
-            config.load(d, env={})
+    assert "DCTOKEN" not in shown and "invo.token" not in shown

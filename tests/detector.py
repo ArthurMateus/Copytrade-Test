@@ -1,4 +1,5 @@
-"""Leader fill detector: turns websocket userFills into leader position moves.
+"""Test helper (the bot itself has not followed Hyperliquid wallets since 2026-10-26): turns Hyperliquid
+userFills into leader position moves, to drive the position manager in tests the way leader trades would.
 
 The leader's position before/after comes from the fill's startPosition (+ signed size), not from guessing.
 Fills of one coin that arrive together are aggregated into ONE move (a market order that sweeps 10 levels
@@ -7,47 +8,9 @@ is one trade, not ten). Duplicate fills (same tid) are dropped; websocket snapsh
 from __future__ import annotations
 
 import collections
-from dataclasses import dataclass, field
 
 from copybot.hl import Fill, is_core_perp
-
-EPS = 1e-12
-
-
-@dataclass
-class Move:
-    leader: str
-    coin: str
-    start_pos: float
-    end_pos: float
-    time_ms: int          # last fill time (exchange clock)
-    first_time_ms: int
-    oid: int              # order id of the first fill
-    oids: tuple
-    px: float             # leader's vwap
-    n_fills: int
-    tids: tuple = field(default=(), repr=False)
-
-    @property
-    def kind(self) -> str:
-        s, e = self.start_pos, self.end_pos
-        if abs(s) < EPS and abs(e) < EPS:
-            return "none"
-        if abs(s) < EPS:
-            return "open"
-        if abs(e) < EPS:
-            return "close"
-        if (s > 0) != (e > 0):
-            return "flip"
-        if abs(e) > abs(s) + EPS:
-            return "add"
-        if abs(e) < abs(s) - EPS:
-            return "reduce"
-        return "none"
-
-    @property
-    def new_side(self) -> int:
-        return 1 if self.end_pos > 0 else -1 if self.end_pos < 0 else 0
+from copybot.positions import Move
 
 
 class Detector:

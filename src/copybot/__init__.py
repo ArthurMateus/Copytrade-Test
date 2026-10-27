@@ -1,4 +1,4 @@
-"""Minimal Hyperliquid copy-trading bot. PAPER MODE ONLY: no keys, no signing, no real orders."""
+"""Invo calls copy-trading bot (paper wallets at Hyperliquid prices). PAPER MODE ONLY: no keys, no signing, no real orders."""
 
 __version__ = "0.1.0"
 

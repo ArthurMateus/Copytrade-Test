@@ -25,35 +25,6 @@ def is_core_perp(coin: str) -> bool:
 
 
 @dataclass(frozen=True)
-class Window:
-    pnl: float
-    roi: float
-    vlm: float
-
-
-@dataclass(frozen=True)
-class LbRow:
-    address: str
-    account_value: float
-    day: Window
-    week: Window
-    month: Window
-    all_time: Window
-
-
-def parse_leaderboard(obj: dict) -> list[LbRow]:
-    out = []
-    for r in obj["leaderboardRows"]:
-        w = {k: v for k, v in r["windowPerformances"]}
-        def win(name):
-            d = w.get(name) or {}
-            return Window(float(d.get("pnl", 0)), float(d.get("roi", 0)), float(d.get("vlm", 0)))
-        out.append(LbRow(r["ethAddress"].lower(), float(r["accountValue"]), win("day"), win("week"),
-                         win("month"), win("allTime")))
-    return out
-
-
-@dataclass(frozen=True)
 class Fill:
     coin: str
     px: float
@@ -94,26 +65,6 @@ def parse_fills(lst: list) -> list[Fill]:
 
 
 @dataclass(frozen=True)
-class Candle:
-    t: int
-    o: float
-    h: float
-    l: float
-    c: float
-    v: float
-
-
-def parse_funding(lst: list | None) -> list[tuple[int, float]]:
-    """fundingHistory -> [(hour ms, hourly rate)] (positive: longs pay shorts). Fixture funding_history.json."""
-    return sorted((int(x["time"]), float(x["fundingRate"])) for x in (lst or []) if x.get("fundingRate") is not None)
-
-
-def parse_candles(lst: list) -> list[Candle]:
-    return [Candle(int(c["t"]), float(c["o"]), float(c["h"]), float(c["l"]), float(c["c"]), float(c["v"]))
-            for c in lst]
-
-
-@dataclass(frozen=True)
 class Book:
     coin: str
     time: int
@@ -141,36 +92,7 @@ def parse_positions(obj: dict) -> dict[str, float]:
             if float(ap["position"]["szi"]) != 0}
 
 
-@dataclass(frozen=True)
-class OpenPos:
-    coin: str
-    szi: float         # signed size
-    value: float       # position value (USD)
-    upnl: float        # unrealized pnl (USD)
-
-
-@dataclass(frozen=True)
-class Account:
-    value: float                 # perp account value (margin summary)
-    positions: tuple = ()        # OpenPos, non-zero only
-
-
 STABLES = ("USDC", "USDT", "USDT0", "USDH", "USDE")
-
-
-def parse_spot_usd(obj: dict) -> float:
-    """spotClearinghouseState -> the stablecoins in the spot wallet (USD). On Hyperliquid spot USDC also backs perp
-    positions (its `hold` part is margin), so it is part of what a trader trades with (found 2026-10-10: a wallet with
-    1,481$ in perps and 50,626$ USDC in spot looked like it had lost 30% when only the perp value was counted)."""
-    return sum(float(b.get("total") or 0) for b in (obj or {}).get("balances", []) if b.get("coin") in STABLES)
-
-
-def parse_account(obj: dict) -> Account:
-    """clearinghouseState -> perp account value and open positions with their unrealized pnl."""
-    ps = tuple(OpenPos(p["coin"], float(p["szi"]), float(p.get("positionValue") or 0),
-                       float(p.get("unrealizedPnl") or 0))
-               for p in (ap["position"] for ap in obj.get("assetPositions", [])) if float(p["szi"]) != 0)
-    return Account(float((obj.get("marginSummary") or {}).get("accountValue") or 0), ps)
 
 
 @dataclass(frozen=True)
@@ -349,74 +271,10 @@ class Info:
     def positions(self, user: str, timeout: float) -> dict[str, float]:
         return parse_positions(self.post({"type": "clearinghouseState", "user": user}, CRITICAL, timeout))
 
-    def account(self, user: str, timeout: float = 20.0) -> Account:
-        """A leader's live account for scoring (BULK: never competes with exits)."""
-        return parse_account(self.post({"type": "clearinghouseState", "user": user}, BULK, timeout))
-
-    def spot_usd(self, user: str, timeout: float = 20.0) -> float:
-        """Stablecoins in the user's spot wallet (BULK)."""
-        return parse_spot_usd(self.post({"type": "spotClearinghouseState", "user": user}, BULK, timeout))
-
     def meta(self, cls: str = CRITICAL, timeout: float = 5.0) -> dict[str, Asset]:
         return parse_meta(self.post({"type": "metaAndAssetCtxs"}, cls, timeout))
 
-    def fills_page(self, user: str, start_ms: int, end_ms: int | None = None, timeout: float = 20.0) -> list[Fill]:
-        body = {"type": "userFillsByTime", "user": user, "startTime": int(start_ms)}
-        if end_ms:
-            body["endTime"] = int(end_ms)
-        return parse_fills(self.post(body, BULK, timeout))
-
-    def funding(self, coin: str, start_ms: int, end_ms: int, timeout: float = 20.0) -> list[tuple[int, float]]:
-        """Hourly funding rates (at most 500 per answer: ask for <= 20 days at a time)."""
-        return parse_funding(self.post({"type": "fundingHistory", "coin": coin, "startTime": int(start_ms),
-                                        "endTime": int(end_ms)}, BULK, timeout))
-
-    def candles(self, coin: str, start_ms: int, end_ms: int, interval: str = "1h", timeout: float = 20.0) -> list[Candle]:
-        return parse_candles(self.post({"type": "candleSnapshot", "req": {
-            "coin": coin, "interval": interval, "startTime": int(start_ms), "endTime": int(end_ms)}}, BULK, timeout))
-
-
-def get_json(url: str, timeout: float):
-    with urllib.request.urlopen(url, timeout=timeout) as r:
-        return json.loads(r.read())
-
-
 FILLS_PAGE = 2000
-
-
-def fetch_fills_history(info: Info, user: str, start_ms: int, end_ms: int, prior: list[Fill] | None = None,
-                        max_pages: int = 6) -> tuple[list[Fill], bool]:
-    """Page forward from start_ms. Inclusive start time -> dedupe by tid. Returns (fills, complete).
-
-    Only the latest 10,000 fills of a wallet are retrievable: max_pages=6 covers that and stops."""
-    by_tid = {f.tid: f for f in (prior or [])}
-    cursor = max([f.time for f in prior], default=start_ms) if prior else start_ms
-    complete = False
-    for _ in range(max_pages):
-        page = info.fills_page(user, cursor, end_ms)
-        new = [f for f in page if f.tid not in by_tid]
-        for f in page:
-            by_tid[f.tid] = f
-        if len(page) < FILLS_PAGE:
-            complete = True
-            break
-        last = page[-1].time
-        if last <= cursor and not new:
-            # 2000 fills in the same millisecond: cannot page further safely
-            break
-        cursor = last
-    fills = sorted(by_tid.values(), key=lambda f: (f.time, f.tid))
-    return fills, complete
-
-
-def chunk_ranges(start_ms: int, end_ms: int, chunk_ms: int) -> list[tuple[int, int]]:
-    """Aligned chunks so closed chunks are cacheable forever."""
-    out = []
-    s = (start_ms // chunk_ms) * chunk_ms
-    while s < end_ms:
-        out.append((s, s + chunk_ms - 1))
-        s += chunk_ms
-    return out
 
 
 def round_size(sz: float, decimals: int) -> float:

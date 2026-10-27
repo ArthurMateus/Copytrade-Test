@@ -1,5 +1,6 @@
-"""End to end: the real bot (all threads) against loopback fakes of Hyperliquid and Telegram.
-Includes kill -9 of the real process with an open position and proof that position and stop survive."""
+"""End to end: the real bot (all threads) against loopback fakes of Hyperliquid (prices, books, fills), Invo and
+Discord. Includes kill -9 of the real process with open copies and proof that every copy and its stop survive.
+Only the Invo book exists since 2026-10-26 (owner request); the Invo copy flows themselves are in test_invo.py."""
 from __future__ import annotations
 
 import json
@@ -16,9 +17,10 @@ import pytest
 from copybot import config, log
 from copybot.ledger import Ledger
 from copybot.runner import Bot
-from tests.fakes import FakeDiscord, FakeHL, make_fill
+from tests.fakes import FakeDiscord, FakeHL
+from tests.fakes_invo import FakeInvo
 
-LEADER = "0x" + "ab" * 20
+LEADER = "invo:nicush"
 PIN = "2468"
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -40,18 +42,13 @@ def write_config(d: Path, hl: FakeHL, dc: FakeDiscord, data: Path) -> Path:
     cdir.mkdir(parents=True, exist_ok=True)
     for f in (ROOT / "config").glob("*.toml"):
         (cdir / f.name).write_text(f.read_text(encoding="utf-8"), encoding="utf-8")
-    # the Hyperliquid book is off in the owner's config (2026-10-12); its tests turn it on
-    sel = cdir / "selection.toml"
-    sel.write_text(sel.read_text(encoding="utf-8").replace("enabled = false", "enabled = true", 1), encoding="utf-8")
     (cdir / "runtime.toml").write_text(
-        f'info_url = "{hl.info_url}"\nws_url = "{hl.ws_url}"\nleaderboard_url = "{hl.lb_url}"\n'
+        f'info_url = "{hl.info_url}"\nws_url = "{hl.ws_url}"\n'
         f'data_dir = "{data.as_posix()}"\nlog_dir = "{(data / "logs").as_posix()}"\n'
         f'tick_s = 0.05\nreconcile_s = 2.0\nclock_refresh_s = 5.0\n', encoding="utf-8")
     (cdir / "discord.toml").write_text(
         f'api_base = "{dc.api_base}"\ngateway_url = "{dc.gateway_url}"\nedit_min_interval_s = 0.3\n'
         'min_send_interval_s = 0.02\n', encoding="utf-8")
-    # the Solana book needs no secret, so it would start and reach the REAL Solana network: off unless a test turns it on
-    (cdir / "sol.toml").write_text("enabled = false\n", encoding="utf-8")
     return cdir
 
 
@@ -60,16 +57,15 @@ def env_for(dc: FakeDiscord) -> dict:
             "DISCORD_OWNER_ID": dc.owner, "COPYBOT_PIN": PIN, "PYTHONUNBUFFERED": "1"}
 
 
-def seed_ledger(data: Path, leader=LEADER):
+def seed_ledger(data: Path):
     lg = Ledger(data / "ledger.jsonl")
     lg.replay()
     lg.append({"ev": "genesis", "equity0": 300, "btc_px0": 100_000})
-    lg.append({"ev": "follow", "leader": leader})
     lg.close()
 
 
-def ledger_events(data: Path) -> list[dict]:
-    p = data / "ledger.jsonl"
+def ledger_events(path: Path) -> list[dict]:
+    p = path if path.suffix == ".jsonl" else path / "ledger.jsonl"
     if not p.exists():
         return []
     out = []
@@ -92,274 +88,19 @@ def env(tmp_path):
     dc.close()
 
 
-def leader_fill(hl, coin, sz, side, oid=None):
-    start = hl.positions.get(LEADER, {}).get(coin, 0.0)
-    return make_fill(coin, hl.mids[coin], sz, side, start, oid=oid or random.randint(1, 10**9))
-
-
-def test_full_bot_in_process(env):
+def start_bot(env):
     hl, dc, data, cdir = env
     seed_ledger(data)
-    e = env_for(dc)
-    cfg = config.load(cdir, env=e)
+    cfg = config.load(cdir, env=env_for(dc))
     log.setup(str(data / "logs"))
     for s in (cfg.dc_token, cfg.pin):
         log.add_secret(s)
     bot = Bot(cfg)
     th = threading.Thread(target=bot.run, daemon=True)
     th.start()
-    try:
-        assert wait_for(lambda: LEADER in hl.subscribed_users())
-        assert wait_for(lambda: bot.health().clock_ok and bot.health().mids_age_s < 1)
-        # leader opens -> we open within the lag target, with a stop, and one live card appears
-        t_fill = time.time()
-        hl.push_fills(LEADER, [leader_fill(hl, "ETH", 50, "B")])
-        assert wait_for(lambda: "ETH" in bot.st.positions, timeout=5)
-        assert time.time() - t_fill < 5
-        p = bot.st.positions["ETH"]
-        assert p.stop_px == pytest.approx(p.entry_px * 0.97)
-        assert bot.st.lags_ms[-1] < 5000
-        assert wait_for(lambda: any("<b>ETH</b> ⬆️ LONG" in m["text"] for m in dc.sent))
-        card = next(m for m in dc.sent if "<b>ETH</b> ⬆️ LONG" in m["text"])["message_id"]
-        # price moves -> the SAME message is edited
-        hl.mids["ETH"] = 3030.0
-        assert wait_for(lambda: "3,030" in dc.text(card) or "3030" in dc.text(card))
-        n_sent = len(dc.sent)
-        # commands
-        dc.say("/status")
-        assert wait_for(lambda: any("📊 <b>Status</b>" in m["text"] for m in dc.sent))
-        dc.say("/trades")
-        assert wait_for(lambda: any("💼 <b>Trades</b> · 1 open" in m["text"] and "<b>ETH</b>" in m["text"]
-                                    for m in dc.sent))
-        dc.say("/traders")
-        assert wait_for(lambda: any("👥 <b>Traders</b>" in m["text"] for m in dc.sent))
-        # side wallets copied the same open at their own risk
-        assert [w.risk_pct for w in bot.sides if not w.name.startswith("mirror")] == [2.0, 5.0, 10.0, 20.0]
-        assert [w.name for w in bot.sides if w.name.startswith("mirror")] == ["mirror_x10"]
-        assert all("ETH" in w.st.positions for w in bot.sides[:2])
-        r5 = next(w for w in bot.sides if w.risk_pct == 5.0).st.positions["ETH"]
-        assert r5.risk_usd() == pytest.approx(5 * bot.st.positions["ETH"].risk_usd(), rel=0.05)
-        dc.say("/wallets")
-        assert wait_for(lambda: any("💰 <b>Wallets</b>" in m["text"] and "20% risk" in m["text"]
-                                    and "1% risk (main)" in m["text"] for m in dc.sent))
-        dc.say("/flatten 0000")
-        assert wait_for(lambda: any("Wrong or missing PIN" in m["text"] for m in dc.sent))
-        assert "ETH" in bot.st.positions
-        dc.say("/pause")
-        assert wait_for(lambda: bot.st.entries_paused)
-        hl.push_fills(LEADER, [leader_fill(hl, "SOL", 100, "B")])     # refused: paused
-        time.sleep(0.5)
-        assert "SOL" not in bot.st.positions
-        dc.say("/resume")
-        assert wait_for(lambda: not bot.st.entries_paused)
-        # leader closes -> we close, and the trade card becomes a final summary in place
-        hl.push_fills(LEADER, [leader_fill(hl, "ETH", 50, "A")])
-        assert wait_for(lambda: "ETH" not in bot.st.positions, timeout=5)
-        assert wait_for(lambda: "✅ WIN" in dc.text(card) and "the trader closed" in dc.text(card))
-        assert not any("ETH" in m["text"] and "WIN" in m["text"] for m in dc.sent[n_sent:])   # no new message
-        # flatten with PIN
-        hl.push_fills(LEADER, [leader_fill(hl, "BTC", 5, "A")])
-        assert wait_for(lambda: "BTC" in bot.st.positions, timeout=5)
-        dc.say(f"/flatten {PIN}")
-        assert wait_for(lambda: not bot.st.positions and bot.st.entries_paused)
-        # secrets never in the logs
-        for h in log.log.handlers:
-            h.flush()
-        text = (data / "logs" / "copybot.log").read_text(encoding="utf-8")
-        assert PIN not in text and dc.token not in text
-        assert "event=copy_open" in text and "lag_ms=" in text
-    finally:
-        bot.stop.set()
-        th.join(5)
-        bot.shutdown()
-
-
-def test_ws_drop_missed_close_is_caught_by_reconcile(env):
-    hl, dc, data, cdir = env
-    seed_ledger(data)
-    cfg = config.load(cdir, env=env_for(dc))
-    log.setup(None)
-    bot = Bot(cfg)
-    th = threading.Thread(target=bot.run, daemon=True)
-    th.start()
-    try:
-        assert wait_for(lambda: LEADER in hl.subscribed_users() and bot.health().clock_ok)
-        hl.push_fills(LEADER, [leader_fill(hl, "BTC", 2, "B")])
-        assert wait_for(lambda: "BTC" in bot.st.positions)
-        # websocket drops; the leader closes meanwhile (we never see the fill)
-        hl.positions[LEADER] = {}
-        hl.drop_ws()
-        assert wait_for(lambda: "BTC" not in bot.st.positions, timeout=10)
-        assert bot.st.closed[-1]["reason"] == "reconcile_leader_flat"
-        # a quick reconnect (Hyperliquid's routine "Expired" close) is not worth an alert
-        assert not any("ebsocket" in m["text"] for m in dc.sent)
-    finally:
-        bot.stop.set()
-        th.join(5)
-        bot.shutdown()
-
-
-def start_proc(cdir, dc, data, n):
-    out = open(data / f"stdout{n}.txt", "wb")
-    return subprocess.Popen([sys.executable, "-m", "copybot.runner", "--config", str(cdir)], env=env_for(dc),
-                            stdout=out, stderr=subprocess.STDOUT, cwd=str(ROOT))
-
-
-def test_kill_minus_9_with_open_position_stop_survives(env):
-    hl, dc, data, cdir = env
-    seed_ledger(data)
-    proc = start_proc(cdir, dc, data, 1)
-    try:
-        assert wait_for(lambda: LEADER in hl.subscribed_users(), timeout=30)
-        assert wait_for(lambda: any("Copybot started" in m["text"] for m in dc.sent), timeout=10)
-        time.sleep(1.0)   # clock estimate
-        hl.push_fills(LEADER, [leader_fill(hl, "ETH", 40, "B")])
-        assert wait_for(lambda: any(e["ev"] == "open" for e in ledger_events(data)), timeout=10)
-    finally:
-        proc.kill()   # kill -9
-        proc.wait()
-    opened = [e for e in ledger_events(data) if e["ev"] == "open"]
-    assert len(opened) == 1
-    stop = opened[0]["pos"]["stop_px"]
-    # while we are dead the price falls through the stop
-    hl.mids["ETH"] = stop * 0.995
-    proc = start_proc(cdir, dc, data, 2)
-    try:
-        assert wait_for(lambda: any(e["ev"] == "close" and e.get("reason") == "stop" for e in ledger_events(data)),
-                        timeout=30)
-        evs = ledger_events(data)
-        assert len([e for e in evs if e["ev"] == "open"]) == 1   # never double-opened
-        st = Ledger(data / "ledger.jsonl").replay()
-        assert not st.positions and st.closed[-1]["reason"] == "stop"
-    finally:
-        proc.kill()
-        proc.wait()
-
-
-def test_random_kills_never_lose_a_position_or_its_stop(env):
-    hl, dc, data, cdir = env
-    seed_ledger(data)
-    rng = random.Random(11)
-    n = 0
-    survived = 0
-    coins = ["ETH", "SOL", "BTC"]
-    for rnd in range(4):
-        n += 1
-        proc = start_proc(cdir, dc, data, n)
-        try:
-            assert wait_for(lambda: LEADER in hl.subscribed_users(), timeout=30)
-            time.sleep(1.2)
-            coin = coins[rnd % 3]
-            hl.push_fills(LEADER, [leader_fill(hl, coin, {"ETH": 40, "SOL": 500, "BTC": 2}[coin], "B")])
-            time.sleep(rng.uniform(0.0, 1.5))   # kill at a random point: before, during or after the open
-        finally:
-            proc.kill()
-            proc.wait()
-            hl.drop_ws()
-        for path in [data / "ledger.jsonl", *sorted((data / "wallets").glob("*/ledger.jsonl"))]:
-            st = Ledger(path).replay()                          # the main wallet and every side wallet
-            survived += len(st.positions) if path.parent == data else 0
-            for p in st.positions.values():
-                assert p.stop_px > 0 and p.stop_px < p.entry_px     # every surviving long has its stop
-            for u in st.uncertain:
-                assert "truncated" in u or "no recorded result" in u, u
-    assert survived >= 1    # the kills really happened with open positions
-    # final run: the leader closes everything; every copy we hold must be closed, none opened twice
-    n += 1
-    proc = start_proc(cdir, dc, data, n)
-    try:
-        assert wait_for(lambda: LEADER in hl.subscribed_users(), timeout=30)
-        time.sleep(1.0)
-        for coin, szi in list(hl.positions.get(LEADER, {}).items()):
-            hl.push_fills(LEADER, [make_fill(coin, hl.mids[coin], abs(szi), "A", szi)])
-        ledgers = [data, *sorted(p for p in (data / "wallets").iterdir())]
-        assert len(ledgers) == 6            # main + 4 risk levels + the mirror wallet
-        assert wait_for(lambda: not any(Ledger(d / "ledger.jsonl").replay().positions for d in ledgers), timeout=20)
-        for d in ledgers:                                  # in EVERY wallet: nothing opened twice, nothing left
-            evs = ledger_events(d)
-            ids = [e["pos"]["pos_id"] for e in evs if e["ev"] == "open"]
-            assert len(ids) == len(set(ids))
-            coins_open = [e["pos"]["coin"] for e in evs if e["ev"] == "open"]
-            assert len(coins_open) == len(set(coins_open)), d   # each coin was opened at most once
-    finally:
-        proc.kill()
-        proc.wait()
-
-
-def test_ws_alert_only_when_it_stays_down(env):
-    hl, dc, data, cdir = env
-    seed_ledger(data)
-    (cdir / "runtime.toml").write_text((cdir / "runtime.toml").read_text(encoding="utf-8")
-                                       + "ws_alert_after_s = 2.0\n", encoding="utf-8")
-    cfg = config.load(cdir, env=env_for(dc))
-    log.setup(None)
-    bot = Bot(cfg)
-    th = threading.Thread(target=bot.run, daemon=True)
-    th.start()
-    try:
-        assert wait_for(lambda: LEADER in hl.subscribed_users() and bot.feed.connected)
-        hl.ws_refuse = True
-        hl.drop_ws()
-        assert wait_for(lambda: any("websocket down for" in m["text"] for m in dc.sent), timeout=15)
-        assert sum("websocket down" in m["text"] for m in dc.sent) == 1        # once, not on every retry
-        hl.ws_refuse = False
-        assert wait_for(lambda: any("Websocket back after" in m["text"] for m in dc.sent), timeout=30)
-    finally:
-        bot.stop.set()
-        th.join(5)
-        bot.shutdown()
-
-
-# ---- /search, /reset, /restart -----------------------------------------------------------------------------
-def start_bot(env, scorer=False):
-    hl, dc, data, cdir = env
-    seed_ledger(data)
-    cfg = config.load(cdir, env=env_for(dc))
-    log.setup(str(data / "logs"))
-    bot = Bot(cfg)
-    if not scorer:
-        bot.scorer.stop.set()          # the test feeds rankings itself
-    th = threading.Thread(target=bot.run, daemon=True)
-    th.start()
-    assert wait_for(lambda: LEADER in hl.subscribed_users() and bot.health().clock_ok)
+    assert wait_for(lambda: bot.health().clock_ok and bot.health().mids_age_s < 1)
     return bot, th
 
-
-
-def test_with_the_hyperliquid_book_off_only_invo_runs(env):
-    """Owner request 2026-10-12 ("only leaving invo"): selection.enabled = false. No Hyperliquid copies, side wallets or
-    search; its commands are hidden (but /hyperflatten) and answer that the book is off; prices still flow."""
-    hl, dc, data, cdir = env
-    sel = cdir / "selection.toml"
-    sel.write_text(sel.read_text(encoding="utf-8").replace("enabled = true", "enabled = false", 1), encoding="utf-8")
-    seed_ledger(data)
-    bot = Bot(config.load(cdir, env=env_for(dc)))
-    th = threading.Thread(target=bot.run, daemon=True)
-    th.start()
-    try:
-        assert wait_for(lambda: bot.health().clock_ok and bot.health().mids_age_s < 1)
-        assert wait_for(lambda: any("Hyperliquid book: off" in m["text"] for m in dc.sent))
-        assert bot.st.entries_paused and not bot.sides and LEADER not in hl.subscribed_users()
-        assert wait_for(lambda: dc.commands is not None)
-        names = {c["name"] for c in dc.commands}
-        # only Invo: its commands lose the prefix (owner request 2026-10-12), /hyperflatten stays for leftovers
-        assert {"hyperflatten", "status", "wallets", "traders", "follow", "block", "unblock", "flatten"} <= names
-        assert not {"hyperstatus", "hyperadd", "fomostatus", "invostatus", "invowallets"} & names
-        flat = next(c for c in dc.commands if c["name"] == "flatten")
-        assert flat["options"][0]["name"] == "pin"
-        follow = next(c for c in dc.commands if c["name"] == "follow")
-        assert follow["options"][0]["name"] == "wallet" and "Invo" not in follow["description"][:5]
-        hl.push_fills(LEADER, [leader_fill(hl, "ETH", 50, "B")])
-        dc.say("/hyperstatus")
-        assert wait_for(lambda: any("Hyperliquid book is off" in m["text"] for m in dc.sent))
-        dc.say("/wallets")                                      # = /invowallets (Invo itself is off here: no token)
-        assert wait_for(lambda: any("Invo is off" in m["text"] for m in dc.sent))
-        assert bot.st.entries_paused                            # never reached the Hyperliquid wallet
-        dc.say("/help")
-        assert wait_for(lambda: any("/follow nicush" in m["text"] for m in dc.sent))
-        assert "ETH" not in bot.st.positions and not bot.scorer.scores
-    finally:
-        stop_bot(bot, th)
 
 def stop_bot(bot, th):
     bot.stop.set()
@@ -367,58 +108,54 @@ def stop_bot(bot, th):
     bot.shutdown()
 
 
-TOP = [f"0x{i:040x}" for i in range(1, 10)]
-
-
-def test_search_repicks_the_best_seven_now(env):
+def test_only_the_invo_commands_exist_and_prices_still_flow(env):
+    """Owner request 2026-10-26: the Hyperliquid and FOMO books, the arena and the bot's own Invo search are gone.
+    Hyperliquid still gives the prices (and books and fills) of the Invo copies; Invo itself is off without a token."""
     hl, dc, data, cdir = env
     bot, th = start_bot(env)
     try:
-        scores = {a: {"score": 90 - i, "trades": 100, "win_rate": 0.7, "profit_factor": 3} for i, a in enumerate(TOP)}
-        bot.q.put(("ranking", TOP, len(TOP), scores))
-        assert wait_for(lambda: bot.ranking == TOP)
-        dc.say("/search")
-        assert wait_for(lambda: set(bot.st.followed) == set(TOP[:7]))     # at once: no window, no 2 checks
-        assert LEADER in bot.st.dropped                                     # it is not in the ranking any more
-        assert wait_for(lambda: all(set(w.st.followed) == set(TOP[:7]) for w in bot.sides))   # synced just after
-        assert wait_for(lambda: any("following 7 new, dropping 1" in m["text"] for m in dc.sent))
-        assert bot.search_pending
-        better = [f"0x{i:040x}" for i in range(50, 52)] + TOP          # the background search found 2 better ones
-        scores.update({a: {"score": 99, "trades": 100, "win_rate": 0.8, "profit_factor": 4} for a in better[:2]})
-        bot.q.put(("searched", better, len(better), scores))
-        assert wait_for(lambda: set(bot.st.followed) == set(better[:7]))
-        assert TOP[5] in bot.st.dropped and TOP[6] in bot.st.dropped
-        assert wait_for(lambda: any("Search finished" in m["text"] for m in dc.sent)) and not bot.search_pending
+        assert wait_for(lambda: any("Copybot started" in m["text"] and "Invo is off" in m["text"] for m in dc.sent))
+        assert not bot.sides and not hl.subscribed_users()                  # no Hyperliquid wallet is followed
+        assert wait_for(lambda: dc.commands is not None)
+        names = {c["name"] for c in dc.commands}
+        assert names == {"help", "restart", "status", "trades", "traders", "wallets", "progress", "follow",
+                         "unfollow", "block", "unblock", "pause", "resume", "flatten", "reset"}
+        flat = next(c for c in dc.commands if c["name"] == "flatten")
+        assert flat["options"][0]["name"] == "pin"
+        follow = next(c for c in dc.commands if c["name"] == "follow")
+        assert follow["options"][0]["name"] == "wallet" and "Invo" in follow["description"]
+        dc.say("/wallets")
+        assert wait_for(lambda: any("Invo is off" in m["text"] for m in dc.sent))
+        dc.say("/help")
+        assert wait_for(lambda: any("/follow nicush" in m["text"] for m in dc.sent))
+        assert not any("/hyper" in m["text"] or "/fomo" in m["text"] or "/invo" in m["text"] for m in dc.sent)
+        hl.mids["ETH"] = 3123.0
+        assert wait_for(lambda: bot.mids.get("ETH") == 3123.0)
+        for h in log.log.handlers:
+            h.flush()
+        text = (data / "logs" / "copybot.log").read_text(encoding="utf-8")
+        assert PIN not in text and dc.token not in text                   # secrets never in the logs
     finally:
         stop_bot(bot, th)
 
 
-def test_reset_needs_no_open_trades_and_the_pin_then_starts_fresh(env):
+def test_ws_alert_only_when_it_stays_down(env):
     hl, dc, data, cdir = env
+    (cdir / "runtime.toml").write_text((cdir / "runtime.toml").read_text(encoding="utf-8")
+                                       + "ws_alert_after_s = 2.0\n", encoding="utf-8")
     bot, th = start_bot(env)
     try:
-        hl.push_fills(LEADER, [leader_fill(hl, "ETH", 50, "B")])
-        assert wait_for(lambda: "ETH" in bot.st.positions and "ETH" in bot.sides[0].st.positions)
-        dc.say(f"/reset {PIN}")
-        assert wait_for(lambda: any("Reset refused" in m["text"] for m in dc.sent))
-        hl.mids["ETH"] = 3010.0
-        hl.push_fills(LEADER, [leader_fill(hl, "ETH", 50, "A")])
-        assert wait_for(lambda: not bot.st.positions and not any(w.st.positions for w in bot.sides))
-        assert bot.st.closed and bot.st.realized != 0
-        since = bot.st.followed[LEADER]
-        dc.say("/reset 0000")
-        assert wait_for(lambda: any("Wrong or missing PIN. Usage: /hyperreset" in m["text"] for m in dc.sent))
-        dc.say(f"/reset {PIN}")
-        assert wait_for(lambda: any("Reset done" in m["text"] for m in dc.sent))
-        assert wait_for(lambda: bot.stop.is_set(), timeout=8)              # restarts itself
-        th.join(5)
-        arch = next((data / "archive").glob("reset-*"))
-        old = Ledger(arch / "ledger.jsonl").replay()
-        assert old.closed and old.realized != 0                             # nothing deleted
-        assert (arch / "wallets" / "risk_20pct" / "ledger.jsonl").exists() and not (data / "wallets" / "risk_20pct").exists()
-        new = Ledger(data / "ledger.jsonl").replay()
-        assert new.equity() == 300 and not new.closed and not new.positions and not new.uncertain
-        assert new.followed == {LEADER: since}                             # traders kept, with their 'since'
+        assert wait_for(lambda: bot.feed.connected)
+        hl.drop_ws()                                    # a quick reconnect (Hyperliquid's "Expired"): no alert
+        time.sleep(1.0)
+        assert wait_for(lambda: bot.feed.connected)
+        assert not any("ebsocket" in m["text"] for m in dc.sent)
+        hl.ws_refuse = True
+        hl.drop_ws()
+        assert wait_for(lambda: any("websocket down for" in m["text"] for m in dc.sent), timeout=15)
+        assert sum("websocket down" in m["text"] for m in dc.sent) == 1        # once, not on every retry
+        hl.ws_refuse = False
+        assert wait_for(lambda: any("Websocket back after" in m["text"] for m in dc.sent), timeout=30)
     finally:
         stop_bot(bot, th)
 
@@ -434,91 +171,115 @@ def test_restart_command_stops_the_loop_for_the_restart_loop(env):
         stop_bot(bot, th)
 
 
-def test_hyperadd_queues_the_wallet_and_follows_it_when_it_passes(env):
+# ---- kill -9 of the real process -------------------------------------------------------------------------------
+@pytest.fixture
+def proc_env(env, tmp_path):
+    """The real process with Invo on (the fake's login) and @nicush already followed."""
     hl, dc, data, cdir = env
-    bot, th = start_bot(env)
+    f = FakeInvo()
+    tok = tmp_path / "invo.token"
+    tok.write_text("REFRESH0", encoding="utf-8")
+    kept = [x for x in (ROOT / "config" / "invo.toml").read_text(encoding="utf-8").splitlines()
+            if not x.startswith(("api_base", "poll_s"))]               # the owner's invo.toml, on the fake
+    (cdir / "invo.toml").write_text("\n".join(kept) + f'\napi_base = "{f.url}"\npoll_s = 0.5\n', encoding="utf-8")
+    pid = f.add_user("nicush")[0]
+    seed_ledger(data)
+    lg = Ledger(data / "wallets" / "invo_calls" / "ledger.jsonl")
+    lg.replay()
+    lg.append({"ev": "follow", "leader": LEADER, "picked": True})
+    lg.close()
+    yield hl, dc, data, cdir, f, tok, pid
+    f.close()
+
+
+def start_proc(cdir, dc, data, tok, n):
+    out = open(data / f"stdout{n}.txt", "wb")
+    return subprocess.Popen([sys.executable, "-m", "copybot.runner", "--config", str(cdir)],
+                            env={**env_for(dc), "INVO_TOKEN_FILE": str(tok)},
+                            stdout=out, stderr=subprocess.STDOUT, cwd=str(ROOT))
+
+
+def wallet_dirs(data: Path) -> list[Path]:
+    return sorted(p for p in (data / "wallets").iterdir() if (p / "ledger.jsonl").exists())
+
+
+def started(dc, n):
+    return sum("Copybot started" in m["text"] for m in dc.sent) >= n
+
+
+def test_kill_minus_9_with_an_open_copy_its_stop_survives(proc_env):
+    hl, dc, data, cdir, f, tok, pid = proc_env
+    proc = start_proc(cdir, dc, data, tok, 1)
+    stop3 = data / "wallets" / "invo_calls_stop3"
     try:
-        dc.say("/hyperadd nonsense")
-        assert wait_for(lambda: any("Usage: /hyperadd" in m["text"] for m in dc.sent))
-        new = "0x" + "C1" * 20
-        dc.say(f"/hyperadd {new}")
-        assert wait_for(lambda: bot.scorer.add_q.qsize() == 1)
-        assert bot.scorer.add_q.get() == new.lower()
-        good = {"eligible": True, "score": 88, "trades": 120, "win_rate": 0.7, "profit_factor": 3}
-        bot.q.put(("added", new.lower(), {"ok": True}, good, [new.lower()], {new.lower(): good}))
-        assert wait_for(lambda: new.lower() in bot.st.followed)
-        assert wait_for(lambda: all(new.lower() in w.st.followed for w in bot.sides))
-        bad = "0x" + "d2" * 20
-        bot.q.put(("added", bad, {"ok": True}, {"eligible": False, "reasons": ["win_rate<60%"]}, [], {}))
-        assert wait_for(lambda: any("fails the strict rules: win_rate&lt;60%" in m["text"] for m in dc.sent))
-        assert bad not in bot.st.followed
+        assert wait_for(lambda: started(dc, 1), timeout=30)
+        time.sleep(2.0)                                  # clock estimate and the watcher's first read (baseline)
+        f.open_call(pid, "ETH", long=True, leverage=5, size=0.05, entry=hl.mids["ETH"])
+        assert wait_for(lambda: any(e["ev"] == "open" for e in ledger_events(stop3)), timeout=15)
     finally:
-        stop_bot(bot, th)
-
-
-def test_mirror_wallet_sizes_copies_by_the_leaders_share_of_its_account(env):
-    """The leader's account is worth ~541,765$ (recorded clearinghouseState). A 1 ETH buy (~3,000$) is 0.55% of it:
-    the mirror wallet buys 10 x 0.55% = 5.5% of its 300$ (~16.6$). A tiny buy is lifted to the 10$ minimum, and
-    the main wallet keeps its fixed-risk size."""
-    hl, dc, data, cdir = env
-    bot, th = start_bot(env)
+        proc.kill()   # kill -9
+        proc.wait()
+    opened = [e for e in ledger_events(stop3) if e["ev"] == "open"]
+    assert len(opened) == 1
+    stop = opened[0]["pos"]["stop_px"]
+    assert stop == pytest.approx(opened[0]["pos"]["entry_px"] * 0.97)
+    hl.mids["ETH"] = stop * 0.995                        # while we are dead the price falls through the 3% stop
+    proc = start_proc(cdir, dc, data, tok, 2)
     try:
-        mirror = next(w for w in bot.sides if w.name.startswith("mirror"))
-        assert wait_for(lambda: bot.leader_value.get(LEADER, 0) > 500_000, timeout=10)
-        hl.push_fills(LEADER, [leader_fill(hl, "ETH", 1, "B")])
-        assert wait_for(lambda: "ETH" in mirror.st.positions and "ETH" in bot.st.positions, timeout=10)
-        p = mirror.st.positions["ETH"]
-        share = 1 * 3000.0 / bot.leader_value[LEADER]
-        assert p.size * p.entry_px == pytest.approx(share * 10 * 300, rel=0.05)
-        main = bot.st.positions["ETH"]
-        assert main.size * main.entry_px > 60                               # fixed 1% risk at a 3% stop: ~100$
-        hl.push_fills(LEADER, [leader_fill(hl, "SOL", 0.5, "B")])          # 75$ of 541k: 0.014% -> lifted to 10$
-        assert wait_for(lambda: "SOL" in mirror.st.positions, timeout=10)
-        q = mirror.st.positions["SOL"]
-        assert 10 <= q.size * q.entry_px < 12
-        dc.say("/hyperwallet")
-        assert wait_for(lambda: any("mirror x10 (their % of account)" in m["text"] for m in dc.sent + dc.edits))
+        assert wait_for(lambda: any(e["ev"] == "close" and e.get("reason") == "stop" for e in ledger_events(stop3)),
+                        timeout=30)
+        assert len([e for e in ledger_events(stop3) if e["ev"] == "open"]) == 1   # never double-opened
+        st = Ledger(stop3 / "ledger.jsonl").replay()
+        assert not st.positions and st.closed[-1]["reason"] == "stop"
+        main = Ledger(data / "wallets" / "invo_calls" / "ledger.jsonl").replay()
+        assert "ETH" in main.positions                   # the trader's-exit wallet still holds it (its guard is far)
     finally:
-        stop_bot(bot, th)
+        proc.kill()
+        proc.wait()
 
 
-def test_rankings_only_report_and_picks_lists_them_with_the_follow_command(env):
-    """selection.auto_follow = false (default): a new ranking follows nobody; /picks shows the best with /hyperadd."""
-    hl, dc, data, cdir = env
-    bot, th = start_bot(env)
+def test_random_kills_never_lose_a_copy_or_its_stop(proc_env):
+    hl, dc, data, cdir, f, tok, pid = proc_env
+    rng = random.Random(11)
+    coins = ["ETH", "SOL", "BTC"]
+    n = 0
+    for rnd in range(3):
+        n += 1
+        proc = start_proc(cdir, dc, data, tok, n)
+        try:
+            assert wait_for(lambda: started(dc, n), timeout=30)
+            time.sleep(2.0)
+            coin = coins[rnd]
+            f.open_call(pid, coin, long=True, leverage=5, size=0.05, entry=hl.mids[coin])
+            time.sleep(rng.uniform(0.5, 3.0))            # kill at a random point: before, during or after the copies
+        finally:
+            proc.kill()
+            proc.wait()
+            hl.drop_ws()
+        for d in wallet_dirs(data):
+            st = Ledger(d / "ledger.jsonl").replay()
+            for p in st.positions.values():
+                assert 0 < p.stop_px < p.entry_px, d.name        # every surviving long has its stop
+            for u in st.uncertain:
+                assert "truncated" in u or "no recorded result" in u, u
+    assert any(Ledger(d / "ledger.jsonl").replay().positions for d in wallet_dirs(data))   # kills hit open copies
+    # final run: the trader closes every call; every copy must close, none opened twice
+    n += 1
+    proc = start_proc(cdir, dc, data, tok, n)
     try:
-        scores = {a: {"eligible": True, "score": 90 - i, "trades": 100, "win_rate": 0.7, "profit_factor": 3,
-                      "max_dd": 0.1} for i, a in enumerate(TOP)}
-        bot.q.put(("ranking", TOP, len(TOP), scores))
-        assert wait_for(lambda: bot.ranking == TOP)
-        time.sleep(0.5)
-        assert set(bot.st.followed) == {LEADER}                 # nobody joined (LEADER not ranked: 1 bad cycle only)
-        dc.say("/picks")
-        assert wait_for(lambda: any("Daily picks · 🔷 Hyperliquid" in m["text"] for m in dc.sent))
-        msg = next(m["text"] for m in dc.sent if "Daily picks · 🔷 Hyperliquid" in m["text"])
-        assert f"<code>/hyperadd {TOP[0]}</code>" in msg and f"/hyperadd {TOP[7]}" not in msg     # the best 7
-        assert "70% win" in msg
+        assert wait_for(lambda: started(dc, n), timeout=30)
+        time.sleep(2.0)
+        for c in list(f.calls[pid]):
+            f.close_call(pid, c["id"])
+        dirs = wallet_dirs(data)
+        assert len(dirs) == 18                                    # every size x every stop
+        assert wait_for(lambda: not any(Ledger(d / "ledger.jsonl").replay().positions for d in dirs), timeout=30)
+        for d in dirs:
+            evs = ledger_events(d)
+            ids = [e["pos"]["pos_id"] for e in evs if e["ev"] == "open"]
+            assert len(ids) == len(set(ids)), d.name
+            coins_open = [e["pos"]["coin"] for e in evs if e["ev"] == "open"]
+            assert len(coins_open) == len(set(coins_open)), d.name   # each coin was opened at most once
     finally:
-        stop_bot(bot, th)
-
-
-def test_hyperfollow_and_hyperunfollow(env):
-    """A wallet you picked, followed without the strict rules: kept through ranking cycles, dropped on request."""
-    hl, dc, data, cdir = env
-    bot, th = start_bot(env)
-    pick = "0x" + "ab" * 20
-    try:
-        dc.say("/hyperfollow nonsense")
-        assert wait_for(lambda: any("Usage: /hyperfollow" in m["text"] for m in dc.sent))
-        dc.say(f"/hyperfollow {pick}")
-        assert wait_for(lambda: pick in bot.st.followed and pick in bot.st.picked)
-        assert wait_for(lambda: all(pick in w.st.followed for w in bot.sides if not w.own_leaders))
-        assert wait_for(lambda: any("your pick, without the strict rules" in m["text"] for m in dc.sent))
-        bot.q.put(("ranking", TOP, len(TOP), {a: {"eligible": True, "score": 80} for a in TOP}))
-        time.sleep(0.5)
-        assert pick in bot.st.followed                       # not ranked, still followed: your pick
-        dc.say(f"/hyperunfollow {pick}")
-        assert wait_for(lambda: pick not in bot.st.followed)
-        assert wait_for(lambda: all(pick not in w.st.followed for w in bot.sides))
-    finally:
-        stop_bot(bot, th)
+        proc.kill()
+        proc.wait()

@@ -1,14 +1,12 @@
-"""Side wallets: extra paper wallets that copy the SAME leader moves as the main wallet at another risk level.
+"""The Invo wallets: paper wallets that copy the same Invo calls at different sizes and stops (runner.Bot.invo_set).
 
-Each side wallet has its own $start_equity, its own ledger (data/wallets/<name>/ledger.jsonl), State, RiskGate
-and PositionManager, so it is restart-safe exactly like the main wallet. Every limit is scaled with the risk
-level (`config.scaled`). They follow the main wallet's leaders (followed and paused sets are synced from it),
-never pause leaders on their own, post no trade cards, and an error in one never touches the main wallet.
+Each has its own $start_equity, its own ledger (data/wallets/<name>/ledger.jsonl), State, RiskGate and
+PositionManager, so it is restart-safe on its own. Every limit is scaled with its risk level (`config.scaled`).
+An error in one never touches the others.
 """
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable
 
 from copybot import config, log
 from copybot.broker import PaperBroker
@@ -17,54 +15,29 @@ from copybot.positions import PositionManager
 from copybot.risk import RiskGate
 
 
-def wallet_name(risk_pct: float) -> str:
-    return f"risk_{risk_pct:g}pct"
-
-
 class SideWallet:
     def __init__(self, base: config.Config, risk_pct: float, data_dir: Path, broker: PaperBroker, health,
-                 mids: dict, assets: dict, alts_ok: Callable[[str], bool], score_of: Callable[[str], float],
-                 name: str = "", label: str = "", sizer=None, own_leaders: bool = False, notify=None, cap=None,
+                 mids: dict, assets: dict, name: str, label: str, sizer=None, notify=None, cap=None,
                  pause_leaders: bool = False):
-        """`sizer` (the mirror wallet): its own copy sizes; `risk_pct` then only sets the limits that clamp them.
-        `own_leaders` (the Invo calls wallet): it follows its own traders and gets its own moves, never the main
-        wallet's (the runner skips it for leader sync, Hyperliquid moves and reconcile). `cap`: equity -> the most
-        notional one copy may hold (the Invo calls wallet's invo.max_risk_pct)."""
-        self.own_leaders = own_leaders
+        """`sizer`: its own copy sizes (equity, price -> size); `risk_pct` then only sets the limits that clamp them.
+        `cap`: equity -> the most notional one copy may hold (the trader-size wallet's invo.max_risk_pct)."""
         self.risk_pct = risk_pct
-        self.name = name or wallet_name(risk_pct)
-        self.label = label or f"{risk_pct:g}% risk"
+        self.name = name
+        self.label = label
         self.cfg = config.scaled(base, risk_pct)
         path = Path(data_dir) / "wallets" / self.name
         path.mkdir(parents=True, exist_ok=True)
         self.ledger = Ledger(path / "ledger.jsonl")
         self.st: State = self.ledger.replay()
-        self.gate = RiskGate(self.cfg, alts_ok=alts_ok)
+        self.gate = RiskGate(self.cfg)
         self.pm = PositionManager(self.cfg, self.st, self.ledger, self.gate, broker, health, mids, assets,
-                                  score_of=score_of, pause_leaders=pause_leaders, sizer=sizer, cap=cap,
+                                  pause_leaders=pause_leaders, sizer=sizer, cap=cap,
                                   **({"notify": notify} if notify else {}))
 
     def rec(self, ev: dict) -> dict:
         ev = self.ledger.append(ev)
         self.st.apply(ev)
         return ev
-
-    def sync_leaders(self, main: State) -> None:
-        """Follow exactly the main wallet's leaders, with its pauses."""
-        if self.own_leaders:
-            return
-        for a in main.followed:
-            if a not in self.st.followed:
-                self.rec({"ev": "follow", "leader": a})
-        for a in list(self.st.followed):
-            if a not in main.followed:
-                self.rec({"ev": "unfollow", "leader": a, "reason": "dropped by the main wallet"})
-        for a, why in main.paused_leaders.items():
-            if a in self.st.followed and a not in self.st.paused_leaders:
-                self.rec({"ev": "leader_pause", "leader": a, "reason": why})
-        for a in list(self.st.paused_leaders):     # the owner lifted a pause (re-added it): lift it here too
-            if a in main.followed and a not in main.paused_leaders:
-                self.rec({"ev": "follow", "leader": a, "ts": main.followed[a]})
 
     def max_drop_pct(self, mids: dict) -> float:
         return max_drop_pct(self.st, mids)

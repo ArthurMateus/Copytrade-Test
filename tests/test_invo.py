@@ -7,10 +7,10 @@ from datetime import datetime, timezone
 
 import pytest
 
-from copybot import config, invo, log
+from copybot import config, invo
 from tests.fakes import fixture
 from tests.fakes_invo import FakeInvo
-from tests.test_e2e import LEADER, PIN, env, start_bot, stop_bot, wait_for  # noqa: F401 (env is a fixture)
+from tests.test_e2e import PIN, env, start_bot, stop_bot, wait_for  # noqa: F401 (env is a fixture)
 
 
 # ---- parsers ------------------------------------------------------------------------------------------
@@ -345,8 +345,8 @@ def test_a_rotated_token_that_cannot_be_saved_is_kept_and_saved_later(fake, tmp_
     assert tok.read_text(encoding="utf-8") == fake.valid_refresh
 
 
-# ---- real-money ("live") portfolios and Invo's score (owner request 2026-10-12) -----------------------------------
-def test_live_portfolio_and_score_answers_are_parsed_from_the_recorded_shapes():
+# ---- real-money ("live") portfolios (owner request 2026-10-12) ---------------------------------------------------
+def test_live_portfolio_answers_are_parsed_from_the_recorded_shapes():
     p = invo.parse_portfolios(fixture("invo_users_portfolios.json"))[0]
     live = invo.parse_live_overview(fixture("invo_live_overview.json"), invo.Portfolio(**{**p.__dict__, "kind": "live"}))
     assert (round(live.win_rate, 1), live.closed, round(live.pnl_pct), live.open_count) == (77.9, 656, 1548, 10)
@@ -356,11 +356,6 @@ def test_live_portfolio_and_score_answers_are_parsed_from_the_recorded_shapes():
     assert ldo.committed == pytest.approx(0.004454, rel=1e-3)       # size.pct is a % of the trader's equity
     assert (tao.is_open, tao.closing_price, tao.reason_closed) == (False, pytest.approx(294.9612), "manual")
     assert cursor.startswith("2026-10-10")
-    top, = invo.parse_score_top(fixture("invo_score_top.json"))
-    assert (top["user"], top["kind"], top["score"]) == ("luxora", "paper", 9.86)
-    assert invo.parse_portfolio_score(fixture("invo_score_portfolio.json")) == {"score": 9.86, "capped": False,
-                                                                               "caps": []}
-    assert invo.parse_portfolio_score({"status": "pending", "detail": None}) == {}
 
 
 def test_watcher_copies_a_real_money_portfolio_and_follows_its_size_by_coins(fake, tmp_path):
@@ -455,8 +450,7 @@ def invo_env(env, tmp_path):
     f = FakeInvo()
     tok = tmp_path / "invo.token"
     tok.write_text("REFRESH0", encoding="utf-8")
-    # the daily Invo search has its own tests (test_invo_search.py): off here so it does not share the fake's login
-    (cdir / "invo.toml").write_text(f'api_base = "{f.url}"\npoll_s = 1.0\nsearch = false\n', encoding="utf-8")
+    (cdir / "invo.toml").write_text(f'api_base = "{f.url}"\npoll_s = 1.0\n', encoding="utf-8")
     yield hl, dc, data, cdir, f, tok
     f.close()
 
@@ -480,8 +474,7 @@ def test_bot_copies_an_invo_call_and_closes_it_when_the_trader_does(invo_env, mo
         p = bot.invo.st.positions["ETH"]
         assert p.leader == "invo:nicush" and p.side == 1
         assert p.size * p.entry_px == pytest.approx(0.05 * 10 * 300, rel=0.05)    # their 5% x 10x of our 300$
-        assert "ETH" not in bot.st.positions                                      # the main wallet never copies it
-        assert all("ETH" not in w.st.positions for w in bot.sides if not w.own_leaders)    # HL side wallets: no
+        assert bot.sides == bot.invo_wallets()                                    # only Invo wallets exist
         # the fixed-risk Invo wallets copy the same call: r% of their own 300$ at our 3% stop (100$ at 1%, 500$ at 5%)
         # ... and every size again with an 8% stop and with the trader's exit (owner request 2026-10-12)
         risk = [f"invo_risk_{r:g}pct" for r in (1, 2, 5, 10, 20)]
@@ -519,9 +512,8 @@ def test_bot_copies_an_invo_call_and_closes_it_when_the_trader_does(invo_env, mo
         assert wait_for(lambda: all("ETH" not in w.st.positions for w in bot.invo_extra), timeout=10)
         assert wait_for(lambda: "closed by the trader" in text())               # the card became the summary
         assert "REFRESH" not in " ".join(m["text"] for m in dc.sent)               # no token ever shown
-        dc.say("/invounfollow nicush")
+        dc.say("/unfollow nicush")                                                # the short name (Discord's list)
         assert wait_for(lambda: "invo:nicush" not in bot.invo.st.followed)
-        assert set(bot.st.followed) == {LEADER}                                   # the main wallet untouched
     finally:
         stop_bot(bot, th)
 
@@ -555,7 +547,7 @@ def test_without_a_token_file_invo_is_off_and_says_how_to_turn_it_on(env, monkey
     monkeypatch.delenv("INVO_TOKEN_FILE", raising=False)
     bot, th = start_bot(env)
     try:
-        assert bot.invo is None and all(not w.own_leaders for w in bot.sides)
+        assert bot.invo is None and not bot.sides
         dc.say("/invofollow nicush")
         assert wait_for(lambda: any("Invo is off" in m["text"] for m in dc.sent))
     finally:
@@ -597,7 +589,7 @@ def test_a_trader_whose_copies_lose_too_much_is_dropped_at_once(invo_env, monkey
         assert wait_for(lambda: "invo:lazy" not in bot.invo.st.followed, timeout=10)
         assert wait_for(lambda: all("invo:lazy" not in w.st.followed for w in bot.invo_extra))
         text = lambda: " ".join(m["text"] for m in dc.sent + dc.edits)
-        assert wait_for(lambda: "copying it lost too much" in text() and "/invofollow lazy brings it back" in text())
+        assert wait_for(lambda: "copying it lost too much" in text() and "/follow lazy brings it back" in text())
         dc.say("/invofollow lazy")
         assert wait_for(lambda: "invo:lazy" in bot.invo.st.followed and "invo:lazy" not in bot.invo.st.paused_leaders)
     finally:
@@ -849,30 +841,24 @@ def test_a_second_trader_on_the_same_coin_and_side_adds_size(invo_env, monkeypat
         stop_bot(bot, th)
 
 
-def test_each_book_controls_only_its_own_wallets(invo_env, monkeypatch):
-    """Owner request 2026-10-10: /invopause, /invoresume, /invoflatten, /invoreset act on the Invo wallets only, and the
-    /hyper ones no longer touch them."""
+def test_pause_resume_flatten_and_reset_act_on_every_invo_wallet(invo_env, monkeypatch):
+    """/pause, /resume, /flatten, /reset (= /invopause ...) act on all the Invo wallets; flatten and reset need the PIN,
+    and reset needs no open trade."""
     hl, dc, data, cdir, f, tok = invo_env
     pid = f.add_user("akira")[0]
     bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
     text = lambda: " ".join(m["text"] for m in dc.sent + dc.edits)
     try:
-        dc.say("/hyperpause")
-        assert wait_for(lambda: bot.st.entries_paused)
-        assert not any(w.st.entries_paused for w in bot.invo_wallets())          # Hyperliquid only
-        dc.say("/hyperresume")
-        assert wait_for(lambda: not bot.st.entries_paused)
-        dc.say("/invopause")
+        dc.say("/pause")
         assert wait_for(lambda: all(w.st.entries_paused for w in bot.invo_wallets()))
-        assert not bot.st.entries_paused and not any(w.st.entries_paused for w in bot.sides if not w.own_leaders)
         dc.say("/invoresume")
         assert wait_for(lambda: not any(w.st.entries_paused for w in bot.invo_wallets()))
         dc.say("/invofollow akira")
         assert wait_for(lambda: bot.invo_watch.known.get("akira") is not None, timeout=10)
         f.open_call(pid, "ETH", long=True, leverage=5, size=0.05, entry=3000.0)
         assert wait_for(lambda: "ETH" in bot.invo.st.positions, timeout=10)
-        dc.say("/invoreset 0000")
-        assert wait_for(lambda: "Wrong or missing PIN. Usage: /invoreset" in text())
+        dc.say("/reset 0000")
+        assert wait_for(lambda: "Wrong or missing PIN. Usage: /reset" in text())        # (short names shown)
         dc.say(f"/invoreset {PIN}")
         assert wait_for(lambda: "Invo reset refused" in text())
         dc.say(f"/invoflatten {PIN}")
@@ -884,15 +870,14 @@ def test_each_book_controls_only_its_own_wallets(invo_env, monkeypatch):
         assert wait_for(lambda: "Invo reset done" in text() and bot.restart_at > 0)
         arch = next((data / "archive").glob("invo-reset-*"))
         assert (arch / "wallets" / "invo_calls" / "ledger.jsonl").exists()
-        assert (data / "wallets" / "risk_20pct" / "ledger.jsonl").exists()              # Hyperliquid untouched
-        assert (data / "ledger.jsonl").exists()
+        assert (data / "ledger.jsonl").exists()                                       # the bot's own ledger stays
     finally:
         stop_bot(bot, th)
 
 
-def test_weak_portfolios_are_skipped_and_the_owner_can_block_one(invo_env, monkeypatch):
-    """Owner request 2026-10-10: calls are only copied from a trader's good portfolios (win rate >= 80%, return >= 100%,
-    20+ closed calls); /invoblock blocks one by hand, /invounblock undoes it."""
+def test_the_owner_can_block_one_portfolio_and_unblock_it(invo_env, monkeypatch):
+    """Every portfolio of a followed trader is copied (the floors and the bot's own search are gone since 2026-10-26);
+    /invoblock blocks one by hand, matched by the start of its name, /invounblock undoes it."""
     hl, dc, data, cdir, f, tok = invo_env
     good, weak = f.add_user("nicush", n_portfolios=2)
     f.port_meta[good] = {"title": "Kitchen", "winRate": 93.0, "closedPositions": 929, "plSnapshot": 140.0}
@@ -902,17 +887,13 @@ def test_weak_portfolios_are_skipped_and_the_owner_can_block_one(invo_env, monke
     try:
         dc.say("/invofollow nicush")
         assert wait_for(lambda: "invo:nicush" in bot.invo.st.followed)
-        bot.invo.st.picked.discard("invo:nicush")        # as if the search had followed it: the portfolio rules apply
         assert wait_for(lambda: bot.invo_watch.known.get("nicush") is not None, timeout=10)
-        f.open_call(weak, "SOL", long=True, leverage=5, size=0.05, entry=150.0)          # weak portfolio: skipped
-        f.open_call(good, "ETH", long=True, leverage=5, size=0.05, entry=3000.0)         # good one: copied
-        assert wait_for(lambda: "ETH" in bot.invo.st.positions, timeout=10)
-        time.sleep(2.5)
-        assert "SOL" not in bot.invo.st.positions
+        f.open_call(weak, "SOL", long=True, leverage=5, size=0.05, entry=150.0)          # a weak portfolio: copied too
+        f.open_call(good, "ETH", long=True, leverage=5, size=0.05, entry=3000.0)
+        assert wait_for(lambda: "ETH" in bot.invo.st.positions and "SOL" in bot.invo.st.positions, timeout=10)
         dc.say("/invotraders")
-        assert wait_for(lambda: "✅ Kitchen" in text() and "+140%" in text())
-        assert "Probably nothing" not in text()                                           # skipped ones: not listed
-        dc.say("/invoblock nicush kit")                                                    # by the start of its name
+        assert wait_for(lambda: "✅ Kitchen" in text() and "+140%" in text() and "✅ Probably nothing" in text())
+        dc.say("/block nicush kit")                                                    # by the start of its name
         assert wait_for(lambda: good in bot.invo.st.blocked.get("invo:nicush", {}))
         assert wait_for(lambda: "Blocked" in text() and "Kitchen" in text())
         f.open_call(good, "BTC", long=True, leverage=5, size=0.05, entry=100_000.0)
@@ -939,11 +920,12 @@ def test_after_a_restart_only_the_copied_call_moves_our_copy(invo_env, monkeypat
     try:
         dc.say("/invofollow prateek")
         assert wait_for(lambda: "invo:prateek" in bot.invo.st.followed)
-        bot.invo.st.picked.discard("invo:prateek")
         assert wait_for(lambda: bot.invo_watch.known.get("prateek") is not None, timeout=10)
+        dc.say("/invoblock prateek casino")                                              # a portfolio we do not copy
+        assert wait_for(lambda: weak in bot.invo.st.blocked.get("invo:prateek", {}))
         a = f.open_call(good, "ETH", long=True, leverage=5, size=0.05, entry=3000.0)
         assert wait_for(lambda: "ETH" in bot.invo.st.positions, timeout=10)
-        b = f.open_call(weak, "ETH", long=True, leverage=5, size=0.05, entry=3000.0)     # skipped (weak portfolio)
+        b = f.open_call(weak, "ETH", long=True, leverage=5, size=0.05, entry=3000.0)     # skipped (blocked)
         pos_id = bot.invo.st.positions["ETH"].pos_id
         assert bot.invo.st.invo_links[pos_id]["call"] == a
         assert "⏱️ In" in bot.invo.st.invo_links[pos_id]["info"]
@@ -1189,8 +1171,8 @@ def test_the_wallets_card_shows_the_best_and_worst_combinations():
 
 
 def test_a_trader_followed_by_hand_is_copied_in_every_portfolio_and_only_blocks_stop_one(invo_env, monkeypatch):
-    """Owner request 2026-10-14: /invofollow = every portfolio of that trader is copied, whatever the floors and rules
-    say (testing traders outside them); /invoblock stops one by hand."""
+    """Owner request 2026-10-14: /invofollow = every portfolio of that trader is copied, also weak ones; /invoblock
+    stops one by hand."""
     hl, dc, data, cdir, f, tok = invo_env
     good, weak = f.add_user("nicush", n_portfolios=2)
     f.port_meta[good] = {"title": "Kitchen", "winRate": 93.0, "closedPositions": 929, "plSnapshot": 140.0}
@@ -1199,7 +1181,7 @@ def test_a_trader_followed_by_hand_is_copied_in_every_portfolio_and_only_blocks_
     try:
         dc.say("/invofollow nicush")
         assert wait_for(lambda: bot.invo_watch.known.get("nicush") is not None, timeout=10)
-        f.open_call(weak, "SOL", long=True, leverage=5, size=0.05, entry=150.0)          # below our floors: still copied
+        f.open_call(weak, "SOL", long=True, leverage=5, size=0.05, entry=150.0)          # a weak portfolio: copied
         assert wait_for(lambda: "SOL" in bot.invo.st.positions, timeout=10)
         dc.say("/invoblock nicush probably")
         assert wait_for(lambda: weak in bot.invo.st.blocked.get("invo:nicush", {}))

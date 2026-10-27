@@ -23,35 +23,29 @@ from websockets.sync.client import connect
 
 from copybot import log
 from copybot.config import Config
-from copybot.chat import (COMMANDS, FOMO_COMMANDS, INVO_ONLY_COMMANDS, PIN_COMMANDS, SLASH_COMMANDS, WALLET_COMMANDS,
-                          ChatError, ChatUI, Command, canon, invo_name, short_names)
+from copybot.chat import (COMMANDS, PIN_COMMANDS, SLASH_COMMANDS, WALLET_COMMANDS, ChatError, ChatUI, Command, canon,
+                          short_names)
 
 GREEN, RED, ORANGE, BLURPLE = 0x2ECC71, 0xE74C3C, 0xF39C12, 0x5865F2
 MAX_EMBED = 4096
 
-BOOK_NAMES = {"hyper": "Hyperliquid", "fomo": "FOMO", "invo": "Invo"}
-VERB_TEXT = {
-    "status": "the book at a glance (live)",
-    "trades": "open trades at live prices, P&L vs the start (live)",
-    "traders": "followed traders and what copying them made (live)",
-    "wallets": "the same trades at other risk levels, compared (live)",
-    "progress": "success metrics",
-    "search": "look for traders now and follow the best 7",
-    "add": "check a trader with the strict rules, follow it if it passes",
-    "follow": "follow a trader you picked, without the rules",
-    "unfollow": "stop following a trader (open copies still exit normally)",
-    "pause": "pause new copies (exits and stops keep running)",
-    "resume": "resume new copies",
-    "flatten": "close every trade of this book and pause it (needs the PIN)",
-    "reset": "this book back to the start, no open trades, traders kept (needs the PIN)",
+DESCRIPTIONS = {
+    "/status": "The Invo book at a glance (live)",
+    "/trades": "Open trades at live prices, P&L vs the start (live)",
+    "/traders": "Followed traders and what copying them made (live)",
+    "/wallets": "Every size x stop combination, best and worst (live)",
+    "/progress": "Success metrics",
+    "/follow": "Copy every portfolio of an Invo trader",
+    "/unfollow": "Stop following a trader (open copies still exit normally)",
+    "/block": "Stop copying one portfolio of a trader (user, then the portfolio name)",
+    "/unblock": "Copy a blocked portfolio again (user, then the portfolio name)",
+    "/pause": "Pause new copies (exits and stops keep running)",
+    "/resume": "Resume new copies",
+    "/flatten": "Close every trade and pause (needs the PIN)",
+    "/reset": "Every wallet back to the start, no open trades, traders kept (needs the PIN)",
+    "/help": "List the commands",
+    "/restart": "Restart the bot",
 }
-DESCRIPTIONS = {f"/{b}{v}": f"{n}: {t}" for b, n in BOOK_NAMES.items() for v, t in VERB_TEXT.items()}
-DESCRIPTIONS.update({"/invoarena": "Invo: the arena, the best groups of 10 traders in every size x stop (live + backtest)",
-                     "/invoblock": "Invo: stop copying one portfolio of a trader (user, then the portfolio name)",
-                     "/invounblock": "Invo: copy a blocked portfolio again (user, then the portfolio name)",
-                     "/help": "List the commands", "/restart": "Restart the bot",
-                     "/picks": "Daily picks: the best traders of each book under the strict rules, with the follow "
-                               "commands"})
 
 _TAG = re.compile(r"(</?(?:b|i|code|pre)>)")
 _MD = re.compile(r"([\\*_~`|])")
@@ -152,15 +146,9 @@ class DiscordUI(ChatUI):
         self.connected = False
 
     # ---- transport (ChatUI's outbox calls this) -------------------------------------------------
-    @property
-    def invo_only(self) -> bool:
-        """The Hyperliquid book is off: the short command names are Invo's (owner request 2026-10-12)."""
-        return not self.cfg.selection.enabled
-
     def _call(self, method: str, params: dict):
         rows = components(params.get("buttons") or [])
-        if self.invo_only:
-            params = {**params, "text": short_names(params["text"])}
+        params = {**params, "text": short_names(params["text"])}
         if method == "sendMessage":
             r = self.api.call("POST", f"/channels/{self.channel}/messages",
                               {"embeds": [embed(params["text"])], "allowed_mentions": {"parse": []},
@@ -244,21 +232,13 @@ class DiscordUI(ChatUI):
         """Guild slash commands appear at once (global ones can take an hour)."""
         guild = self.api.call("GET", f"/channels/{self.channel}")["guild_id"]
         cmds = []
-        names = SLASH_COMMANDS
-        if self.invo_only:      # only Invo: its commands without the prefix; /hyperflatten stays for leftovers
-            names = INVO_ONLY_COMMANDS + ("/hyperflatten",) + (FOMO_COMMANDS if self.cfg.sol.enabled else ())
-        for c in names:
-            if c.startswith("/fomo") and not self.cfg.sol.enabled:      # a book that is off shows no commands
-                continue
-            real = (invo_name(c) if self.invo_only else None) or c
-            full = "/invo" + c[1:] if real != c else c                     # its /invo… name (descriptions)
-            desc = DESCRIPTIONS.get(full, c[1:]).removeprefix("Invo: ")
-            cmd = {"name": c[1:], "description": desc, "type": 1}
-            if canon(real) in PIN_COMMANDS:
+        for c in SLASH_COMMANDS:
+            cmd = {"name": c[1:], "description": DESCRIPTIONS.get(c, c[1:]), "type": 1}
+            if canon(c) in PIN_COMMANDS:
                 cmd["options"] = [{"type": 3, "name": "pin", "description": "Your COPYBOT_PIN", "required": True}]
-            elif canon(real) in WALLET_COMMANDS:
+            elif canon(c) in WALLET_COMMANDS:
                 cmd["options"] = [{"type": 3, "name": "wallet", "required": True,
-                                   "description": "Wallet address or Invo username (block: username, then portfolio)"}]
+                                   "description": "Invo username (block: username, then portfolio)"}]
             cmds.append(cmd)
         self.api.call("PUT", f"/applications/{app_id}/guilds/{guild}/commands", cmds)
         self.registered = True
@@ -295,10 +275,9 @@ class DiscordUI(ChatUI):
         if name not in COMMANDS:
             return self._reply(d, "❓ Unknown command.")
         typed = name
-        name = (invo_name(name) if self.invo_only else None) or canon(name)
+        name = canon(name)
         opts = {o["name"]: o.get("value", "") for o in (d.get("data") or {}).get("options") or []}
         log.info("discord_command", cmd=name)     # never the argument (may be the PIN)
-        self._reply(d, f"👍 {typed}" + (" (results in the channel)" if name not in ("/pause", "/resume", "/restart", "/fomopause", "/fomoresume", "/invopause", "/invoresume")
-                                        else ""))
+        self._reply(d, f"👍 {typed}" + (" (results in the channel)" if name not in ("/restart", "/invopause", "/invoresume") else ""))
         self.on_command(Command(name, str(opts.get("pin") or opts.get("wallet") or "").strip()))
 
