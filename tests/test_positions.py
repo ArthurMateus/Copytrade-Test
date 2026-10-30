@@ -78,6 +78,57 @@ def test_flip_closes_and_opens_fresh_copy(rig):
     assert rig.st.closed[-1]["reason"] == "leader_flip"
 
 
+@pytest.mark.parametrize("long", [True, False])
+@pytest.mark.parametrize("blocked_by", ["cap", "stale", "unfollowed"])
+def test_a_rejected_add_does_not_swallow_later_trims_after_restart(rig, long, blocked_by):
+    """A copied 2 -> 10 -> 5 sequence must halve our holding even if the 2 -> 10 add failed."""
+    buy, sell = ("B", "A") if long else ("A", "B")
+    rig.leader_trades(LEADER, rig.fill(LEADER, "ETH", 2, buy))
+    p = rig.st.positions["ETH"]
+    held = p.size
+    if blocked_by == "cap":
+        rig.pm.cap = lambda eq: held * rig.mids["ETH"]
+    elif blocked_by == "unfollowed":
+        rig.rec({"ev": "unfollow", "leader": LEADER})
+    else:
+        rig.healthy = False
+    rig.leader_trades(LEADER, rig.fill(LEADER, "ETH", 8, buy))
+    assert p.size == held
+    assert p.k == pytest.approx(held / 10)
+    assert any(k == "skip" for k, _ in rig.events)
+    rig.ledger.close()
+    rig.boot()                                   # the acknowledged size must survive replay
+    rig.healthy = True
+    assert rig.st.positions["ETH"].k == pytest.approx(held / 10)
+    # Recreate the already-observed leader position in the detector after boot.
+    from copybot.positions import Move
+    from copybot.ledger import now_ms
+    side = 1 if long else -1
+    rig.pm.on_move(Move(LEADER, "ETH", side * 10, side * 5, now_ms(), now_ms(), 999, (), 3000, 1))
+    p = rig.st.positions["ETH"]
+    assert p.size == pytest.approx(held / 2)
+    rig.pm.on_move(Move(LEADER, "ETH", side * 5, side * 2.5, now_ms(), now_ms(), 1000, (), 3000, 1))
+    assert p.size == pytest.approx(held / 4)
+
+
+def test_tiny_resizes_accumulate_in_both_directions(rig):
+    from copybot.positions import Move
+    from copybot.ledger import now_ms
+    rig.leader_trades(LEADER, rig.fill(LEADER, "ETH", 100, "B"))
+    p = rig.st.positions["ETH"]
+    initial = p.size
+    def resize(old, new):
+        rig.pm.on_move(Move(LEADER, "ETH", old, new, now_ms(), now_ms(), 999, (), 3000, 1))
+    resize(100, 95)                               # about $5: below the minimum partial close
+    assert p.size == initial
+    resize(95, 85)                                # combined $15 trim now executes
+    assert p.size == pytest.approx(initial * .85)
+    resize(85, 90)                                # about $5 add: also pending
+    assert p.size == pytest.approx(initial * .85)
+    resize(90, 100)                               # combined $15 add
+    assert p.size == pytest.approx(initial, rel=.01)
+
+
 def test_stop_closes_position(rig):
     rig.leader_trades(LEADER, rig.fill(LEADER, "BTC", 1, "B"))
     stop = rig.st.positions["BTC"].stop_px

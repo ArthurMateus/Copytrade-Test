@@ -7,6 +7,7 @@ Conventions, the same on every card:
 from __future__ import annotations
 
 import html
+import math
 import statistics
 import time
 
@@ -150,12 +151,17 @@ def invo_trade_body(p: Position, mark: float | None, now_ms: float) -> str:
     rows = [
         ("Price", f"{fpx(p.entry_px)} → {fpx(mark) if mark else '-'}"),
         ("Size", f"{fusd(value, sign=False)} (margin {fusd(value / max(p.leverage, 1), sign=False)})"),
-        ("Exit", f"with {short(p.leader)}" + (f" (🤝 +{len(p.backers)} agree)" if p.backers else "")),
+        ("Exit", "each trader closes their allocation" if p.shares else
+         f"with {short(p.leader)}" + (f" (🤝 +{len(p.backers)} agree)" if p.backers else "")),
         ("Stop" + trail, f"{fpx(p.stop_px)}" + (f" ({to_stop:.1f}% away" if to_stop is not None else " (")
          + f", {fusd(loss_if_stopped(p))})"),
     ]
     if now_ms:
         rows.append(("Open for", dur(now_ms - p.opened_ms)))
+    if p.shares:
+        rows.append(("Allocations", " · ".join(
+            f"{short(a)} {fusd(s['size'] * (mark or p.entry_px) / max(p.leverage, 1), sign=False)} margin"
+            + (" (exit pending)" if s.get("closing") else "") for a, s in p.shares.items())))
     return head + "\n" + pre(rows)
 
 
@@ -184,7 +190,8 @@ def closed_card(t: dict) -> str:
         ("Result", f"{fusd(t['pnl'])} after fees and funding"),
         ("Why", REASONS.get(t["reason"], t["reason"])),
         ("Held", dur(t["closed_ms"] - t["opened_ms"])),
-        ("Trader", short(t["leader"])),
+        (("Traders", ", ".join(short(a) for a in t["allocation_traders"])) if t.get("allocated") else
+         ("Trader", short(t["leader"]))),
     ])
 
 
@@ -237,6 +244,38 @@ def trades_card(st: State, mids: dict, now_ms: float, title: str = "💼 <b>Trad
     return "\n".join(out)
 
 
+def resize_copy(before: float, after: float, target: float, coin: str, reason: str | None) -> str:
+    """Describe the executed copy change, separately from the trader's requested resize."""
+    if math.isclose(before, after, rel_tol=1e-9, abs_tol=1e-12):
+        why = {
+            "copy_cap": "position cap",
+            "no_book": "price unavailable",
+            "below_min_notional": "minimum order size",
+            "below_min_notional_after_limits": "minimum order size",
+            "margin_full": "margin limit",
+        }.get((reason or "").split(":", 1)[0], "risk or execution limits")
+        return f"Our copy: unchanged ({why})"
+    word = "added" if after > before else "trimmed"
+    text = f"Our copy: {word} {abs(after - before):.6g} {esc(coin)}"
+    if not math.isclose(after, target, rel_tol=1e-6, abs_tol=1e-12):
+        text += " (limited by risk/size rules)"
+    return text
+
+
+def trader_closed(st: State, leader: str) -> list[dict]:
+    return [t for t in [*[x for x in st.closed if not x.get("allocated")], *st.allocation_closed]
+            if t["leader"] == leader]
+
+
+def trader_live(p: Position, leader: str, mark: float | None) -> float:
+    if not p.shares:
+        return net_pnl(p, mark) if p.leader == leader else 0
+    s = p.shares.get(leader)
+    if s is None:
+        return 0
+    return s["realized"] + (p.side * (mark - s["entry_px"]) * s["size"] if mark else 0)
+
+
 def traders_card(st: State, mids: dict, now_ms: float, title: str = "🧾 <b>Invo traders</b>",
                  extra: dict | None = None) -> str:
     """/invotraders: every followed (or still held) trader with what copying it has earned us. `extra`: leader ->
@@ -245,12 +284,12 @@ def traders_card(st: State, mids: dict, now_ms: float, title: str = "🧾 <b>Inv
                                                       if a not in st.followed]))
     blocks, grand = [], 0.0
     for a in leaders:
-        mine = [t for t in st.closed if t["leader"] == a]
+        mine = trader_closed(st, a)
         wins = sum(1 for t in mine if t["pnl"] > 0)
         realized = sum(t["pnl"] for t in mine)
-        held = [p for p in st.positions.values() if p.leader == a]
-        backing = sum(1 for p in st.positions.values() if a in p.backers)
-        live = sum(net_pnl(p, mids.get(p.coin)) for p in held)
+        held = [p for p in st.positions.values() if a in p.shares or (not p.shares and p.leader == a)]
+        backing = sum(1 for p in st.positions.values() if not p.shares and a in p.backers)
+        live = sum(trader_live(p, a, mids.get(p.coin)) for p in held)
         made = realized + live
         grand += made
         flag = " ⏸️ paused" if a in st.paused_leaders else ("" if a in st.followed else " ⏳ no longer followed")
@@ -359,10 +398,10 @@ def invo_text(st: State, mids: dict, watch, now_ms: float) -> str:
     if not st.followed:
         lines.append("No Invo trader followed yet: /invofollow &lt;username&gt;")
     for a in sorted(st.followed):
-        mine = [t for t in st.closed if t["leader"] == a]
+        mine = trader_closed(st, a)
         wins = sum(1 for t in mine if t["pnl"] > 0)
-        held = [p for p in st.positions.values() if p.leader == a]
-        made = sum(t["pnl"] for t in mine) + sum(net_pnl(p, mids.get(p.coin)) for p in held)
+        held = [p for p in st.positions.values() if a in p.shares or (not p.shares and p.leader == a)]
+        made = sum(t["pnl"] for t in mine) + sum(trader_live(p, a, mids.get(p.coin)) for p in held)
         flag = " ⏸️" if a in st.paused_leaders else ""
         lines.append(f"{dot(made)} @{esc(a.split(':', 1)[1])}{flag} · {_n(len(mine), 'trade')} copied ({wins} won) · "
                      f"{len(held)} open · {fusd(made)}")

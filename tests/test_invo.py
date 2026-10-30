@@ -757,6 +757,53 @@ def test_bot_mirrors_the_traders_add_and_partial_close(invo_env, monkeypatch):
         stop_bot(bot, th)
 
 
+def test_capped_resizes_then_trims_survive_reids_and_restart(invo_env, monkeypatch):
+    """SOL regression: refused averaging-down adds must not corrupt the following partial exits."""
+    hl, dc, data, cdir, f, tok = invo_env
+    with (cdir / "invo.toml").open("a", encoding="utf-8") as out:
+        out.write("max_risk_pct = 1.0\nmain_stop_pct = 0.0\n")
+    pid = f.add_user("prateek")[0]
+    bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
+    try:
+        dc.say("/invofollow prateek")
+        assert wait_for(lambda: bot.invo_watch.known.get("prateek") is not None, timeout=10)
+        cid = f.open_call(pid, "ETH", leverage=20, size=.02, entry=3000)
+        assert wait_for(lambda: "ETH" in bot.invo.st.positions, timeout=10)
+        p = bot.invo.st.positions["ETH"]
+        held, pos_id = p.size, p.pos_id
+        f.resize_call(pid, cid, .05)
+        assert wait_for(lambda: "Trader resized 2.0% → 5.0%" in bot.invo_info[pos_id], timeout=10)
+        assert "Our copy: unchanged (position cap)" in bot.invo_info[pos_id]
+        assert p.size == held and p.k == pytest.approx(held / (20 * .05))
+        cid = f.reid_call(pid, cid, entrySize=10.0, positionSize=.10)
+        assert wait_for(lambda: "Trader resized 5.0% → 10.0%" in bot.invo_info[pos_id], timeout=10)
+        assert p.size == held and p.k == pytest.approx(held / (20 * .10))
+    finally:
+        stop_bot(bot, th)
+        bot.lock.f.close()
+    bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
+    try:
+        assert wait_for(lambda: bot.invo_watch.known.get("prateek") is not None, timeout=10)
+        p = bot.invo.st.positions["ETH"]
+        assert p.pos_id == pos_id and p.size == held
+        f.resize_call(pid, cid, .025)                         # 75% off the position actually held
+        assert wait_for(lambda: p.size < held * .3, timeout=10)
+        assert p.size == pytest.approx(held / 4, rel=.02)
+        assert wait_for(lambda: "Our copy: trimmed" in bot.invo_info[pos_id], timeout=10)
+        small = p.size
+        cid = f.reid_call(pid, cid, entrySize=5.0, positionSize=.05)
+        assert wait_for(lambda: p.size > small * 1.9, timeout=10)
+        assert p.size == pytest.approx(small * 2, rel=.02)
+        assert wait_for(lambda: "Our copy: added" in bot.invo_info[pos_id], timeout=10)
+        f.resize_call(pid, cid, .025)
+        assert wait_for(lambda: p.size < small * 1.1, timeout=10)
+        assert p.size == pytest.approx(small, rel=.02)
+        f.close_call(pid, cid)
+        assert wait_for(lambda: "ETH" not in bot.invo.st.positions, timeout=10)
+    finally:
+        stop_bot(bot, th)
+
+
 def test_a_copy_follows_its_call_when_invo_gives_it_a_new_id(invo_env, monkeypatch):
     """Live 2026-10-13 (prateek's BTC short): an edited call re-listed under a new id keeps our copy open in every
     wallet, a size change in the edit is mirrored, and the new id's close closes the copy."""

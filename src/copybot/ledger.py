@@ -44,6 +44,7 @@ class Position:
     # other followed leaders on the SAME side of this coin (consensus):
     # leader -> {"lpos": their |position|, "oid": their opening order, "frac": share of our size they added}
     backers: dict = field(default_factory=dict)
+    shares: dict = field(default_factory=dict)  # margin allocations: leader -> size, exposure, k, call metadata
 
     def risk_usd(self) -> float:
         return abs(self.entry_px - self.stop_px) * self.size
@@ -85,6 +86,8 @@ class State:
     pause_reason: str = ""
     marks: dict[str, dict] = field(default_factory=dict)          # "day"/"week" -> {"key":..., "equity":...}
     closed: list[dict] = field(default_factory=list)
+    allocation_closed: list[dict] = field(default_factory=list)  # individual completed margin contributions
+    margin_policy: dict = field(default_factory=dict)
     lags_ms: list[float] = field(default_factory=list)
     sel: dict = field(default_factory=dict)                        # selection hysteresis state
     cards: dict[str, int] = field(default_factory=dict)            # chat card key ("dc:<key>" for Discord) -> message id
@@ -119,6 +122,19 @@ class State:
             self.uncertain.append(f"unknown event type {t!r} seq={ev.get('seq')}")
             return
         fn(ev)
+        if "shares" in ev:
+            p = self.positions.get(ev.get("coin"))
+            if p is not None and p.pos_id == ev.get("pos_id"):
+                p.shares = {a: dict(v) for a, v in ev["shares"].items()}
+                p.leader = ev.get("share_owner", p.leader)
+                own = p.shares[p.leader]
+                p.k = own["k"]
+                p.open_oid = own.get("oid", p.open_oid)
+                p.backers = {a: {"lpos": v["exposure"], "oid": v.get("oid", 0),
+                                 "frac": v["size"] / p.size if p.size else 0}
+                             for a, v in p.shares.items() if a != p.leader}
+        for trade in ev.get("share_closes", []):
+            self._record_allocation_trade(trade)
         iid = ev.get("intent")
         if iid and t != "intent":
             self.open_intents.pop(iid, None)
@@ -127,6 +143,31 @@ class State:
         self.equity0 = float(ev["equity0"])
         self.btc_px0 = float(ev.get("btc_px0") or 0.0)
         self.genesis_ms = int(ev["ts"])
+
+    def _ev_shares(self, ev):
+        pass  # metadata is folded with order results in apply(), or alone for links/rebases
+
+    def _ev_margin_policy(self, ev):
+        self.margin_policy = dict(ev["policy"], since_ms=ev["ts"])
+
+    @staticmethod
+    def allocation_trade(p, leader, share, px, fee, ts, reason):
+        return dict(pos_id=p.pos_id + ":" + leader + ":" + str(share.get("call", share.get("opened_ms", ""))),
+                    parent_pos_id=p.pos_id, coin=p.coin,
+                    side=p.side, leader=leader, entry=share.get("entry_px", p.entry_px), exit=px,
+                    pnl=share.get("realized", 0) + p.side * (px - share.get("entry_px", p.entry_px)) * share["size"] - fee,
+                    fees=share.get("fees", 0) + fee, funding=share.get("funding", 0),
+                    notional=share.get("notional", share["size"] * p.entry_px),
+                    opened_ms=share.get("opened_ms", p.opened_ms), closed_ms=ts,
+                    reason=reason, open_lag_ms=p.open_lag_ms, leverage=p.leverage, sym=p.sym)
+
+    def _record_allocation_trade(self, trade):
+        self.allocation_closed.append(trade)
+        st = self.leader_stats.setdefault(trade["leader"], LeaderStats())
+        st.trades += 1
+        st.cum += trade["pnl"]
+        st.peak = max(st.peak, st.cum)
+        st.consec_losses = st.consec_losses + 1 if trade["pnl"] < 0 else 0
 
     def _ev_boot(self, ev):
         pass
@@ -263,16 +304,25 @@ class State:
         if ev.get("lag_ms") is not None:
             self.lags_ms.append(float(ev["lag_ms"]))
         self.bump("orders")
-        st = self.leader_stats.setdefault(p.leader, LeaderStats())
-        st.trades += 1
-        st.cum += p.realized
-        st.peak = max(st.peak, st.cum)
-        st.consec_losses = st.consec_losses + 1 if p.realized < 0 else 0
+        if p.shares:
+            for leader, share in p.shares.items():
+                if share.get("notional", 0) > 0:
+                    self._record_allocation_trade(self.allocation_trade(
+                        p, leader, share, px, fee * share["size"] / p.size, int(ev["ts"]), ev.get("reason", "")))
+        else:
+            st = self.leader_stats.setdefault(p.leader, LeaderStats())
+            st.trades += 1
+            st.cum += p.realized
+            st.peak = max(st.peak, st.cum)
+            st.consec_losses = st.consec_losses + 1 if p.realized < 0 else 0
         self.closed.append({
             "pos_id": p.pos_id, "coin": p.coin, "side": p.side, "leader": p.leader, "entry": p.entry_px,
             "exit": px, "pnl": p.realized, "fees": p.fees, "funding": p.funding, "notional": p.entry_notional,
             "opened_ms": p.opened_ms, "closed_ms": int(ev["ts"]), "reason": ev.get("reason", ""),
             "open_lag_ms": p.open_lag_ms, "leverage": p.leverage, "sym": p.sym,
+            "allocated": bool(p.shares),
+            "allocation_traders": list(dict.fromkeys(t["leader"] for t in self.allocation_closed
+                                                      if t.get("parent_pos_id") == p.pos_id)),
         })
 
     def _ev_funding(self, ev):
@@ -283,6 +333,10 @@ class State:
         p.funding += amt
         p.realized += amt
         self.realized += amt
+        for share in p.shares.values():
+            portion = amt * share["size"] / p.size if p.size else 0
+            share["funding"] = share.get("funding", 0) + portion
+            share["realized"] = share.get("realized", 0) + portion
 
     def _ev_stop_set(self, ev):
         p = self._get(ev)

@@ -33,6 +33,7 @@ class Order:
     stop_px: float = 0.0
     leverage: float = 0.0
     fill_time_ms: int = 0   # leader fill time, for entry freshness
+    keep_remainder: bool = False  # shared position: never close another trader's remaining contribution
 
 
 @dataclass
@@ -126,7 +127,7 @@ class RiskGate:
                 return Decision(True, "exit", size=pos.size)
             size = min(o.size, pos.size)
             min_n = self.cfg.risk.min_notional_usd
-            if (pos.size - size) * o.px < min_n:
+            if not o.keep_remainder and (pos.size - size) * o.px < min_n:
                 return Decision(True, "exit_upgraded_to_close", size=pos.size)   # never leave a dust position
             if size * o.px < min_n:
                 return Decision(False, f"below_min_notional:${size * o.px:.2f}")  # partial mirror too small

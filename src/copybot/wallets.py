@@ -18,7 +18,7 @@ from copybot.risk import RiskGate
 class SideWallet:
     def __init__(self, base: config.Config, risk_pct: float, data_dir: Path, broker: PaperBroker, health,
                  mids: dict, assets: dict, name: str, label: str, sizer=None, notify=None, cap=None,
-                 pause_leaders: bool = False):
+                 pause_leaders: bool = False, margin_pct: float | None = None):
         """`sizer`: its own copy sizes (equity, price -> size); `risk_pct` then only sets the limits that clamp them.
         `cap`: equity -> the most notional one copy may hold (the trader-size wallet's invo.max_risk_pct)."""
         self.risk_pct = risk_pct
@@ -30,9 +30,13 @@ class SideWallet:
         self.ledger = Ledger(path / "ledger.jsonl")
         self.st: State = self.ledger.replay()
         self.gate = RiskGate(self.cfg)
-        self.pm = PositionManager(self.cfg, self.st, self.ledger, self.gate, broker, health, mids, assets,
+        manager, extra = PositionManager, {}
+        if margin_pct is not None:
+            from copybot.allocations import MarginPositionManager
+            manager, extra = MarginPositionManager, {"margin_pct": margin_pct}
+        self.pm = manager(self.cfg, self.st, self.ledger, self.gate, broker, health, mids, assets,
                                   pause_leaders=pause_leaders, sizer=sizer, cap=cap,
-                                  **({"notify": notify} if notify else {}))
+                                  **extra, **({"notify": notify} if notify else {}))
 
     def rec(self, ev: dict) -> dict:
         ev = self.ledger.append(ev)

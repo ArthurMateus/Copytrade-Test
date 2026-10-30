@@ -72,17 +72,32 @@ Invo never shows a trader's Hyperliquid address, so the calls themselves are the
   start watching a trader are never copied.
 - Every wallet gets the call through its own risk gate, filled on Hyperliquid's real order book with its 0.045% fee
   (Invo's own price is only shown as "their entry", and the card says how much later and worse we got in).
-- When the trader closes (or Invo closes it at their target or stop) we close. When the trader adds or trims, every
-  copy grows or shrinks in the same proportion. A second followed trader calling the same coin and side adds size.
+- With `margin_allocations = true`, traders on the same coin and side have separate contributions in one position.
+  When a trader closes, only their contribution is sold; the remaining traders keep their contributions open.
+  The last trader's exit closes the position. The shared stop still closes all remaining contributions.
+  When a trader adds or trims, only their contribution grows or shrinks, subject to risk limits on adds. If an add is refused, later trims
+  scale the position actually held, not the larger position we never bought. Changes below the minimum order size
+  accumulate until tradable. Resize cards show what our copy actually added, trimmed or skipped. A second followed
+  trader calling the same coin and side adds half the wallet's initial margin allocation. Each trader's fees,
+  funding and result are tracked separately. A partial exit smaller than the minimum order stays pending until
+  enough exiting size accumulates or the final contribution exits; it never sells another trader's contribution.
 - A trader whose copies lose too much (`invo.pause_dd_pct` of the wallet, or 5 losses in a row) is dropped at once;
   `/follow` brings it back.
 
 **The wallets (18).** Every size × every stop, all on the same calls:
-- sizes: the trader's size (`invo_calls`: their size × leverage of our equity, real-money calls × `live_size_mult`,
-  capped at `max_risk_pct`), and fixed 1/2/5/10/20% risk (`risk_wallets_pct`: r% of the wallet lost if its stop is hit);
+- sizes with `margin_allocations = true` (enabled in the shipped config): 5% margin in the main wallet
+  (`invo.limits_pct`), and 1/2/5/10/20% margin in the named comparison wallets (`risk_wallets_pct`, a legacy setting
+  name). At $300, 5% is $15 margin; at 10x it controls $150. Each agreeing trader receives another half allocation
+  (2.5% / $7.50 margin in that example), within available margin, health and wallet risk limits. These percentages
+  are allocations, not the amount lost at the stop. Cards are labelled “margin”. Set `margin_allocations = false`
+  only to retain the older trader-size / fixed-risk comparison mode;
 - stops: 3%, 8% and the trader's exit (`stops_pct`; the trader's exit has only a guard just before liquidation at the
   trader's leverage, at most 10x). `main_stop_pct` picks the wallets that keep the plain names and decide which calls
   are copied; the others are `<name>_stop3`, `_stop8` or `_trader`.
+
+Existing positions are adopted at their actual sizes; enabling margin allocations does not top them up or reset
+their balances. Their existing funded agreement shares are preserved. A `margin_policy` event records when the
+new sizing began in each wallet, so historical results before that event retain their old meaning.
 
 **Use a SEPARATE Invo account for the bot.** The bot logs in with a refresh token; every renewal replaces it, so the
 bot and a browser sharing one login keep logging each other out, and if Invo objects to automated reading only that

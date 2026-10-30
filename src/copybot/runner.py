@@ -132,6 +132,9 @@ class Bot:
                         self.invo_calls[(x.name, link["call"])] = p.coin
                         if x is self.invo and link.get("info"):
                             self.invo_info[p.pos_id] = link["info"]
+                    for share in p.shares.values():
+                        if share.get("call"):
+                            self.invo_calls[(x.name, share["call"])] = p.coin
         elif cfg.invo.enabled:
             log.info("invo_off", why="INVO_TOKEN_FILE not set")
         on_cmd = lambda c: self.q.put(("cmd", c))
@@ -157,6 +160,7 @@ class Bot:
         <name>_stop<s> / <name>_trader (owner request 2026-10-12: "keep the trades open until the traders close them",
         main_stop_pct 0; it was our 3% stop)."""
         cfg = self.cfg
+        allocations = cfg.invo.margin_allocations
         base, main = cfg.risk.stop_pct, cfg.invo.main_stop_pct
         stop_word = lambda s: f"{s:g}% stop" if s > 0 else "trader's exit"
         suffix = lambda s: "" if s == main else f"_stop{s:g}" if s > 0 else "_trader"
@@ -190,10 +194,19 @@ class Bot:
                     stop = s if s > 0 else invo_emergency_stop(mult)   # of a wallet risking it at this stop
                     level = risk * stop / base
                 primary = s == main and name == "invo_calls"
+                margin_pct = cfg.invo.limits_pct if name == "invo_calls" else risk
+                if allocations:
+                    level = margin_pct
+                    size_label = f"{margin_pct:g}% margin" + (" (main)" if name == "invo_calls" else "")
                 x = SideWallet(cfg, level, self.data, self.side_broker, self.health, self.mids,
                                self.assets, name=name + suffix(s), label=f"{size_label} · {stop_word(s)}",
-                               sizer=sizer, cap=cap, **(primary_kw if primary else {}))
+                               sizer=sizer, cap=cap, margin_pct=margin_pct if allocations else None,
+                               **(primary_kw if primary else {}))
                 x.size_label, x.stop_label = size_label, stop_word(s)
+                if allocations:
+                    policy = dict(version=1, margin_pct=margin_pct, agreement_fraction=.5)
+                    if any(x.st.margin_policy.get(k) != v for k, v in policy.items()):
+                        x.rec(dict(ev="margin_policy", policy=policy))
                 gate_box.append(x.gate)
                 if s == 0:
                     # the trader's exit: the copy takes the trader's leverage (at most 10x) and the guard stop
@@ -215,9 +228,13 @@ class Bot:
             # the leader pause compares a trader's copy drawdown with leader_pause_dd_pct of (equity /
             # max_leaders): set so the limit is invo.pause_dd_pct of the whole wallet
             x.cfg.risk.leader_pause_dd_pct = cfg.invo.pause_dd_pct * max(1, x.cfg.risk.max_leaders)
-            # a second trader on the coin and side we hold adds size (owner request 2026-10-13, "B"), but the
-            # first trader's exit still closes the whole copy (no hand-over to the second one)
-            x.pm.handover = False
+            # Margin mode tracks independent contributions; legacy mode keeps the original exit policy.
+            x.pm.handover = allocations
+            if allocations:
+                # Independent half-allocations share the wallet budget, rather than a
+                # per-symbol ceiling that only has room for one extra trader.
+                x.cfg.risk.max_symbol_risk_pct = x.cfg.risk.max_total_risk_pct
+                x.cfg.risk.consensus_risk_pct = x.pm.margin_pct / 2
             if s != base:
                 # its stop; the stop only has to sit before liquidation (a wider stop with the 3x buffer of the
                 # usual one would leave no leverage for the same copy size)
@@ -535,6 +552,9 @@ class Bot:
                 mine = open_by.get((p.coin, p.side), [])
                 if mine:
                     self.invo_calls[(w.name, mine[0].id)] = p.coin
+                    if self.cfg.invo.margin_allocations:
+                        w.pm.link_share(p, leader, mine[0])
+                        self.invo_catch_up(w, p, mine[0], leader=leader)
                     continue
                 log.warn("invo_backer_closed_unseen", wallet=w.name, trader=trader, coin=p.coin)
                 try:
@@ -557,6 +577,8 @@ class Bot:
                 if link:
                     if link["call"] in ids:
                         self.invo_calls[(w.name, link["call"])] = p.coin
+                        if self.cfg.invo.margin_allocations:
+                            w.pm.link_share(p, leader, by_id[link["call"]])
                         self.invo_catch_up(w, p, by_id[link["call"]])
                         continue
                     self.invo_calls.pop((w.name, link["call"]), None)
@@ -571,7 +593,10 @@ class Bot:
                 try:
                     w.pm.on_move(Move(leader, p.coin, p.side * 1.0, 0.0, int(time.time() * 1000),
                                       int(time.time() * 1000), 0, (), 0.0, 1))
-                    self.invo_closed_by(w, p, link["call"] if link else "", "unseen")
+                    if self.cfg.invo.margin_allocations and w.st.positions.get(p.coin) is p:
+                        self.invo_sync_owner(w, p)
+                    else:
+                        self.invo_closed_by(w, p, link["call"] if link else "", "unseen")
                 except Exception:
                     log.exception("invo_wallet_error", wallet=w.name, kind="invo_baseline")
                 finally:
@@ -584,15 +609,25 @@ class Bot:
         Its close takes that size off again; the first trader's exit still closes everything."""
         p = w.st.positions[coin]
         before = p.size
-        w.pm.on_move(Move(leader, coin, 0.0, side * call.exposure, call.created_ms, call.created_ms,
-                          abs(hash(call.id)) % 10**12, (), call.entry * fx, 1))
+        reason = w.pm.on_move(Move(leader, coin, 0.0, side * call.exposure, call.created_ms, call.created_ms,
+                                   abs(hash(call.id)) % 10**12, (), call.entry * fx, 1))
         q = w.st.positions.get(coin)
         if q is None or leader not in q.backers:
             return
+        if self.cfg.invo.margin_allocations:
+            port = self.invo_watch.ports.get(call.portfolio_id) if self.invo_watch else None
+            w.pm.link_share(q, leader, call, dict(title=port.title if port else "", live=call.live, coin=coin))
         self.invo_calls[(w.name, call.id)] = coin
         if w is self.invo:
-            self.invo_note(q, f"@{cardfmt.esc(trader)} also called it: +{(q.size - before) * q.entry_px:.2f}$ "
-                              f"(their entry {cardfmt.fpx(call.entry)})")
+            if self.cfg.invo.margin_allocations:
+                share = q.shares[leader]
+                text = (f"added {cardfmt.fusd(share['size'] * share['entry_px'] / q.leverage, sign=False)} margin"
+                        if share['size'] > 0 else "no allocation added (risk or minimum-order limits)")
+                self.invo_note(q, f"@{cardfmt.esc(trader)} also called it: {text} "
+                                  f"(their entry {cardfmt.fpx(call.entry)})")
+            else:
+                self.invo_note(q, f"@{cardfmt.esc(trader)} also called it: +{(q.size - before) * q.entry_px:.2f}$ "
+                                  f"(their entry {cardfmt.fpx(call.entry)})")
 
     def invo_note(self, p, text: str) -> None:
         """Appends a line to an Invo copy's card text (kept in its ledger link)."""
@@ -607,22 +642,36 @@ class Bot:
         """Ids of the calls wallet w's open copies follow."""
         return {w.st.invo_links[q.pos_id]["call"] for q in w.st.positions.values() if q.pos_id in w.st.invo_links}
 
-    def invo_catch_up(self, w, p, call) -> None:
+    def invo_sync_owner(self, w, p) -> None:
+        """After a contribution exits, route the surviving position to its remaining owner call."""
+        if w.st.positions.get(p.coin) is not p or not p.shares:
+            return
+        share = p.shares[p.leader]
+        current = w.st.invo_links.get(p.pos_id, {})
+        if share.get("call") and current.get("call") != share["call"]:
+            w.rec(dict(ev="invo_link", pos_id=p.pos_id, call=share["call"],
+                       portfolio=share.get("portfolio", ""), title=share.get("title", ""),
+                       live=share.get("live", False), coin=p.coin))
+
+    def invo_catch_up(self, w, p, call, leader=None) -> None:
         """A copy found again at a restart takes the call's size now (owner request 2026-10-13: "if the trader
         resizes it, resize it, always"): an add or trim made while the bot was off is mirrored like any other.
         Paper calls only: a real-money call's size is a % of an equity that moves with the price."""
-        if call.units > 0 or call.exposure <= 0 or p.k <= 0:
+        leader = leader or p.leader
+        share = p.shares.get(leader) if self.cfg.invo.margin_allocations else None
+        size, k = (share["size"], share["k"]) if share else (p.size, p.k)
+        if call.units > 0 or call.exposure <= 0 or k <= 0 or size <= 0:
             return
-        was = p.size / p.k                                  # the trader's exposure our copy last followed
+        was = size / k                                    # the trader's exposure our share last followed
         if abs(call.exposure - was) / was <= INVO_RESIZE_MIN:
             return
-        if p.leader not in w.st.followed and call.exposure > was:
-            return                                          # an unfollowed trader's adds are not copied
-        log.info("invo_resize", wallet=w.name, trader=p.leader[len(INVO):], coin=p.coin, old=round(was, 4),
+        # RiskGate refuses unfollowed traders' adds. Still process the observation so
+        # the stored ratio advances and a later trim scales the position actually held.
+        log.info("invo_resize", wallet=w.name, trader=leader[len(INVO):], coin=p.coin, old=round(was, 4),
                  new=round(call.exposure, 4), at="baseline")
         _, fx = self.invo_trade_coin(call.ticker)
         try:
-            w.pm.on_move(Move(p.leader, p.coin, p.side * was, p.side * call.exposure, int(time.time() * 1000),
+            w.pm.on_move(Move(leader, p.coin, p.side * was, p.side * call.exposure, int(time.time() * 1000),
                               call.created_ms, abs(hash(call.id)) % 10**12 + 2, (), call.entry * fx, 1))
         except Exception:
             log.exception("invo_wallet_error", wallet=w.name, kind="invo_catch_up")
@@ -747,6 +796,8 @@ class Bot:
                 w.rec({"ev": "invo_link", "pos_id": p.pos_id, "call": call.id, "info": info,
                        "portfolio": call.portfolio_id, "title": title, "live": call.live, "coin": coin,
                        "gap": round(gap, 4)})
+                if self.cfg.invo.margin_allocations:
+                    w.pm.link_share(p, leader, call, dict(title=title, live=call.live, coin=coin))
                 if primary:
                     self.invo_card(p, force=True)
             return
@@ -759,9 +810,12 @@ class Bot:
                 return
             self.invo_calls.pop((w.name, call.id), None)
             self.invo_calls[(w.name, new.id)] = held
-            if p.leader != leader:
+            if self.cfg.invo.margin_allocations:
+                w.pm.link_share(p, leader, new)
+            if p.leader != leader and not self.cfg.invo.margin_allocations:
                 return                       # a backer's call: its later resizes do not change the extra size
-            w.rec({"ev": "invo_link", "pos_id": p.pos_id, "call": new.id})
+            if p.leader == leader:
+                w.rec({"ev": "invo_link", "pos_id": p.pos_id, "call": new.id})
             log.info("invo_relinked", wallet=w.name, trader=trader, coin=held, old=call.id, new=new.id)
             if call.exposure > 0 and abs(new.exposure - call.exposure) / call.exposure > INVO_RESIZE_MIN:
                 kind = "invo_resize"
@@ -770,25 +824,59 @@ class Bot:
         if kind == "invo_resize":
             held = self.invo_held(w, new, coin)
             p = w.st.positions.get(held) if held else None
-            if p is None or p.leader != leader or p.side != side:
+            if p is None or p.side != side or (p.leader != leader and not (
+                    self.cfg.invo.margin_allocations and leader in p.shares)):
                 return
-            if leader not in w.st.followed and new.exposure > call.exposure:
-                return       # an unfollowed trader's trims are copied, its adds are not
             before = p.size
-            w.pm.on_move(Move(leader, held, side * call.exposure, side * new.exposure, int(time.time() * 1000),
-                              new.created_ms, abs(hash(new.id)) % 10**12 + 1, (), new.entry * fx, 1))
+            if self.cfg.invo.margin_allocations:
+                own = p.shares[leader]
+                target = before - own["size"] + own["k"] * new.exposure
+            else:
+                target = p.k * new.exposure
+            reason = w.pm.on_move(Move(leader, held, side * call.exposure, side * new.exposure,
+                                      int(time.time() * 1000), new.created_ms,
+                                      abs(hash(new.id)) % 10**12 + 1, (), new.entry * fx, 1))
             p = w.st.positions.get(held)
+            if p is not None and self.cfg.invo.margin_allocations:
+                w.pm.link_share(p, leader, new)
             if primary and p is not None and p.pos_id in self.invo_info:
                 base_info = re.sub(r"\n↕️[^\n]*| · resized by the trader[^\n]*", "", self.invo_info[p.pos_id])
                 self.invo_info[p.pos_id] = base_info + (
-                    f"\n↕️ Trader resized {call.committed * 100:.1f}% → {new.committed * 100:.1f}%")
-                w.rec({"ev": "invo_link", "pos_id": p.pos_id, "call": new.id, "info": self.invo_info[p.pos_id]})
+                    f"\n↕️ Trader resized {call.committed * 100:.1f}% → {new.committed * 100:.1f}%"
+                    f" · @{cardfmt.esc(trader)} · {cardfmt.resize_copy(before, p.size, target, held, reason)}")
+                owner_call = p.shares[p.leader].get("call", new.id) if p.shares else new.id
+                w.rec({"ev": "invo_link", "pos_id": p.pos_id, "call": owner_call, "info": self.invo_info[p.pos_id]})
             log.info("invo_resize", wallet=w.name, trader=trader, coin=held, old=round(call.committed, 4),
                      new=round(new.committed, 4), ours_before=before, ours_after=p.size if p else 0)
             return
         held = self.invo_held(w, call, coin)
         self.invo_calls.pop((w.name, call.id), None)
         p = w.st.positions.get(held) if held else None
+        if self.cfg.invo.margin_allocations:
+            if p is None or p.side != side or leader not in p.shares:
+                return
+            before = p.size
+            self._invo_close_why = call.reason_closed or "closed"
+            try:
+                reason = w.pm.on_move(Move(leader, held, side * max(call.exposure, 1e-9), 0,
+                                          int(time.time() * 1000), call.created_ms, 0, (),
+                                          (call.closing_price or 0) * fx, 1))
+            finally:
+                self._invo_close_why = None
+            q = w.st.positions.get(held)
+            if q is not None:
+                self.invo_sync_owner(w, q)
+                if primary:
+                    note = (f"@{cardfmt.esc(trader)} closed: removed {before - q.size:.6g} {held}; "
+                            "remaining traders keep their allocations")
+                    if leader in q.shares and q.shares[leader].get("closing"):
+                        note = f"@{cardfmt.esc(trader)} closed: exit pending minimum order size"
+                    self.invo_note(q, note)
+            else:
+                for key in [k for k, c in self.invo_calls.items() if k[0] == w.name and c == held]:
+                    self.invo_calls.pop(key, None)
+                self.invo_closed_by(w, p, call.id, "vanished" if call.reason_closed == INVO_DELETED else "confirmed")
+            return
         if p is not None and p.side == side and leader in p.backers:
             # the second trader closed: take off the size it added (the first trader's copy stays)
             w.pm.on_move(Move(leader, held, side * max(call.exposure, 1e-9), 0.0, int(time.time() * 1000),
@@ -901,6 +989,10 @@ class Bot:
                 break
             self.handle(item)
             self.mids.update(self.feed.mids()[0])
+        if self.cfg.invo.margin_allocations:
+            for w in self.invo_wallets():
+                for p in w.st.positions.values():
+                    self.invo_sync_owner(w, p)
         self.invo_refresh_watched()     # follows, drops and closes change who the Invo watcher reads
         # 3. calendar marks for the loss limits
         now = now_ms()

@@ -63,6 +63,7 @@ class Discord:
 class Invo:
     """Copy Invo (Involio) traders' posted calls on paper (owner request 2026-10-09; copybot/invo.py). Needs
     INVO_TOKEN_FILE (a file holding the bot's own Invo account's refresh token), else it stays off."""
+    margin_allocations: bool = False  # fixed wallet-% margin, independent trader contributions
     enabled: bool = True
     api_base: str = "https://api.invoapp.com/v1_0"
     # how fast a new call is seen (owner request 2026-10-10, a 26 s copy lag): every poll_s the watcher asks each

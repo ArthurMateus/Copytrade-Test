@@ -142,6 +142,17 @@ another PC means copying `data/`. Never run two instances on the same wallets. `
   0.12% worse than their price (-0.12$)".
 
 ## The 18 Invo wallets (owner requests 2026-10-09 .. 10-24)
+**Updated owner decision, 2026-10-30:** shipped `invo.margin_allocations = true` uses margin allocation rather
+than stop-loss risk. Main wallet = `invo.limits_pct` (5%) margin; comparison wallets = their named 1/2/5/10/20%
+margin. Each agreeing trader adds half the level. `MarginPositionManager` in `allocations.py` tracks independent
+`Position.shares`; each trader's resizes and exit affect only their contribution. The first trader's exit leaves
+other funded shares open. Shared stops still close all shares. Every fill carries its new shares in the same ledger
+event; individual fees/funding/P&L feed `State.allocation_closed` and trader cards. Minimum-size partial exits stay
+pending without selling others' shares. Old positions are adopted at their actual sizes, without topping them up;
+`margin_policy` ledger events timestamp the sizing change. The descriptions of trader-size/fixed-risk sizing and
+first-owner closes above/below apply only when `margin_allocations = false`. Do not interpret old backtests as
+tests of the new allocation policy.
+
 - Sizes: trader size (`invo_calls`: `Bot.invo_size` = their committed exposure x `invo.size_mult` (x `live_size_mult`
   for real money) x our equity, >= 1.05 x min_notional, capped by `Bot.invo_cap` = `invo.max_risk_pct` (1%) of equity
   at our 3% stop = 100$, for opens AND adds; owner request 2026-10-09 after a 25% x 5x STRK call became a 375$ copy)

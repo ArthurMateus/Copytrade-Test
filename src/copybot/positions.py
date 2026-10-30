@@ -2,8 +2,10 @@
 funding, reconciliation and leader pause rules. Every order goes through the RiskGate, every state change
 is written to the ledger (write-ahead intent, then result) before it is acted upon in memory.
 
-Copy model: when we open we record k = our_size / |leader_position|. Afterwards our target size is
-k x |leader_position|: leader adds -> we add (risk-capped), leader reduces -> we reduce, leader closes ->
+Copy model: when we open we record k = our_size / |leader_position|. Resizes target k times the
+leader's size; k is updated after fills and blocked adds so later trims scale what we actually hold.
+Changes smaller than a minimum order accumulate instead of being forgotten:
+leader adds -> we add (risk-capped), leader reduces -> we reduce, leader closes ->
 we close, leader flips -> we close and open a fresh, risk-sized copy on the other side. Further fills of the
 SAME leader order that opened the position only rebase k (one order split into many fills is one trade).
 
@@ -93,18 +95,19 @@ class PositionManager:
         self.st.apply(ev)
         return ev
 
-    def _skip(self, why: str, **kw) -> None:
+    def _skip(self, why: str, **kw) -> str:
         log.info("copy_skip", reason=why, **kw)
         if why.startswith("below_min_notional"):
             self._rec({"ev": "count", "name": "skipped_min_notional"})
         # `kind` is notify()'s own first argument: pass the order kind under another name
         self.notify("skip", reason=why, **{("order" if k == "kind" else k): v for k, v in kw.items()})
+        return why
 
     def _lag(self, h: Health, move: Move | None) -> float | None:
         return None if move is None else h.exchange_now_ms() - move.time_ms
 
     # ---- leader moves -------------------------------------------------------------------------
-    def on_move(self, m: Move) -> None:
+    def on_move(self, m: Move) -> str | None:
         pos = self.st.positions.get(m.coin)
         log.info("leader_move", leader=m.leader, coin=m.coin, kind=m.kind, start=m.start_pos, end=m.end_pos,
                  px=m.px, fills=m.n_fills, oid=m.oid)
@@ -127,15 +130,34 @@ class PositionManager:
             if pos is not None:   # handed over to a backer: the leader's new side is now a conflict
                 return self.on_other_leader(pos, m)
             return self.open(m)
+        if kind not in ("add", "reduce"):
+            return
+        # A refused add must not leave later trims targeting a position we never held.
+        # k also retains pending changes too small to fill, for restart catch-up.
         target = pos.k * abs(m.end_pos)
         if kind == "add":
             if m.oid == pos.open_oid:  # more fills of the order that opened: rebase, do not add
                 k = pos.size / abs(m.end_pos)
                 self._rec({"ev": "rebase", "coin": m.coin, "pos_id": pos.pos_id, "k": k})
                 return
-            return self.add(m, target - pos.size)
-        if kind == "reduce":
-            return self.reduce(m.coin, pos.size - target, "leader_reduce", move=m)
+        before = pos.size
+        if target > before:
+            reason = self.add(m, target - before)
+        elif target < before:
+            reason = self.reduce(m.coin, pos.size - target, "leader_reduce", move=m)
+        else:
+            return
+        if self.st.positions.get(m.coin) is pos and m.end_pos:
+            k = pos.size / abs(m.end_pos)
+            px = self.mids.get(m.coin) or m.px
+            tiny_add = (target > before and reason and reason.startswith("below_min_notional")
+                        and (target - before) * px < self.cfg.risk.min_notional_usd)
+            # Failed trims and genuinely tiny adds remain pending. A blocked larger add
+            # is acknowledged at our actual size, otherwise later reductions can be lost.
+            acknowledged = pos.size != before or (target > before and not tiny_add)
+            if acknowledged and k != pos.k:
+                self._rec({"ev": "rebase", "coin": m.coin, "pos_id": pos.pos_id, "k": k})
+        return reason
 
     # ---- several leaders on one coin ------------------------------------------------------------
     def on_other_leader(self, pos: Position, m: Move) -> None:
@@ -283,7 +305,7 @@ class PositionManager:
                  slip_bps=round(f.slippage_bps, 2))
         self.notify("opened", coin=m.coin)
 
-    def add(self, m: Move, size: float) -> None:
+    def add(self, m: Move, size: float) -> str | None:
         pos = self.st.positions[m.coin]
         h = self.health()
         px = self.mids.get(m.coin) or m.px
@@ -313,7 +335,7 @@ class PositionManager:
         self.notify("updated", coin=m.coin)
 
     # ---- exits (never blocked by staleness, pauses or rate limits) ------------------------------
-    def reduce(self, coin: str, size: float, reason: str, move: Move | None = None) -> None:
+    def reduce(self, coin: str, size: float, reason: str, move: Move | None = None) -> str | None:
         pos = self.st.positions.get(coin)
         if pos is None or size <= 0:
             return
