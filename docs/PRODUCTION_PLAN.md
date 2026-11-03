@@ -20,13 +20,11 @@ Phases 4–5 turn it into a product.
 | Where it runs | The home PC for now; a small server later, when there is money for it |
 | Live balance | 300$ |
 | Daily stop | No new entries once the **day's net result** is −15% of the balance at the start of the day. Measured from the day's start, **not** from the day's best: a day that goes +30% then falls to +15% does not stop |
+| Total stop | No new entries once the live wallet is at or below **150$** (−50% of 300$), until the owner resumes it |
 | Hyperliquid account | Not yet: the owner creates it (Phase 0) |
 | Traders | The ones the owner follows, picked from the daily Claude report and changed by hand at any time |
 | Discord | Owner control stays private; a public read-only server later; then a paid product |
 | Web dashboard | Reachable from anywhere |
-
-Still open: a **total** loss limit for the live wallet (suggestion: stop all new entries if the wallet falls below
-200$, i.e. −33%, until the owner resumes it).
 
 ## Phase 0: Before any code
 | Item | Who | Why |
@@ -54,7 +52,8 @@ A **LiveBroker** with the same shape is added, so the RiskGate, ledger, Position
 5. **Live wallet limits** (its own, separate from the paper ceilings in `risk.toml`):
    - balance used: 300$
    - daily stop: −15% net for the day (see the owner decisions above), resets at local midnight
-   - total stop: still open (see above)
+   - total stop: wallet at or below 150$ (balance + open P&L) → no new entries, Discord alert, until `/liveresume`;
+     open copies keep their stops and the traders' exits
    - a maximum size per trade
 6. **Kill switch.** `/livekill <PIN>` closes everything and stops entries. `/livepause` and `/liveresume`.
 7. **One wallet live.** Only 5% margin · 8% stop goes live; every paper wallet keeps running. A new card shows
