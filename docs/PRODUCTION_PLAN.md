@@ -26,6 +26,29 @@ Phases 4–5 turn it into a product.
 | Discord | Owner control stays private; a public read-only server later; then a paid product |
 | Web dashboard | Reachable from anywhere |
 
+## Why Hyperliquid (checked 2026-11-03)
+Exchanges for copying perp trades from Brazil. Sources are news sites and guides, not official pages: re-check fees on
+the exchanges' own docs and the legal points with the CVM / a lawyer before relying on them.
+
+| Exchange | Taker fee | Futures open to Brazilians? | Fit for this bot |
+|---|---|---|---|
+| **Hyperliquid** | 0.045% | Yes (not on the restricted lists found; no KYC) | ✅ Paper results already use its prices, books and fees; 180+ coins; agent keys that cannot withdraw |
+| Lighter | 0% (standard account) | Yes (decentralized) | ⚠️ Cheapest, but ~168 coins (some Invo calls missed), 200–300 ms order delay, new code and new paper testing |
+| Aster | ~0.04% | Yes (decentralized) | Small saving, one source, smaller market |
+| Binance | 0.05% | ❌ CVM ban on futures for Brazilians since 2020 (2024 Termo de Compromisso) | No |
+| Bybit | 0.055% | ❌ Brazilians' derivative positions liquidated Sept 2026, users moved to a local entity | No |
+| OKX / Bitget | 0.05–0.06% | Unclear: no confirmed position in Brazil | Risky: access could be cut with trades open |
+
+- Using a VPN to reach a blocked exchange breaks its terms and can freeze the account.
+- Fee cost at this size: ~100$ per copy → ~0.09$ per round trip on Hyperliquid, ~9–10$ over the paper period's 105
+  trades (vs +53$ made). Lighter's 0% would save that but costs missed coins and restarting the paper test.
+- Small Hyperliquid savings: a referral code (~4%) and a small HYPE stake (~5%). Limit (maker) orders would risk missed
+  copies: not used.
+- Later option (not planned yet): track Lighter on paper next to Hyperliquid to measure fee saving vs missed coins.
+- Taxes (ask an accountant): gains on a foreign / DeFi platform likely fall under the 15% annual rate (Lei 14.754/2023,
+  no R$35k monthly exemption), and monthly DeCripto reports may be the owner's own job since July 2026
+  (IN RFB 2.291/2025). The bot's ledger (every fill with fees and funding) is the record for this.
+
 ## Phase 0: Before any code
 | Item | Who | Why |
 |---|---|---|
