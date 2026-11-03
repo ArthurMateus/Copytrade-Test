@@ -236,6 +236,14 @@ tests of the new allocation policy.
   on the Claude PC (they change the owner's Windows): parse-checked only.
 - `deploy/` (Linux server, later): `setup_server.sh`, `copybot.service` (systemd, Restart=always), `copybot.env.example`.
 
+## The public channel (Phase 4, owner request 2026-11-03)
+- `DISCORD_PUBLIC_CHANNEL_ID` (env; off when unset) + `discord.public_wallet` / `public_daily_hour` /
+  `public_show_traders`. `Bot.public_tick` (every second, after `refresh_ui`) diffs the wallet's open pos_ids and
+  closed count since the last look (the first look after a start only remembers: nothing is re-posted) and posts
+  `cardfmt.public_open` / `public_close` (% of the trade and of the wallet before it); the daily `public_daily`
+  once per local day (bot-ledger `mark` kind `public_daily`). `ChatUI.send_public` queues `("public", text)`;
+  `DiscordUI._call` posts to `params["channel"]`. No dollar amounts there (tested). Commands stay owner-only.
+
 ## Findings from the real API
 - `tests/test_discord.py::test_rate_limit_is_honoured` is timing-based and can fail rarely under load; rerun before
   suspecting a bug.

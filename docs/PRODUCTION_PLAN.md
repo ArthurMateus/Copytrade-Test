@@ -121,6 +121,9 @@ waiting for the owner's API wallet.
 - Roles: `public` (read), later `subscriber`; Discord's anti-spam settings on.
 - Low legal risk; builds an audience before charging.
 
+**Status (2026-11-03):** built (README "Public results channel"): one wallet's trades and a daily summary in % only,
+traders hidden by default. Waiting for the owner to make the channel and set `DISCORD_PUBLIC_CHANNEL_ID`.
+
 ## Phase 5: Subscription product (only after the lawyer says how)
 A **rebuild of the core**: today the bot is single-user (one set of files and environment variables).
 

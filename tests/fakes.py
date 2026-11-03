@@ -304,6 +304,7 @@ class FakeDiscord:
         self.fail_429 = 0
         self.rl_headers: dict = {}              # rate-limit headers added to every REST answer
         self.next_id = 10_000
+        self.public: list[dict] = []          # messages posted to any other channel (the public one)
         self.seq = 0
         self.lock = threading.Lock()
         self._conns: list = []
@@ -385,6 +386,11 @@ class FakeDiscord:
                 self.sent.append({**body["embeds"][0], "id": mid, "message_id": mid, "buttons": self.buttons[mid],
                                   "text": md_to_card(body["embeds"][0]["description"])})
                 return 200, {"id": str(mid), "channel_id": self.channel}
+            if verb == "POST" and p.startswith("/channels/") and p.endswith("/messages"):   # another channel
+                self.public.append({"channel": p.split("/")[2],
+                                    "text": md_to_card(body["embeds"][0]["description"])})
+                self.next_id += 1
+                return 200, {"id": str(self.next_id), "channel_id": p.split("/")[2]}
             if verb == "PATCH" and p.startswith(f"/channels/{self.channel}/messages/"):
                 mid = int(p.rsplit("/", 1)[1])
                 if mid not in self.messages:

@@ -163,6 +163,7 @@ class Bot:
         self.ws_down_since = 0.0     # websocket down since (0 = up); alerted only if it stays down
         self.ws_alerted = False
         self.started = time.time()
+        self.pub_seen: tuple[set, int] | None = None   # the public wallet's open pos_ids and closed count, last seen
         self.health_problems: dict[str, str] = {}   # what the watchdog found wrong (alerted once, then "back")
 
     def invo_set(self, primary_kw: dict) -> tuple:
@@ -1060,6 +1061,7 @@ class Bot:
                 self.tick()
                 if time.time() - last_ui >= 1.0:
                     self.refresh_ui()
+                    self.public_tick()
                     last_ui = time.time()
                 if time.time() - last_beat >= 60:
                     self.heartbeat()
@@ -1341,6 +1343,38 @@ class Bot:
         lg.close()
         log.info("invo_reset", archive=arch.parent.as_posix(), followed=len(follows))
         return arch.parent.as_posix()
+
+    # ---- the public read-only channel (docs/PRODUCTION_PLAN.md Phase 4, owner request 2026-11-03) -----------
+    def public_wallet(self):
+        name = self.cfg.discord.public_wallet
+        return next((w for w in self.invo_wallets() if w.name == name), None)
+
+    def public_tick(self) -> None:
+        """Every second: the public wallet's new and closed trades since the last look (nothing from before the
+        start: the first look only remembers), and the daily summary at discord.public_daily_hour (local)."""
+        w = self.public_wallet()
+        if w is None or not self.cfg.dc_public_channel_id:
+            return
+        d = self.cfg.discord
+        ids = {p.pos_id for p in w.st.positions.values()}
+        if self.pub_seen is not None:
+            seen, n_closed = self.pub_seen
+            eq = w.st.equity0 + sum(t["pnl"] for t in w.st.closed[:n_closed])
+            for t in w.st.closed[n_closed:]:
+                self.ui.send_public(cardfmt.public_close(t, eq, d.public_show_traders))
+                eq += t["pnl"]
+            for p in w.st.positions.values():
+                if p.pos_id not in seen:
+                    self.ui.send_public(cardfmt.public_open(p, d.public_show_traders))
+        self.pub_seen = (ids, len(w.st.closed))
+        local = now_ms() + d.utc_offset_hours * 3_600_000
+        day = day_key(local)
+        if time.gmtime(local / 1000).tm_hour >= d.public_daily_hour and \
+                self.st.marks.get("public_daily", {}).get("key") != day:
+            self.rec({"ev": "mark", "kind": "public_daily", "key": day, "equity": w.st.equity(w.pm.mids)})
+            mark = w.st.marks.get("day")
+            title = "LIVE wallet" if w is self.live else "Copy wallet"
+            self.ui.send_public(cardfmt.public_daily(w.st, w.pm.mids, title, mark["equity"] if mark else None))
 
     # ---- health and backups (docs/PRODUCTION_PLAN.md Phase 2, owner request 2026-11-03) ------------------------
     def health_check(self) -> dict[str, str]:

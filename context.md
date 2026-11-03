@@ -6,7 +6,8 @@ it). Repo: https://github.com/ArthurMateus/Copytrade-Test. The 18 Invo wallets a
 (`tests/test_safety.py` enforces it). Tests: `PYTHONPATH=src python -m pytest` on the Claude PC (~210 tests, ~5 min;
 the venv needs `hyperliquid-python-sdk`).
 
-## 2026-11-03: going live (branch `live/phase1`, from `invo-only`)
+## 2026-11-03: going live (everything is on `invo-only` again: the bot PC only runs `git pull` there)
+- Phase 4 (public read-only Discord channel) built on `phase4/public-discord`; merge it into `invo-only`.
 - Owner plan: `docs/PRODUCTION_PLAN.md` (5 phases: live engine on testnet then mainnet, a server, a web dashboard,
   a public read-only Discord, later a paid product only after a lawyer). Owner decisions: Hyperliquid (checked for
   Brazil), 100$ live (first 300$), 5% margin · 8% stop (`invo_risk_5pct_stop8`), daily stop -15% NET from the day's start, floor

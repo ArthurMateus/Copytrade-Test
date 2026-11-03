@@ -147,6 +147,7 @@ class DiscordUI(ChatUI):
         self.enabled = bool(cfg.dc_token and cfg.dc_channel_id and cfg.dc_owner_id)
         self.api = DiscordApi(cfg.discord.api_base, cfg.dc_token) if self.enabled else None
         self.channel = cfg.dc_channel_id
+        self.public_channel = cfg.dc_public_channel_id    # read-only for others (Phase 4); "" = none
         self.owner = str(cfg.dc_owner_id)
         self.registered = False
         self.connected = False
@@ -156,7 +157,7 @@ class DiscordUI(ChatUI):
         rows = components(params.get("buttons") or [])
         params = {**params, "text": short_names(params["text"])}
         if method == "sendMessage":
-            r = self.api.call("POST", f"/channels/{self.channel}/messages",
+            r = self.api.call("POST", f"/channels/{params.get('channel') or self.channel}/messages",
                               {"embeds": [embed(params["text"])], "allowed_mentions": {"parse": []},
                                **({"components": rows} if rows else {})}, on_limit=self._bucket_empty)
             return {"message_id": int(r["id"])}

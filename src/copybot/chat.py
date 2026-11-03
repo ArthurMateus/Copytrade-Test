@@ -117,6 +117,12 @@ class ChatUI:
             self.outbox.put(text)
             self.wake.set()
 
+    def send_public(self, text: str) -> None:
+        """A message for the public read-only channel (Phase 4), when the platform has one."""
+        if self.enabled and getattr(self, "public_channel", ""):
+            self.outbox.put(("public", text))
+            self.wake.set()
+
     def restore_card(self, key: str, msg_id: int) -> None:
         with self.lock:
             self.cards[key] = Card(key, msg_id)
@@ -197,8 +203,11 @@ class ChatUI:
                 text = self.outbox.get_nowait()
             except queue.Empty:
                 break
+            params = {"text": text}
+            if isinstance(text, tuple):            # ("public", text): the public channel
+                params = {"text": text[1], "channel": self.public_channel}
             try:
-                self._write("sendMessage", {"text": text})
+                self._write("sendMessage", params)
             except ChatError as e:
                 log.error(f"{self.name}_send_failed", err=e.desc)
         with self.lock:

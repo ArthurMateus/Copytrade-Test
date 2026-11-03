@@ -193,6 +193,27 @@ e.g. `backup_dir = "C:/Users/gedeo/OneDrive/copybot-backups"`. To restore: stop 
 itself), `copybot.service` and `copybot.env.example` (the secrets, the same names as above). Never run the bot on two
 machines at once: remove the Windows task first, then copy `data\` over.
 
+## Public results channel (read-only for others)
+
+The bot can post one wallet's trades to a second Discord channel that other people can read but not write in. It
+shows new trades (coin, side, leverage, entry, stop), closed trades (result in % of the trade and of the wallet,
+how long, why) and a summary every day at 21:00 (your time). Never dollar amounts, and no trader names unless you set
+`public_show_traders = true`. Commands keep working only in your own channel, only for you.
+
+1. In your Discord server create a channel, e.g. `#copy-results`. In its settings → Permissions: `@everyone` may
+   **View Channel** and **Read Message History** but NOT **Send Messages**; the bot's role may **Send Messages** and
+   **Embed Links**.
+2. Discord → User Settings → Advanced → turn on Developer Mode. Right-click the channel → Copy Channel ID.
+3. In PowerShell on the bot PC, then restart the bot:
+
+```powershell
+setx DISCORD_PUBLIC_CHANNEL_ID "<the channel id>"
+```
+
+`config/discord.toml` picks the wallet (`public_wallet`: the 5% · 8% paper wallet by default, `"live"` for the real
+one once it runs), the hour and whether traders are named. Before inviting paying users, read the legal note in
+`docs/PRODUCTION_PLAN.md` (Phase 5): sharing results is fine, selling copy signals may need a CVM registration.
+
 ## Live trading (real money, Hyperliquid)
 
 One wallet, `live`, copies the paper wallet `copy_wallet` in `config/live.toml` (5% margin · 8% stop) with real orders:
