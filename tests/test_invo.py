@@ -573,6 +573,43 @@ def test_our_stop_closes_an_invo_copy_and_its_card_becomes_the_summary(invo_env,
         stop_bot(bot, th)
 
 
+@pytest.mark.parametrize("layout", ["", "margin_allocations = true\nmain_stop_pct = 0.0\n"],
+                         ids=["risk_sizes", "owner_config_margin"])
+def test_close_ends_one_trade_everywhere_so_an_opposite_call_is_copied(invo_env, monkeypatch, layout):
+    """Owner request 2026-11-03: a BTC long held for days blocked every BTC short. /close BTC closes it now in every
+    paper wallet; the trader's later resizes and close do nothing, and the next call on the coin is copied."""
+    hl, dc, data, cdir, f, tok = invo_env
+    (cdir / "invo.toml").write_text((cdir / "invo.toml").read_text(encoding="utf-8") + layout, encoding="utf-8")
+    pid = f.add_user("prateek")[0]
+    pid2 = f.add_user("candlesticks")[0]
+    bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
+    try:
+        dc.say("/follow prateek")
+        dc.say("/follow candlesticks")
+        assert wait_for(lambda: all(bot.invo_watch.known.get(n) is not None for n in ("prateek", "candlesticks")),
+                        timeout=10)
+        cid = f.open_call(pid, "BTC", long=True, leverage=5, size=0.05, entry=100_000.0)
+        assert wait_for(lambda: all("BTC" in w.st.positions for w in bot.invo_paper_wallets()), timeout=10)
+        text = lambda: " ".join(m["text"] for m in dc.sent + dc.edits)
+        dc.say("/close btc")
+        assert wait_for(lambda: all("BTC" not in w.st.positions for w in bot.invo_paper_wallets()), timeout=10)
+        assert bot.invo.st.closed[-1]["reason"] == "closed_by_owner"
+        assert wait_for(lambda: "BTC</b> closed in 18 wallet(s)" in text() and "closed by you (/close)" in text())
+        f.resize_call(pid, cid, 0.10)                       # the trader adds: there is no copy to add to
+        time.sleep(2.5)
+        assert all("BTC" not in w.st.positions for w in bot.invo_paper_wallets())
+        f.open_call(pid2, "BTC", long=False, leverage=5, size=0.05, entry=100_000.0)   # a short is copied now
+        assert wait_for(lambda: "BTC" in bot.invo.st.positions and bot.invo.st.positions["BTC"].side == -1,
+                        timeout=10)
+        f.close_call(pid, cid)                              # the old long's close leaves the new short alone
+        time.sleep(2.5)
+        assert bot.invo.st.positions["BTC"].side == -1
+        dc.say("/close DOGE")
+        assert wait_for(lambda: "no open DOGE trade" in text())
+    finally:
+        stop_bot(bot, th)
+
+
 def test_a_trader_whose_copies_lose_too_much_is_dropped_at_once(invo_env, monkeypatch):
     """The wallet leader pause rules (copy drawdown > 10% of equity / 7, or 5 losses in a row) also apply to Invo
     traders: the first breach drops the trader from every Invo wallet; /invofollow brings it back."""

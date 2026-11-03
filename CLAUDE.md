@@ -59,8 +59,11 @@ another PC means copying `data/`. Never run two instances on the same wallets. `
 (Hyperliquid fills → moves) that drives the engine in `tests/test_positions.py`.
 
 ## Commands (`chat.py`)
-- `chat.VERBS` = status, trades, traders, wallets, progress, follow, unfollow, block, unblock, pause, resume, flatten,
-  reset. Discord lists them without a prefix (`SLASH_COMMANDS`, + /help /restart); `chat.canon` maps every accepted
+- `chat.VERBS` = status, trades, traders, wallets, progress, follow, unfollow, block, unblock, pause, resume, close,
+  flatten, reset. `/close <coin>` (owner request 2026-11-03; `Bot.close_coin`, `COIN_COMMANDS` with a `coin` option)
+  closes that coin's copy in every paper wallet (reason `closed_by_owner`, card "closed by you") and drops its
+  call links, so the trader's later resizes/close do nothing and new calls on the coin copy again; `/liveclose <coin>
+  <PIN>` does it for the live wallet. Discord lists them without a prefix (`SLASH_COMMANDS`, + /help /restart); `chat.canon` maps every accepted
   name (`/follow`, `/invofollow`, older aliases `/invo`, `/positions`, `/leaders`) to the canonical `/invo<verb>` that
   `Bot.invo_command` handles. `PIN_COMMANDS` = flatten, reset; `WALLET_COMMANDS` (a required `wallet` option) =
   follow, unfollow, block, unblock.
@@ -218,6 +221,19 @@ tests of the new allocation policy.
 - Fees are booked at `broker.taker_fee_pct`; `/livestatus` shows the real account value next to the ledger's.
 - Tests: `tests/fakes_live.py` (loopback exchange that checks every signature recovers to the API wallet),
   `tests/test_live.py`. The SDK (`hyperliquid-python-sdk==0.24.0`) is a dependency (also needed for the tests).
+
+## Running unattended (Phase 2, owner request 2026-11-03)
+- `Bot.watchdog` (every 30 s from the trading loop): `health_check` -> {key: text} for stale prices
+  (`runtime.stale_prices_alert_s`), a silent Invo watcher (`invo_silent_alert_s`, only while traders are watched),
+  a live reconcile older than max(120 s, 4 x `live.reconcile_s`) (`Desk.last_ok`); each new problem posts once, its
+  end posts "OK again". `HEALTHCHECK_URL` (env, secret, redacted): pinged every 60 s in a thread (`/fail` + the
+  problems while any), so healthchecks.io warns when the PC or the bot is gone.
+- `Bot.backup_if_due` / `backup`: once per owner's day, `data/` zipped (no `bot.lock`, no `archive/`) into
+  `runtime.backup_dir` (relative = next to `data/`; "" = off), newest `backup_keep` (14) kept, in a thread.
+- `tools/run_bot.ps1` (the restart loop; reads the setx secrets from the User scope itself) and
+  `tools/install_autostart.ps1` (scheduled task "copybot": at sign-in, or `-AtBoot` with S4U; `-Remove`). Not run
+  on the Claude PC (they change the owner's Windows): parse-checked only.
+- `deploy/` (Linux server, later): `setup_server.sh`, `copybot.service` (systemd, Restart=always), `copybot.env.example`.
 
 ## Findings from the real API
 - `tests/test_discord.py::test_rate_limit_is_honoured` is timing-based and can fail rarely under load; rerun before

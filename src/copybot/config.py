@@ -141,6 +141,13 @@ class Runtime:
     reconcile_s: float = 60.0
     clock_refresh_s: float = 60.0
     ws_alert_after_s: float = 60.0        # alert only when the websocket stays down this long (it reconnects in seconds)
+    # health (docs/PRODUCTION_PLAN.md Phase 2, owner request 2026-11-03): a Discord alert when one of these is late
+    stale_prices_alert_s: float = 60.0    # prices older than this
+    invo_silent_alert_s: float = 300.0    # no Invo round answered for this long (while traders are followed)
+    # daily copy of data/ (every ledger) as a zip in this folder, newest `backup_keep` kept; "" = off. Point it at a
+    # OneDrive / Google Drive folder for a copy that survives the PC
+    backup_dir: str = "backups"
+    backup_keep: int = 14
 
 
 @dataclass
@@ -157,6 +164,9 @@ class Config:
     dc_channel_id: str = field(default="", repr=False)
     dc_owner_id: str = field(default="", repr=False)
     invo_token_file: str = field(default="", repr=False)     # INVO_TOKEN_FILE: the bot's Invo login (optional)
+    # HEALTHCHECK_URL: a check-in address (e.g. healthchecks.io) pinged every minute; when the pings stop (PC off, no
+    # internet, bot dead) that service warns the owner. Optional
+    healthcheck_url: str = field(default="", repr=False)
 
 
 SECTIONS = ("risk", "broker", "discord", "runtime", "invo", "live")
@@ -207,6 +217,9 @@ CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
     ("invo", "pause_dd_pct"): (0.5, 50.0),
     ("invo", "max_traders"): (0, 20),
     ("runtime", "ws_alert_after_s"): (1, 3600),
+    ("runtime", "stale_prices_alert_s"): (10, 3600),
+    ("runtime", "invo_silent_alert_s"): (30, 7200),
+    ("runtime", "backup_keep"): (1, 365),
     ("live", "start_equity"): (10, 100_000),
     ("live", "daily_loss_pct"): (1, 50),
     ("live", "floor_usd"): (0, 100_000),
@@ -248,6 +261,7 @@ def load(config_dir: str | os.PathLike, env: dict | None = None) -> Config:
     cfg.dc_channel_id = env.get("DISCORD_CHANNEL_ID", "")
     cfg.dc_owner_id = env.get("DISCORD_OWNER_ID", "")
     cfg.invo_token_file = env.get("INVO_TOKEN_FILE", "").strip()
+    cfg.healthcheck_url = env.get("HEALTHCHECK_URL", "").strip()
     return cfg
 
 
@@ -299,6 +313,6 @@ def scaled(cfg: Config, risk_pct: float) -> Config:
 def public_dict(cfg: Config) -> dict:
     """Config without secrets, safe to log."""
     d = asdict(cfg)
-    for k in ("pin", "dc_token", "dc_channel_id", "dc_owner_id", "invo_token_file"):
+    for k in ("pin", "dc_token", "dc_channel_id", "dc_owner_id", "invo_token_file", "healthcheck_url"):
         d.pop(k)
     return d

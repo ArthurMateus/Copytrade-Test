@@ -120,7 +120,7 @@ def test_only_the_invo_commands_exist_and_prices_still_flow(env):
         names = {c["name"] for c in dc.commands}
         assert names == {"help", "restart", "status", "trades", "traders", "wallets", "progress", "follow",
                          "unfollow", "block", "unblock", "pause", "resume", "flatten", "reset",
-                         "livestatus", "livepause", "liveresume", "livekill"}        # the live wallet (2026-11-03)
+                         "close", "livestatus", "livepause", "liveresume", "liveclose", "livekill"}        # the live wallet (2026-11-03)
         assert next(c for c in dc.commands if c["name"] == "livekill")["options"][0]["name"] == "pin"
         flat = next(c for c in dc.commands if c["name"] == "flatten")
         assert flat["options"][0]["name"] == "pin"

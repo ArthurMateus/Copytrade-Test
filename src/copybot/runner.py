@@ -21,6 +21,8 @@ import sys
 import threading
 import time
 import traceback
+import urllib.request
+import zipfile
 from pathlib import Path
 
 from dataclasses import fields
@@ -34,6 +36,8 @@ from copybot.invo import (DELETED as INVO_DELETED, PREFIX as INVO, REPLACED_S as
 # the live wallet's liquidation sits at least 1.25x its stop distance away (values review 2026-11-03: at 1x a 25x coin's
 # isolated short liquidates at 7.84%, inside the 8% stop)
 LIVE_LIQ_BUFFER = 1.25
+BY_OWNER = "closed by you"   # the close reason of a copy the owner closed with /close (its card says so)
+HEALTH_NAMES = {"prices": "prices", "invo": "Invo", "live": "the live account check"}
 EMERGENCY_STOP_PCT = 30.0   # "trader's exit" Invo wallets: the farthest stop, only a guard (a normal trade never gets
                             # there), lowered for big copies to just before their liquidation (invo_emergency_stop)
 
@@ -158,6 +162,8 @@ class Bot:
         self.live_cards: set[str] = set()
         self.ws_down_since = 0.0     # websocket down since (0 = up); alerted only if it stays down
         self.ws_alerted = False
+        self.started = time.time()
+        self.health_problems: dict[str, str] = {}   # what the watchdog found wrong (alerted once, then "back")
 
     def invo_set(self, primary_kw: dict) -> tuple:
         """Every Invo size x every stop (owner request 2026-10-12): the trader-size wallet and the 1-20% risk wallets,
@@ -494,6 +500,8 @@ class Bot:
             return self.ui.set_card(key, self.render_card(key, self.health(), now_ms()), new=True)
         if c.name in ("/invoblock", "/invounblock"):
             return self.invo_block(c)
+        if c.name == "/invoclose":
+            return self.ui.send(self.close_coin(self.invo_paper_wallets(), c.arg, "🧾 paper"))
         name = c.arg.strip().lstrip("@")
         if not re.fullmatch(r"[A-Za-z0-9_.]{2,40}", name):
             return self.ui.send(f"Usage: {c.name} &lt;Invo username&gt; (as in app.invoapp.com/&lt;username&gt;)")
@@ -999,8 +1007,9 @@ class Bot:
         info = self.invo_info.pop(t["pos_id"], "")
         if info and not info.startswith("🧾"):
             info = "🧾 " + info
-        self.ui.final_card(key, cardfmt.closed_card(t) + (f"\n{info}" if info else "\n🧾 Invo")
-                           + (f"\n🏁 closed by the trader ({cardfmt.esc(why)})" if why else ""))
+        end = ("\n✂️ closed by you (/close)" if why == BY_OWNER else
+               f"\n🏁 closed by the trader ({cardfmt.esc(why)})" if why else "")
+        self.ui.final_card(key, cardfmt.closed_card(t) + (f"\n{info}" if info else "\n🧾 Invo") + end)
 
     # ---- workers (never touch state: they only enqueue) ---------------------------------------------
     def health_worker(self) -> None:
@@ -1040,6 +1049,7 @@ class Bot:
         last_ui = 0.0
         last_lag_log = time.time()
         last_beat = 0.0
+        last_watch = time.time()
         while not self.stop.is_set():
             t0 = time.time()
             if self.restart_at and t0 >= self.restart_at:
@@ -1057,6 +1067,10 @@ class Bot:
                 if time.time() - last_lag_log >= 3600:
                     self.log_lag()
                     last_lag_log = time.time()
+                if time.time() - last_watch >= 30:
+                    last_watch = time.time()
+                    self.watchdog()
+                    self.backup_if_due()
             except Exception as e:
                 log.exception("loop_error")
                 self.alert(f"trading loop error: {type(e).__name__}: {e}"[:300], key=f"loop:{type(e).__name__}")
@@ -1260,11 +1274,48 @@ class Bot:
             d.resume()
             return self.ui.send("▶️ 💵 <b>Live copies resumed</b>" + (" (the account still does not match the "
                                 "ledger: see /livestatus)" if d.problems else ""))
+        if c.name == "/liveclose":
+            coin, _, pin = c.arg.partition(" ")
+            if not self.ui.check_pin(pin.strip()):
+                log.warn("live_bad_pin")
+                return self.ui.send("⛔ Wrong or missing PIN. Usage: /liveclose &lt;coin&gt; &lt;PIN&gt;")
+            return self.ui.send(self.close_coin([self.live], coin, "💵 LIVE"))
         if c.name == "/livekill":
             if not self.ui.check_pin(c.arg):
                 log.warn("live_bad_pin")
                 return self.ui.send("⛔ Wrong or missing PIN. Usage: /livekill &lt;PIN&gt;")
             return self.ui.send(d.kill())
+
+    def close_coin(self, wallets: list, arg: str, where: str) -> str:
+        """/close <coin> (paper wallets) and /liveclose <coin> <PIN> (owner request 2026-11-03: a copy held on a coin
+        blocks every opposite call on it). Closes that coin's copy now in each wallet; the traders' later resizes and
+        closes of those calls then find no copy and do nothing, and new calls on the coin are copied again."""
+        name = arg.strip().upper().lstrip("$")
+        if not re.fullmatch(r"[A-Z0-9]{1,20}", name):
+            return f"Usage: /close &lt;coin&gt;, e.g. /close BTC (the open trades: /trades)"
+        n, errors = 0, []
+        for w in wallets:
+            coin = next((c for c in w.st.positions if c.upper() in (name, "K" + name)), None)
+            if coin is None:
+                continue
+            self._invo_close_why = BY_OWNER
+            try:
+                w.pm.close(coin, "closed_by_owner")
+                n += coin not in w.st.positions
+            except Exception as e:                   # (a live exit the exchange refused: retried by /liveclose)
+                log.exception("close_coin_failed", wallet=w.name, coin=coin)
+                errors.append(f"{w.label}: {type(e).__name__}")
+            finally:
+                self._invo_close_why = None
+            for k in [k for k, v in self.invo_calls.items() if k[0] == w.name and v == coin]:
+                if coin not in w.st.positions:
+                    self.invo_calls.pop(k, None)
+        self.invo_refresh_watched()
+        log.info("close_coin", coin=name, where=where, closed=n, errors=len(errors))
+        if not n and not errors:
+            return f"{where}: no open {cardfmt.esc(name)} trade."
+        return (f"✂️ {where} <b>{cardfmt.esc(name)}</b> closed in {n} wallet(s); new calls on it are copied again."
+                + "".join(f"\n⚠️ not closed: {cardfmt.esc(x)} (its stop still holds it; try again)" for x in errors))
 
     def invo_reset(self) -> str:
         """/invoreset: archive the Invo wallets' ledgers and start fresh ones that keep the followed traders. The caller
@@ -1290,6 +1341,91 @@ class Bot:
         lg.close()
         log.info("invo_reset", archive=arch.parent.as_posix(), followed=len(follows))
         return arch.parent.as_posix()
+
+    # ---- health and backups (docs/PRODUCTION_PLAN.md Phase 2, owner request 2026-11-03) ------------------------
+    def health_check(self) -> dict[str, str]:
+        """What is wrong right now: {key: plain text}. Empty = healthy."""
+        rt, now = self.cfg.runtime, time.time()
+        out = {}
+        age = self.health().mids_age_s
+        if age > rt.stale_prices_alert_s and now - self.started > rt.stale_prices_alert_s:
+            out["prices"] = f"Hyperliquid prices are {age:.0f}s old: new copies are refused (stops use the last prices)"
+        w = self.invo_watch
+        if w is not None and self.invo_watched:
+            since = w.last_ok or self.started
+            if now - since > rt.invo_silent_alert_s:
+                out["invo"] = (f"Invo has not answered for {(now - since) / 60:.0f} min: new calls and the traders' "
+                               "closes are not seen (our stops still run)")
+        d = self.desk
+        if d is not None:
+            late = max(120.0, 4 * self.cfg.live.reconcile_s)
+            if now - d.last_ok > late:
+                out["live"] = (f"the live account has not been checked for {(now - d.last_ok) / 60:.0f} min "
+                               "(Hyperliquid not answering?): the stops resting on the exchange still protect it")
+        return out
+
+    def watchdog(self) -> None:
+        """Every 30 s: a Discord alert for each new problem and a note when it is over; and the check-in ping, so an
+        outside service warns the owner when the pings stop (PC off, no internet, bot dead)."""
+        now_bad = self.health_check()
+        for k, text in now_bad.items():
+            if k not in self.health_problems:
+                log.warn("health_problem", what=k, text=text)
+                self.ui.send(f"⚠️ <b>Health</b>: {cardfmt.esc(text)}")
+        for k in set(self.health_problems) - set(now_bad):
+            log.info("health_ok", what=k)
+            self.ui.send(f"✅ <b>Health</b>: {HEALTH_NAMES.get(k, k)} OK again")
+        self.health_problems = now_bad
+        url = self.cfg.healthcheck_url
+        if url and time.time() - getattr(self, "_last_ping", 0.0) >= 60:
+            self._last_ping = time.time()
+            body = "\n".join(now_bad.values()).encode()
+            threading.Thread(target=self._ping, args=(url.rstrip("/") + ("/fail" if now_bad else ""), body),
+                             name="ping", daemon=True).start()
+
+    @staticmethod
+    def _ping(url: str, body: bytes) -> None:
+        try:
+            urllib.request.urlopen(urllib.request.Request(url, data=body or None), timeout=10).read()
+        except Exception as e:
+            log.warn("healthcheck_ping_failed", err=type(e).__name__)
+
+    def backup_if_due(self) -> None:
+        """Once a day (the owner's day): data/ zipped into runtime.backup_dir, the newest backup_keep kept."""
+        rt = self.cfg.runtime
+        if not rt.backup_dir:
+            return
+        day = day_key(now_ms() + self.cfg.discord.utc_offset_hours * 3_600_000)
+        if getattr(self, "_backup_day", None) == day:
+            return
+        self._backup_day = day
+        dest = Path(rt.backup_dir)
+        if not dest.is_absolute():               # next to data/ (the repo folder on the bot PC)
+            dest = self.data.resolve().parent / dest
+        if any(dest.glob(f"copybot-data-{day}*.zip")):
+            return
+        threading.Thread(target=self.backup, args=(dest, day), name="backup", daemon=True).start()
+
+    def backup(self, dest: Path, day: str) -> Path | None:
+        rt = self.cfg.runtime
+        try:
+            dest.mkdir(parents=True, exist_ok=True)
+            out = dest / f"copybot-data-{day}-{time.strftime('%H%M%S')}.zip"
+            tmp = out.with_suffix(".part")
+            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+                for f in sorted(self.data.rglob("*")):
+                    if f.is_file() and f.name != "bot.lock" and "archive" not in f.relative_to(self.data).parts[:1]:
+                        z.write(f, f.relative_to(self.data).as_posix())
+            tmp.replace(out)
+            old = sorted(dest.glob("copybot-data-*.zip"))[:-rt.backup_keep]
+            for f in old:
+                f.unlink()
+            log.info("backup", file=out.as_posix(), kb=round(out.stat().st_size / 1024), removed=len(old))
+            return out
+        except Exception as e:
+            log.exception("backup_failed")
+            self.alert(f"daily backup of data/ failed ({type(e).__name__}: {e})"[:300], key="backup", every_s=86400)
+            return None
 
     def heartbeat(self) -> None:
         h = self.health()
@@ -1319,7 +1455,7 @@ DEFAULT_INVO_TOKEN = os.path.join("secrets", "invo.token")   # used when INVO_TO
 
 
 def main(argv: list[str] | None = None) -> None:
-    ap = argparse.ArgumentParser(description="Invo calls copy-trading bot - PAPER MODE ONLY")
+    ap = argparse.ArgumentParser(description="Invo calls copy-trading bot (paper wallets + an optional live one)")
     ap.add_argument("--config", default="config")
     args = ap.parse_args(argv)
     try:
@@ -1327,7 +1463,7 @@ def main(argv: list[str] | None = None) -> None:
     except config.ConfigError as e:
         print(f"config error: {e}", file=sys.stderr)
         raise SystemExit(2)
-    for s in (cfg.pin, cfg.dc_token):
+    for s in (cfg.pin, cfg.dc_token, cfg.healthcheck_url):
         log.add_secret(s)
     log.setup(cfg.runtime.log_dir)
     if not cfg.invo_token_file and os.path.exists(DEFAULT_INVO_TOKEN):

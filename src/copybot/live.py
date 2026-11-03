@@ -377,6 +377,7 @@ class Desk:
         self.account_value: float | None = None
         self.floor_armed = True
         self.last_reconcile = self.last_mids = self.last_meta = self.last_retry = 0.0
+        self.last_ok = time.time()       # the last reconcile that read the account (the bot's watchdog)
 
     def attach(self, w, twin) -> None:
         self.w, self.twin = w, twin
@@ -558,6 +559,7 @@ class Desk:
             self.say("✅ 💵 LIVE account matches the bot's ledger again (entries stay paused until /liveresume).",
                      "live_match", 0)
         self.problems = problems
+        self.last_ok = time.time()
 
     def _rescale_shares(self, coin: str) -> None:
         """After a reduce the exchange did (a stop part fired), each trader's share shrinks pro rata."""

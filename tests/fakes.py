@@ -434,11 +434,15 @@ class FakeDiscord:
     def say(self, text: str, user=None) -> None:
         """The owner types a slash command, e.g. "/hyperadd 0xabc" or "/reset 1234": the argument goes in the
         option the bot registers for it ("pin" or "wallet"). Waits for the bot's gateway connection first."""
-        from copybot.chat import PIN_COMMANDS, WALLET_COMMANDS, canon
+        from copybot.chat import COIN_COMMANDS, PIN_COMMANDS, WALLET_COMMANDS, canon
         end = time.time() + 15
         while not self.connected() and time.time() < end:
             time.sleep(0.02)
         name, _, arg = text.strip().partition(" ")
+        if canon(name) in COIN_COMMANDS:                 # "/liveclose BTC 1234": the coin, then the PIN
+            coin, _, pin = arg.strip().partition(" ")
+            opts = {k: v for k, v in (("coin", coin), ("pin", pin.strip())) if v}
+            return self.interact(name.lstrip("/"), opts or None, user=user)
         opt = "pin" if canon(name) in PIN_COMMANDS else ("wallet" if canon(name) in WALLET_COMMANDS else None)
         self.interact(name.lstrip("/"), {opt: arg.strip()} if opt and arg.strip() else None, user=user)
 

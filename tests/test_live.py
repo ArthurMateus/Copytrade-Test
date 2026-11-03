@@ -307,14 +307,21 @@ def test_the_bot_copies_an_invo_call_with_real_orders_next_to_its_paper_twin(inv
             dc.say("/livestatus")
             assert wait_for(lambda: any("Live wallet" in m["text"] and "stop on the exchange" in m["text"]
                                         for m in dc.sent))
-            f.close_call(pid, cid)
+            from tests.test_e2e import PIN
+            dc.say("/liveclose ETH 0000")
+            assert wait_for(lambda: any("Usage: /liveclose" in m["text"] for m in dc.sent))
+            assert "ETH" in bot.live.st.positions
+            dc.say(f"/liveclose eth {PIN}")                 # the live copy only: the paper twin keeps its own
             assert wait_for(lambda: "ETH" not in bot.live.st.positions and "ETH" not in fx.positions, timeout=10)
-            dc.say("/pause")                                # the paper wallets only (code review 2026-11-03)
+            assert "ETH" in twin.st.positions
+            assert wait_for(lambda: not fx.stops("ETH"))            # (cancelled right after the close is booked)
+            f.close_call(pid, cid)
+            assert wait_for(lambda: "ETH" not in twin.st.positions, timeout=10)
+            dc.say("/pause")                              # the paper wallets only (code review 2026-11-03)
             assert wait_for(lambda: bot.invo.st.entries_paused)
             assert not bot.live.st.entries_paused
             dc.say("/livekill wrong")
             assert wait_for(lambda: any("Wrong or missing PIN" in m["text"] for m in dc.sent))
-            from tests.test_e2e import PIN
             dc.say(f"/livekill {PIN}")
             assert wait_for(lambda: bot.live.st.entries_paused)
             logs = "".join(p.read_text(encoding="utf-8") for p in (data / "logs").glob("*.log*"))

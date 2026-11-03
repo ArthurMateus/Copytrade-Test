@@ -57,11 +57,13 @@ Run the tests: `uv run pytest` (about 4 minutes; this includes real-process kill
 | `/unfollow <user>` | stop following it (its open copies still follow its exits) |
 | `/block <user> <portfolio>` | stop copying one portfolio (matched by the start of its name); `/unblock` undoes it |
 | `/pause`, `/resume` | stop / allow new paper copies (exits and stops always run) |
+| `/close <coin>` | close that trade now in every paper wallet (e.g. `/close BTC`): a held copy blocks opposite calls on its coin, so this lets them be copied again |
 | `/flatten <PIN>` | close every paper copy and pause |
 | `/reset <PIN>` | every wallet back to $300, traders kept, old history archived (refused while a copy is open) |
 | `/help`, `/restart` | the list, a restart (the loop above starts it again) |
 | `/livestatus` | the live wallet: balance, the real account, today vs the daily stop, open trades and their stops on the exchange, live vs paper |
 | `/livepause`, `/liveresume` | stop / allow new live copies (live exits and stops always run) |
+| `/liveclose <coin> <PIN>` | close that one live trade now |
 | `/livekill <PIN>` | close every live position (also anything else on the account), cancel its orders, pause |
 
 The older `/invo…` names (`/invofollow`, `/invowallets` ...) still work but are not listed. Each copy gets one
@@ -132,6 +134,64 @@ account is affected.
    check it with `uv run python tools/invo_check.py nicush` (prints "login OK" and nicush's portfolios), then start
    the bot as usual. The token lasts about a year and is renewed by the bot itself.
 If Invo refuses the login later, the bot alerts on Discord; repeat steps 1-4.
+
+## Running unattended (health alerts, auto-start, backups)
+
+### Health alerts
+The bot posts `⚠️ Health: ...` in Discord once when something goes wrong, and `✅ ... OK again` when it is over:
+prices older than 60 s, Invo not answering for 5 min (while traders are followed), the live account not checked
+for 2 min. (`config/runtime.toml`: `stale_prices_alert_s`, `invo_silent_alert_s`.)
+
+A bot cannot tell you that its own PC is off. For that, an outside service waits for the bot's check-in every
+minute and warns you when it stops:
+
+1. Make a free account on https://healthchecks.io (you sign up yourself), "Add Check", period **5 minutes**, grace
+   **5 minutes**. Under "Integrations" add your email, or Discord via a webhook of a channel.
+2. Copy the check's ping address (`https://hc-ping.com/...`) and in PowerShell on the bot PC:
+
+```powershell
+setx HEALTHCHECK_URL "<the ping address>"
+```
+
+3. Restart the bot (a NEW window or the task below). While something is wrong, the check-in reports a failure, so
+   healthchecks.io warns you about that too.
+
+### Start by itself after a reboot or a Windows update
+Close the old `while ($true) ...` window first (only one bot may run), then in PowerShell in the bot folder:
+
+```powershell
+cd C:\Users\gedeo\Copytrade-test
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\install_autostart.ps1
+```
+
+```powershell
+Start-ScheduledTask -TaskName copybot
+```
+
+It starts at every Windows sign-in and is restarted if it stops; `/restart` in Discord works as before. To start
+even before anyone signs in, run the install again in a PowerShell opened with "Run as administrator", adding
+`-AtBoot`. `-Remove` takes the task away. The bot's output is in `logs\copybot.log` and `logs\console.log`.
+
+Keep the PC awake (you change this setting yourself):
+
+```powershell
+powercfg /change standby-timeout-ac 0
+```
+
+and in Windows Update set "Active hours" to the whole day, so it does not reboot by surprise.
+
+### Daily backups
+Once a day the bot zips `data\` (every wallet's ledger, including the live one) into `backups\`, keeping the newest
+14. For a copy that survives the PC, set `backup_dir` in `config/runtime.toml` to a OneDrive or Google Drive folder,
+e.g. `backup_dir = "C:/Users/gedeo/OneDrive/copybot-backups"`. To restore: stop the bot, unzip one into `data\`.
+
+### Moving to a server (later)
+`deploy/` has what a Linux server needs: `setup_server.sh` (installs everything as a service that restarts by
+itself), `copybot.service` and `copybot.env.example` (the secrets, the same names as above). Never run the bot on two
+machines at once: remove the Windows task first, then copy `data\` over.
 
 ## Live trading (real money, Hyperliquid)
 

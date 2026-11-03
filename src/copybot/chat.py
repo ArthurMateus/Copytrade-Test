@@ -25,16 +25,18 @@ from copybot.config import Config
 # search were removed). Discord lists the short names (/status, /follow, /block ...); `canon` turns every accepted name
 # into the canonical /invo<verb> the bot handles. The /invo… names and a few older names still work (not listed).
 VERBS = ("status", "trades", "traders", "wallets", "progress", "follow", "unfollow", "block", "unblock", "pause",
-         "resume", "flatten", "reset")
+         "resume", "close", "flatten", "reset")
 INVO_COMMANDS = tuple(f"/invo{v}" for v in VERBS)
 ALIASES = {f"/{v}": f"/invo{v}" for v in VERBS}
 ALIASES.update({"/invo": "/invostatus", "/positions": "/invotrades", "/leaders": "/invotraders"})
 # the REAL-money wallet (copybot/live.py; owner request 2026-11-03)
-LIVE_COMMANDS = ("/livestatus", "/livepause", "/liveresume", "/livekill")
+LIVE_COMMANDS = ("/livestatus", "/livepause", "/liveresume", "/liveclose", "/livekill")
 COMMANDS = tuple(dict.fromkeys(("/help", "/restart") + tuple(ALIASES) + INVO_COMMANDS + LIVE_COMMANDS))
 # what Discord shows in its slash-command list
 SLASH_COMMANDS = ("/help", "/restart") + tuple(f"/{v}" for v in VERBS) + LIVE_COMMANDS
-PIN_COMMANDS = ("/invoflatten", "/invoreset", "/livekill")
+PIN_COMMANDS = ("/invoflatten", "/invoreset", "/livekill", "/liveclose")
+# take a coin (BTC, ETH ...) as their argument: close that one trade (owner request 2026-11-03)
+COIN_COMMANDS = ("/invoclose", "/liveclose")
 # take an Invo username (block / unblock: the username, then the portfolio) as their argument
 WALLET_COMMANDS = ("/invofollow", "/invounfollow", "/invoblock", "/invounblock")
 _INVO_WORDS = re.compile(r"/invo(" + "|".join(VERBS) + r")\b")
@@ -58,9 +60,10 @@ HELP = ("🤖 <b>Copybot (paper)</b> · 🧾 Invo calls (copied on Hyperliquid p
         "follow &lt;user&gt; – copy every portfolio of an Invo trader · unfollow &lt;user&gt;\n"
         "block · unblock &lt;user&gt; &lt;portfolio&gt; – stop / restart copying one portfolio\n"
         "pause · resume – new copies (exits and stops always run)\n"
+        "close &lt;coin&gt; – close that trade now in every paper wallet (e.g. /close BTC)\n"
         "flatten &lt;PIN&gt; – close every trade and pause · reset &lt;PIN&gt; – back to the start, traders kept\n\n"
-        "💵 REAL money (when live trading is on): livestatus · livepause · liveresume · livekill &lt;PIN&gt; – close "
-        "every live position and pause\n\n"
+        "💵 REAL money (when live trading is on): livestatus · livepause · liveresume · liveclose &lt;coin&gt; "
+        "&lt;PIN&gt; – close that live trade · livekill &lt;PIN&gt; – close every live position and pause\n\n"
         "Examples: /wallets · /follow nicush · /block nicush Kitchen\n"
         "/restart – restart the bot")
 

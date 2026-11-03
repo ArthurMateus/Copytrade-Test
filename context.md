@@ -16,6 +16,10 @@ the venv needs `hyperliquid-python-sdk`).
   API wallet yet. Next: owner creates the API wallet, `setx` the two variables, `enabled = true`, testnet for a few
   days, then mainnet.
 - The repo is PUBLIC: never commit the owner's addresses or anything about their accounts.
+- Phase 2 started (branch `phase2/ops` from `live/phase1`): health alerts + healthchecks.io check-in, Windows
+  auto-start task, daily backups of data/, server files in `deploy/` (CLAUDE.md "Running unattended"). Phase 3 (the
+  read-only web dashboard) is being built in parallel. Owner still to do: healthchecks.io account + `setx
+  HEALTHCHECK_URL`, install the task, `powercfg /change standby-timeout-ac 0`.
 
 ## 2026-10-26: only the Invo book is left (branch `invo-only`)
 - Owner request: "delete arena wallets, also everything related to hyperwallet and fomowallet, and take it off the code,

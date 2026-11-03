@@ -23,7 +23,7 @@ from websockets.sync.client import connect
 
 from copybot import log
 from copybot.config import Config
-from copybot.chat import (COMMANDS, PIN_COMMANDS, SLASH_COMMANDS, WALLET_COMMANDS, ChatError, ChatUI, Command, canon,
+from copybot.chat import (COIN_COMMANDS, COMMANDS, PIN_COMMANDS, SLASH_COMMANDS, WALLET_COMMANDS, ChatError, ChatUI, Command, canon,
                           short_names)
 
 GREEN, RED, ORANGE, BLURPLE = 0x2ECC71, 0xE74C3C, 0xF39C12, 0x5865F2
@@ -40,6 +40,8 @@ DESCRIPTIONS = {
     "/block": "Stop copying one portfolio of a trader (user, then the portfolio name)",
     "/unblock": "Copy a blocked portfolio again (user, then the portfolio name)",
     "/pause": "Pause new copies (exits and stops keep running)",
+    "/close": "Close one trade now in every paper wallet (e.g. BTC), so other calls on that coin can be copied",
+    "/liveclose": "Close one REAL-money trade now (the coin, then the PIN)",
     "/resume": "Resume new copies",
     "/flatten": "Close every trade and pause (needs the PIN)",
     "/reset": "Every wallet back to the start, no open trades, traders kept (needs the PIN)",
@@ -238,7 +240,13 @@ class DiscordUI(ChatUI):
         cmds = []
         for c in SLASH_COMMANDS:
             cmd = {"name": c[1:], "description": DESCRIPTIONS.get(c, c[1:]), "type": 1}
-            if canon(c) in PIN_COMMANDS:
+            if canon(c) in COIN_COMMANDS:
+                cmd["options"] = [{"type": 3, "name": "coin", "required": True,
+                                   "description": "The coin of the trade, e.g. BTC"}]
+                if canon(c) in PIN_COMMANDS:
+                    cmd["options"].append({"type": 3, "name": "pin", "description": "Your COPYBOT_PIN",
+                                           "required": True})
+            elif canon(c) in PIN_COMMANDS:
                 cmd["options"] = [{"type": 3, "name": "pin", "description": "Your COPYBOT_PIN", "required": True}]
             elif canon(c) in WALLET_COMMANDS:
                 cmd["options"] = [{"type": 3, "name": "wallet", "required": True,
@@ -283,5 +291,6 @@ class DiscordUI(ChatUI):
         opts = {o["name"]: o.get("value", "") for o in (d.get("data") or {}).get("options") or []}
         log.info("discord_command", cmd=name)     # never the argument (may be the PIN)
         self._reply(d, f"👍 {typed}" + (" (results in the channel)" if name not in ("/restart", "/invopause", "/invoresume") else ""))
-        self.on_command(Command(name, str(opts.get("pin") or opts.get("wallet") or "").strip()))
+        arg = " ".join(str(v).strip() for v in (opts.get("coin"), opts.get("pin") or opts.get("wallet")) if v)
+        self.on_command(Command(name, arg))
 
