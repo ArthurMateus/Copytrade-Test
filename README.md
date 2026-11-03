@@ -1,12 +1,14 @@
-# copybot: copying Invo traders' calls in paper mode
+# copybot: copying Invo traders' calls (paper, plus one optional live wallet)
 
 This bot copies the trade calls Invo traders post onto **simulated** $300 wallets. The copies use Hyperliquid's real
 prices, order books and fees. Since 2026-10-26 this is the only book: the Hyperliquid wallet book, the FOMO / Solana
 book, the Invo arena and the bot's own Invo search were removed at the owner's request. You pick the traders; the daily
 fight-and-merge report on the Claude PC suggests them.
 
-**It runs in PAPER MODE ONLY.** It has no signing library and no key handling, and it never calls an order
-endpoint. A test enforces this (`tests/test_safety.py`). It is controlled from Discord. New to this project (or a new
+**Paper by default.** The 18 Invo wallets are simulated. One optional **live wallet** (off until you turn it
+on, see *Live trading* below) copies one of them with real orders on Hyperliquid. Signing and the key exist only in
+`src/copybot/live.py`, which can place and cancel orders and set leverage, and nothing that moves money out of the
+account (a test enforces this: `tests/test_safety.py`). It is controlled from Discord. New to this project (or a new
 Claude chat)? Read `context.md` for the current state, then `CLAUDE.md` for the design.
 
 ## Run (Windows, Python 3.11, uv)
@@ -37,7 +39,7 @@ appear as slash commands; only the owner can use them, and replies to commands a
 
 Keep the PC from sleeping. Each wallet's state lives in `data/wallets/<name>/ledger.jsonl` (append-only, fsync on every
 write); `data/ledger.jsonl` keeps the bot's own start events and the Discord card ids. Logs go to `logs/copybot.log`
-(rotating, key=value, no secrets). Settings are in `config/*.toml` (`risk`, `broker`, `discord`, `runtime`, `invo`).
+(rotating, key=value, no secrets). Settings are in `config/*.toml` (`risk`, `broker`, `discord`, `runtime`, `invo`, `live`).
 Every limit has a documented range, and the bot refuses to start when a value is outside it or a key is unknown.
 
 Run the tests: `uv run pytest` (about 4 minutes; this includes real-process kill -9 restarts).
@@ -58,6 +60,9 @@ Run the tests: `uv run pytest` (about 4 minutes; this includes real-process kill
 | `/flatten <PIN>` | close every copy and pause |
 | `/reset <PIN>` | every wallet back to $300, traders kept, old history archived (refused while a copy is open) |
 | `/help`, `/restart` | the list, a restart (the loop above starts it again) |
+| `/livestatus` | the live wallet: balance, the real account, today vs the daily stop, open trades and their stops on the exchange, live vs paper |
+| `/livepause`, `/liveresume` | stop / allow new live copies (live exits and stops always run) |
+| `/livekill <PIN>` | close every live position (also anything else on the account), cancel its orders, pause |
 
 The older `/invo…` names (`/invofollow`, `/invowallets` ...) still work but are not listed. Each copy gets one
 message, which is edited until it becomes the final ✅/❌ summary.
@@ -127,6 +132,48 @@ account is affected.
    check it with `uv run python tools/invo_check.py nicush` (prints "login OK" and nicush's portfolios), then start
    the bot as usual. The token lasts about a year and is renewed by the bot itself.
 If Invo refuses the login later, the bot alerts on Discord; repeat steps 1-4.
+
+## Live trading (real money, Hyperliquid)
+
+One wallet, `live`, copies the paper wallet `copy_wallet` in `config/live.toml` (5% margin · 8% stop) with real orders:
+the same calls, the same sizes and stop, on its own 300$ ledger (`data/wallets/live/`). On top of the paper limits:
+
+- **Daily stop:** no new entries once the day's NET result is −15% of the day's start (a day at +30% that falls back
+  to +15% does not stop).
+- **Floor:** no new entries once the wallet is at or below 150$, until `/liveresume`.
+- **Position cap:** one coin never above 200$ notional. Entries fill at most 0.5% from the mid, else they are skipped.
+- **Stops on the exchange:** every live position's stop also rests on Hyperliquid as a stop-market order, so it fires
+  while the bot or the PC is down. Exits are reduce-only and can never open a position.
+- **Reconcile:** every 15 s the ledger is compared with the real account. A stop the exchange fired is booked at its
+  real price; anything the bot did not open pauses live entries. **Use the Hyperliquid account only for the bot.**
+- `/flatten`, `/pause`, `/resume` act on every Invo wallet including the live one; `/reset` never touches it.
+
+Fees are booked at 0.045% (`/livestatus` shows the real account value next to the ledger's).
+
+### Turning it on (testnet first)
+
+1. On https://app.hyperliquid.xyz create your account. Then **More → API**, create an API wallet named `copybot` and
+   authorize it. It can trade but cannot take money out. Copy its **private key** straight into a password manager
+   (it is shown once). Never use your main wallet's key: the bot refuses it.
+2. For the test network, do the same on https://app.hyperliquid-testnet.xyz (it has its own API wallets; its faucet
+   gives test USDC to an address that has used mainnet).
+3. In PowerShell on the bot PC (paste the key yourself; it never goes into a file, a chat or a log):
+
+```powershell
+setx HL_ACCOUNT_ADDRESS "<your account address, 0x...>"
+```
+
+```powershell
+setx HL_AGENT_KEY "<the API wallet's private key>"
+```
+
+4. In `config/live.toml` set `enabled = true` (keep `network = "testnet"`), open a NEW PowerShell window for the
+   restart loop, and send `/restart`. The start message says `paper + LIVE testnet`; `/livestatus` shows the wallet.
+5. After a few days on testnet with no mismatch alert, set `network = "mainnet"` and the API wallet key of the mainnet
+   account, deposit the 300$ USDC, `/restart`.
+
+If something is wrong (keys missing, API wallet not approved, coin list unreadable), the start message says
+`LIVE is off: ...` or the live wallet starts paused, and the paper wallets run as usual.
 
 ## Findings from the real API (recorded in `tests/fixtures`)
 - Hyperliquid closes the websocket about every 3 h ("Expired"); the bot reconnects in seconds. Only an outage longer

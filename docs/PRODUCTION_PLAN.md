@@ -92,6 +92,10 @@ A **LiveBroker** with the same shape is added, so the RiskGate, ledger, Position
 
 **Done when:** 3+ days on testnet with no mismatch, then mainnet with the 300$.
 
+**Status (2026-11-03):** the code is built on branch `live/phase1` (`src/copybot/live.py`, `config/live.toml`, README
+"Live trading") and tested against a fake exchange that checks every signature. Not yet run on the real testnet:
+waiting for the owner's API wallet.
+
 ### Home PC risks (until Phase 2)
 - Power cut, Windows update or internet drop: open trades stay protected only by the exchange-side stops (step 3).
 - Windows sleep must be off, and the restart loop must start after a reboot.

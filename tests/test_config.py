@@ -83,9 +83,12 @@ def test_only_the_invo_book_is_configured(tmp_path):
     import shutil
     d = tmp_path / "config"
     shutil.copytree("config", d)
-    assert sorted(f.name for f in d.glob("*.toml")) == ["broker.toml", "discord.toml", "invo.toml", "risk.toml",
-                                                        "runtime.toml"]
+    assert sorted(f.name for f in d.glob("*.toml")) == ["broker.toml", "discord.toml", "invo.toml", "live.toml",
+                                                        "risk.toml", "runtime.toml"]
     cfg = config.load(d, env={})
+    assert not cfg.live.enabled and cfg.live.network == "testnet"      # live trading is off until the owner turns it on
+    assert (cfg.live.copy_wallet, cfg.live.start_equity, cfg.live.daily_loss_pct, cfg.live.floor_usd) == \
+        ("invo_risk_5pct_stop8", 300.0, 15.0, 150.0)                    # owner decisions 2026-11-03
     assert cfg.invo.max_traders == 10 and not hasattr(cfg, "sol") and not hasattr(cfg, "selection")
     for key in ("search", "arena", "always_copy"):
         assert not hasattr(cfg.invo, key)

@@ -45,6 +45,10 @@ DESCRIPTIONS = {
     "/reset": "Every wallet back to the start, no open trades, traders kept (needs the PIN)",
     "/help": "List the commands",
     "/restart": "Restart the bot",
+    "/livestatus": "The REAL-money wallet: balance, today, open trades, stops on the exchange",
+    "/livepause": "Pause new REAL-money copies (exits and stops keep running)",
+    "/liveresume": "Resume new REAL-money copies",
+    "/livekill": "Close every REAL-money position, cancel its orders and pause (needs the PIN)",
 }
 
 _TAG = re.compile(r"(</?(?:b|i|code|pre)>)")

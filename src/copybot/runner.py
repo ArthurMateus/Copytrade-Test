@@ -23,7 +23,10 @@ import time
 import traceback
 from pathlib import Path
 
+from dataclasses import fields
+
 from copybot import config, hl, log, cardfmt
+from copybot import live as livemod
 from copybot.broker import PaperBroker
 from copybot.invo import (DELETED as INVO_DELETED, PREFIX as INVO, REPLACED_S as INVO_REPLACED_S,
                           RESIZE_MIN as INVO_RESIZE_MIN, InvoClient, Watcher as InvoWatcher)
@@ -114,9 +117,14 @@ class Bot:
         self._invo_close_why: str | None = None      # the trader's close reason while it is being mirrored
         self.invo_baseline_wait: dict[str, list] = {}  # trader -> its first read, held until Hyperliquid's coins load
         self.side_broker = side_broker
+        self.live: SideWallet | None = None          # the REAL-money wallet (config/live.toml, copybot/live.py)
+        self.desk: livemod.Desk | None = None
+        self.live_off = "off in config/live.toml"   # why there is no live wallet (shown by /livestatus)
         if cfg.invo.enabled and cfg.invo_token_file:
             self.invo, self.invo_extra = self.invo_set(dict(notify=self.on_invo_notify, pause_leaders=True))
             self.sides += [self.invo, *self.invo_extra]
+            if cfg.live.enabled:
+                self.live_setup()
             # watched: the followed traders AND the unfollowed ones we still hold a copy of (their exits are copied);
             # rebuilt on the trading thread (invo_refresh_watched), read by the watcher
             self.invo_watched: frozenset[str] = frozenset()
@@ -250,6 +258,56 @@ class Bot:
                 r.daily_loss_pct = r.weekly_loss_pct = 100.0
         return first, others
 
+    def live_setup(self) -> None:
+        """The live wallet (owner request 2026-11-03, docs/PRODUCTION_PLAN.md Phase 1): a copy of the paper wallet
+        `live.copy_wallet` (same sizes, stop, calls and limits) on the real exchange, with its own start, daily stop,
+        floor and position cap. Its ledger is data/wallets/live/ (never archived by /invoreset)."""
+        cfg, lc = self.cfg, self.cfg.live
+        twin = next((x for x in self.invo_wallets() if x.name == lc.copy_wallet), None)
+        creds = livemod.credentials()
+        if twin is None:
+            self.live_off = f"live.copy_wallet {lc.copy_wallet!r} is not one of the Invo wallets"
+        elif isinstance(creds, str):
+            self.live_off = creds
+        else:
+            try:
+                ex = livemod.Exchange(lc.network, *creds, base=lc.api_base or None)
+            except (livemod.LiveError, ValueError, ImportError) as e:
+                self.live_off = f"{type(e).__name__}: {e}"
+            else:
+                broker = livemod.LiveBroker(ex, lc, cfg.broker.taker_fee_pct)
+                desk = livemod.Desk(ex, lc, broker, self.live_say, self.mids)
+                allocations = cfg.invo.margin_allocations
+                x = SideWallet(cfg, twin.risk_pct, self.data, broker, self.health, desk.mids, desk.assets,
+                               name="live", label=f"LIVE · {twin.label}", sizer=twin.pm.sizer, cap=twin.pm.cap,
+                               margin_pct=twin.pm.margin_pct if allocations else None, notify=desk.on_notify)
+                for f in fields(twin.cfg.risk):          # the twin's limits, then the live ones on top
+                    setattr(x.cfg.risk, f.name, getattr(twin.cfg.risk, f.name))
+                r = x.cfg.risk
+                r.start_equity, r.daily_loss_pct, r.weekly_loss_pct = lc.start_equity, lc.daily_loss_pct, 100.0
+                r.max_positions = min(r.max_positions, lc.max_positions)
+                x.gate.follow_leverage, x.gate.call_leverage = twin.gate.follow_leverage, twin.gate.call_leverage
+                x.pm.handover = twin.pm.handover
+                x.base_name = getattr(twin, "base_name", twin.name)   # copies only the calls the twin's deciding
+                x.size_label, x.stop_label = twin.size_label, twin.stop_label   # wallet copied
+                if allocations and x.st.margin_policy.get("margin_pct") != twin.pm.margin_pct:
+                    x.rec(dict(ev="margin_policy", policy=dict(version=1, margin_pct=twin.pm.margin_pct,
+                                                               agreement_fraction=.5)))
+                desk.attach(x, twin)
+                self.live, self.desk = x, desk
+                self.sides.append(x)
+                log.info("live_on", network=lc.network, copies=twin.name, account=creds[0], agent=ex.agent)
+                return
+        log.error("live_off", why=self.live_off)
+
+    def live_say(self, text: str, key: str, every_s: float = 0) -> None:
+        """A live-wallet message (HTML, already escaped), at most once per every_s for its key (0 = always)."""
+        if every_s and time.time() - self.last_alert.get(key, 0) < every_s:
+            return
+        self.last_alert[key] = time.time()
+        log.warn("live_alert", key=key)
+        self.ui.send(text)
+
     # ---- health ------------------------------------------------------------------------------------
     def health(self) -> Health:
         now = time.time()
@@ -296,7 +354,7 @@ class Bot:
     # ---- startup -----------------------------------------------------------------------------------
     def boot(self) -> None:
         cfg = self.cfg
-        log.info("boot", paper=True, cfg=str(config.public_dict(cfg)).replace(" ", ""))
+        log.info("boot", paper=self.live is None, cfg=str(config.public_dict(cfg)).replace(" ", ""))
         if not self.st.genesis_ms:
             btc = 0.0
             try:
@@ -310,6 +368,15 @@ class Bot:
         except Exception as e:
             log.warn("boot_meta_failed", err=str(e))
         self.on_sides("boot", self.boot_side)
+        if self.desk is not None:
+            try:
+                self.desk.boot()
+            except Exception as e:                   # the account cannot be traded: no live entries until fixed
+                log.exception("live_boot_failed")
+                if not self.live.st.entries_paused:
+                    self.live.rec({"ev": "pause", "reason": "live_boot_failed"})
+                self.live_say(f"⚠️ 💵 <b>LIVE wallet could not start</b> ({cardfmt.esc(str(e)[:200])}) · ⏸️ live "
+                              "entries paused. Fix it, then /restart and /liveresume.", "live_boot", 0)
         for key, mid in self.st.cards.items():
             if key.startswith("dc:"):                 # (keys without the prefix were Telegram messages)
                 self.ui.restore_card(key[3:], mid)
@@ -319,7 +386,14 @@ class Bot:
                          f"{_traders(len(self.invo.st.followed))}" + (" · ⏸️ paused" if self.invo.st.entries_paused else ""))
         else:
             lines.append("🧾 Invo is off: save the bot's Invo login in a file and set INVO_TOKEN_FILE to it")
-        self.ui.send("🤖 <b>Copybot started</b> (paper)\n" + "\n".join(lines))
+        if self.live is not None:
+            lines.append(f"💵 LIVE on Hyperliquid {self.cfg.live.network}: {len(self.live.st.positions)} open · "
+                         f"{cardfmt.fusd(self.live.st.equity(self.desk.mids), sign=False)}"
+                         + (" · ⏸️ paused" if self.live.st.entries_paused else "") + " · /livestatus")
+        elif self.cfg.live.enabled:
+            lines.append(f"💵 LIVE is off: {cardfmt.esc(self.live_off)}")
+        mode = f"paper + LIVE {self.cfg.live.network}" if self.live is not None else "paper"
+        self.ui.send(f"🤖 <b>Copybot started</b> ({mode})\n" + "\n".join(lines))
 
     def boot_side(self, w) -> None:
         """Genesis, boot and restart repair of one wallet."""
@@ -687,14 +761,19 @@ class Bot:
 
     def invo_wallets(self) -> list:
         """The trader-size Invo wallet first (it owns the followed list, the cards and the notes), then the fixed-risk
-        Invo wallets (`invo.risk_wallets_pct`), which follow the same traders and get the same calls."""
+        Invo wallets (`invo.risk_wallets_pct`), which follow the same traders and get the same calls; the live wallet
+        last (it copies what its paper twin's deciding wallet copied)."""
+        return [*self.invo_paper_wallets(), *([self.live] if self.live is not None else [])]
+
+    def invo_paper_wallets(self) -> list:
+        """The 18 paper wallets: /invowallets compares them, /invoreset archives them (never the live one)."""
         return [self.invo, *self.invo_extra] if self.invo is not None else []
 
     def sync_invo_extras(self) -> None:
-        """The fixed-risk Invo wallets follow exactly the trader-size wallet's Invo traders."""
+        """The other Invo wallets (and the live one) follow exactly the trader-size wallet's Invo traders."""
         if self.invo is None:
             return
-        for w in self.invo_extra:
+        for w in self.invo_wallets()[1:]:
             for a, t in self.invo.st.followed.items():
                 if a not in w.st.followed:
                     w.rec({"ev": "follow", "leader": a, "ts": t})
@@ -1000,8 +1079,15 @@ class Bot:
         def marks(w):
             for kind, key in (("day", day_key(now)), ("week", week_key(now))):
                 if w.st.marks.get(kind, {}).get("key") != key:
-                    w.rec({"ev": "mark", "kind": kind, "key": key, "equity": w.st.equity(self.mids)})
+                    w.rec({"ev": "mark", "kind": kind, "key": key, "equity": w.st.equity(w.pm.mids)})
         self.on_sides("marks", marks)
+        # 4. the live wallet: its stops on the exchange, the real account vs its ledger, its floor
+        if self.desk is not None:
+            try:
+                self.desk.tick()
+            except Exception as e:
+                log.exception("live_tick_error")
+                self.alert(f"live wallet: {type(e).__name__}: {e}"[:300], key=f"live:{type(e).__name__}")
         if self.ws_down_since and not self.ws_alerted and \
                 time.time() - self.ws_down_since >= self.cfg.runtime.ws_alert_after_s:
             self.ws_alerted = True
@@ -1025,8 +1111,8 @@ class Bot:
 
             def funding(w):
                 if w.st.marks.get("funding", {}).get("key") != hk:
-                    w.pm.apply_funding(self.assets, hk)
-                    w.rec({"ev": "mark", "kind": "funding", "key": hk, "equity": w.st.equity(self.mids)})
+                    w.pm.apply_funding(w.pm.assets, hk)
+                    w.rec({"ev": "mark", "kind": "funding", "key": hk, "equity": w.st.equity(w.pm.mids)})
             if at % 3_600_000 < 600_000:
                 self.on_sides("funding", funding)
         elif kind == "ws_up":
@@ -1128,7 +1214,7 @@ class Bot:
         if self.invo is not None:
             w = self.invo
             if key == "invo:wallets":
-                return cardfmt.invo_wallets_card([(x.size_label, x.stop_label, x.st) for x in self.invo_wallets()],
+                return cardfmt.invo_wallets_card([(x.size_label, x.stop_label, x.st) for x in self.invo_paper_wallets()],
                                                  self.mids, now)
             if key == "invo:trades":
                 return cardfmt.trades_card(w.st, self.mids, now, title="🧾 <b>Invo trades</b>", infos=self.invo_info)
@@ -1142,11 +1228,33 @@ class Bot:
         """Every accepted name is canonical here (chat.canon): /invo<verb>, /help or /restart."""
         if c.name.startswith("/invo"):
             return self.invo_command(c)
+        if c.name.startswith("/live"):
+            return self.live_command(c)
         if c.name == "/restart":
             self.ui.send("🔄 <b>Restarting</b>… back in about 15 seconds.")
             self.restart_at = time.time() + 3
             return
         self.ui.send(HELP)
+
+    def live_command(self, c) -> None:
+        d = self.desk
+        if d is None:
+            return self.ui.send(f"💵 Live trading is off: {cardfmt.esc(self.live_off)}. See the README, Live trading.")
+        if c.name == "/livestatus":
+            return self.ui.send(d.status_text())
+        if c.name == "/livepause":
+            self.live.rec({"ev": "pause", "reason": "/livepause"})
+            return self.ui.send("⏸️ 💵 <b>Live copies paused</b>. Live exits and stops keep running. /liveresume "
+                                "continues.")
+        if c.name == "/liveresume":
+            d.resume()
+            return self.ui.send("▶️ 💵 <b>Live copies resumed</b>" + (" (the account still does not match the "
+                                "ledger: see /livestatus)" if d.problems else ""))
+        if c.name == "/livekill":
+            if not self.ui.check_pin(c.arg):
+                log.warn("live_bad_pin")
+                return self.ui.send("⛔ Wrong or missing PIN. Usage: /livekill &lt;PIN&gt;")
+            return self.ui.send(d.kill())
 
     def invo_reset(self) -> str:
         """/invoreset: archive the Invo wallets' ledgers and start fresh ones that keep the followed traders. The caller
@@ -1155,7 +1263,7 @@ class Bot:
         arch = self.data / "archive" / f"invo-reset-{stamp}" / "wallets"
         arch.mkdir(parents=True, exist_ok=True)
         follows = dict(self.invo.st.followed)
-        for w in self.invo_wallets():
+        for w in self.invo_paper_wallets():          # the live wallet's ledger is the real account's: kept
             w.ledger.frozen = True
             w.ledger.close()
             d = self.data / "wallets" / w.name

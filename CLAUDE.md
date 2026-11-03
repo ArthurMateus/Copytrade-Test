@@ -1,7 +1,8 @@
 # CLAUDE.md: context for working on this repo
 
-Copy-trading bot, **PAPER MODE ONLY**, with one book since 2026-10-26: 🧾 Invo traders' posted calls, copied on
-simulated $300 wallets at Hyperliquid's real prices, books and fees. It is controlled from Discord only and runs
+Copy-trading bot with one book since 2026-10-26: 🧾 Invo traders' posted calls, copied on simulated $300 wallets at
+Hyperliquid's real prices, books and fees, plus (owner request 2026-11-03, off by default) ONE live wallet that copies
+one paper wallet with real Hyperliquid orders (`live.py`, `docs/PRODUCTION_PLAN.md`). It is controlled from Discord only and runs
 unattended on the owner's Windows PC. **New chat? Read `context.md` first** (current state, who does what, what Claude
 must never do), then this file. The original brief is [docs/SPEC.md](docs/SPEC.md) (a Hyperliquid wallet copier; that
 book, the FOMO / Solana book, the Invo arena and the bot's own Invo search were built later and REMOVED on 2026-10-26 at
@@ -15,11 +16,14 @@ covers run instructions and design choices.
 - GitHub: https://github.com/ArthurMateus/Copytrade-Test.
 
 ## Hard rules (never break)
-- Never import a signing library, read a wallet key, or call an exchange/order endpoint (Hyperliquid's or Invo's
-  `/dex/` trading endpoints). `tests/test_safety.py` and `test_the_bot_never_calls_an_invo_trading_endpoint` enforce it.
+- Signing, the key and Hyperliquid's `/exchange` endpoint exist ONLY in `live.py` (imported lazily: the paper bot
+  loads no signing library), whose signed actions are only `order`, `cancel` and `updateLeverage`. Never add code that
+  moves money out (withdrawals, transfers, approvals, vaults, sub-accounts) anywhere, and never call Invo's `/dex/`
+  trading endpoints. `tests/test_safety.py` and `test_the_bot_never_calls_an_invo_trading_endpoint` enforce it.
+- Claude never sees, types or handles the owner's keys: the owner creates the API wallet and runs `setx` themselves.
 - Secrets come from environment variables only: `COPYBOT_PIN`, `DISCORD_BOT_TOKEN`, `DISCORD_CHANNEL_ID`,
-  `DISCORD_OWNER_ID`, and `INVO_TOKEN_FILE` (path of the file holding the bot's Invo refresh token; without it Invo is
-  off). Never log or commit them. `log.py` redacts them.
+  `DISCORD_OWNER_ID`, `INVO_TOKEN_FILE` (path of the file holding the bot's Invo refresh token; without it Invo is
+  off), and for the live wallet `HL_ACCOUNT_ADDRESS` + `HL_AGENT_KEY` (an API wallet's key, read only by `live.py`). Never log or commit them. `log.py` redacts them.
 - Every order goes through `RiskGate.check` (`risk.py`). Exits (reduce/close/stop) are never refused; entries
   fail closed.
 - Every state change goes through the ledger: `ledger.append(ev)` then `state.apply(ev)`. A restart replays the
@@ -34,7 +38,7 @@ covers run instructions and design choices.
 ## Layout (`src/copybot/`)
 | Module | Role |
 |---|---|
-| `config.py` | Loads TOML from `config/` (`risk`, `broker`, `discord`, `runtime`, `invo`) and validates the `CEILINGS`; unknown keys are an error |
+| `config.py` | Loads TOML from `config/` (`risk`, `broker`, `discord`, `runtime`, `invo`, `live`) and validates the `CEILINGS`; unknown keys are an error |
 | `log.py` | key=value logs, rotating file, secret redaction |
 | `ledger.py` | `Ledger` (append-only JSONL, fsync), `State`, `Position` and the event fold. Unresolved intents, torn tail lines and stop-less positions go into `state.uncertain`. Old ledgers' events of removed features (`sel`, `cursor` ...) still replay |
 | `hl.py` | Hyperliquid market data: parsers (meta, books, fills, websocket), `RateBudget` (CRITICAL vs BULK classes), `Info` client with a hard timeout |
@@ -46,7 +50,8 @@ covers run instructions and design choices.
 | `chat.py`, `cardfmt.py` | Platform-free chat: command names and aliases, help, `ChatUI` outbox (cards edited in place, rate-limited, 429-aware); renderers in a small HTML subset. Card conventions: 🟢/🔴 = money only, ⬆️/⬇️ = side, one P&L after fees+funding, `label: value` lines, times in `discord.utc_offset_hours` |
 | `discord.py` | The ONLY chat: `DiscordUI(ChatUI)` over REST + Gateway (stdlib + `websockets.sync`), guild slash commands (short names), owner-only, ephemeral replies (PIN never shown), card HTML → markdown embeds coloured by money; outgoing text shows the short names (`chat.short_names`). Card ids live in the bot's ledger as `dc:<key>` |
 | `invo.py` | Invo: parsers, `InvoClient` (rotating refresh token, shared spacing, 429 throttle), `Watcher` (polls the watched traders) |
-| `runner.py` | `Bot`: boot/repair, worker threads, trading loop, the 18 Invo wallets (`invo_set`), Invo call routing (`on_invo`, `invo_one`), commands, cards, heartbeat |
+| `runner.py` | `Bot`: boot/repair, worker threads, trading loop, the 18 Invo wallets (`invo_set`), the live wallet (`live_setup`), Invo call routing (`on_invo`, `invo_one`), commands, cards, heartbeat |
+| `live.py` | REAL orders (the only signing module): `Exchange` (signed order/cancel/updateLeverage via the SDK's `hyperliquid.utils.signing`, the account's reads), `LiveBroker` (PaperBroker's shape: IOC entries within `entry_slippage_bps`, reduce-only exits widening 1x/3x/8x, the part a resting stop already closed booked at its real fills), `Desk` (stops resting on the exchange, reconcile, floor, /livekill, /livestatus) |
 
 `data/ledger.jsonl` is the bot's own ledger (genesis, boots, Discord card ids); each Invo wallet has its own in
 `data/wallets/<name>/`. Also `data/bot.lock` (single instance) and `logs/copybot.log`. All git-ignored. Moving the bot to
@@ -178,6 +183,30 @@ tests of the new allocation policy.
 - `/wallets` = `cardfmt.invo_wallets_card`: 3 best + 3 worst combinations (size · stop) and the average of each stop.
   Copying one call into all 18 takes ~0.1 s. `boot_repair` keeps a stop on the winning side of the entry (a trailed
   stop is not reset at restart).
+
+## The live wallet (owner request 2026-11-03; docs/PRODUCTION_PLAN.md Phase 1)
+- `config/live.toml` (`enabled = false` by default, `network` testnet/mainnet). `Bot.live_setup` builds `SideWallet`
+  `live` (`data/wallets/live/`) as a copy of `live.copy_wallet` (owner: `invo_risk_5pct_stop8`, 5% margin · 8% stop):
+  the twin's risk config is copied field by field, then `start_equity` (300), `daily_loss_pct` (15: the day mark is
+  the day's start, so it is the NET day; owner: "+30% then -15% is still +15%, don't stop"), `weekly_loss_pct` 100,
+  `max_positions`. `base_name` = the twin's deciding wallet, so it copies exactly the calls the twin copies. It is the
+  last of `invo_wallets()` (routing, baseline, follows); `invo_paper_wallets()` (the 18) feed `/wallets` and `/reset`.
+- Off (start message "LIVE is off: ...", `Bot.live_off`) without both env vars, with the main wallet's key, or with a
+  bad `copy_wallet`. `Desk.boot` checks `userRole` (the key must be an agent of the account) and loads the network's
+  own coin list (asset ids); a failure pauses live entries.
+- The engine books `fill.size` (a live IOC can fill partly) and passes `leverage=` to the broker (isolated margin at
+  the gate's leverage). An entry not filled = `NoBook` (skipped). A transport error raises `LiveError` (not booked): the
+  reconcile pauses entries if the account then holds more than the ledger. Exits: if all 3 tries fail, `LiveError`;
+  the position and its exchange stop stay.
+- `Desk`: after every notify (open/add/reduce/close) the coin's stop-market order is replaced on the exchange (new
+  first, then cancel old; retried every 5 s if refused); every `reconcile_s` (15) the account's positions and trigger
+  orders are read: exchange smaller -> `pm.close/reduce` (`exchange_closed`/`exchange_reduced`, the broker books the
+  gone part from `userFillsByTime`); exchange bigger or an unknown coin -> `pause live_mismatch` + alert (re-paused
+  while it differs). Floor `floor_usd` (150): pause once per crossing; `/liveresume` below it holds.
+- Testnet: the live wallet uses the testnet's own mids (`Desk.mids`, allMids every 1 s); on mainnet the shared ones.
+- Fees are booked at `broker.taker_fee_pct`; `/livestatus` shows the real account value next to the ledger's.
+- Tests: `tests/fakes_live.py` (loopback exchange that checks every signature recovers to the API wallet),
+  `tests/test_live.py`. The SDK (`hyperliquid-python-sdk==0.24.0`) is a dependency (also needed for the tests).
 
 ## Findings from the real API
 - `tests/test_discord.py::test_rate_limit_is_honoured` is timing-based and can fail rarely under load; rerun before

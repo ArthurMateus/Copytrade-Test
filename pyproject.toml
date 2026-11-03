@@ -9,6 +9,8 @@ authors = [
 requires-python = ">=3.11"
 dependencies = [
     "websockets>=17.2",
+    # signs the live wallet's orders (copybot/live.py only; loaded only when live trading is on)
+    "hyperliquid-python-sdk==0.24.0",
 ]
 
 [project.scripts]

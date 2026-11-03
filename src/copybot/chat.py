@@ -29,10 +29,12 @@ VERBS = ("status", "trades", "traders", "wallets", "progress", "follow", "unfoll
 INVO_COMMANDS = tuple(f"/invo{v}" for v in VERBS)
 ALIASES = {f"/{v}": f"/invo{v}" for v in VERBS}
 ALIASES.update({"/invo": "/invostatus", "/positions": "/invotrades", "/leaders": "/invotraders"})
-COMMANDS = tuple(dict.fromkeys(("/help", "/restart") + tuple(ALIASES) + INVO_COMMANDS))
+# the REAL-money wallet (copybot/live.py; owner request 2026-11-03)
+LIVE_COMMANDS = ("/livestatus", "/livepause", "/liveresume", "/livekill")
+COMMANDS = tuple(dict.fromkeys(("/help", "/restart") + tuple(ALIASES) + INVO_COMMANDS + LIVE_COMMANDS))
 # what Discord shows in its slash-command list
-SLASH_COMMANDS = ("/help", "/restart") + tuple(f"/{v}" for v in VERBS)
-PIN_COMMANDS = ("/invoflatten", "/invoreset")
+SLASH_COMMANDS = ("/help", "/restart") + tuple(f"/{v}" for v in VERBS) + LIVE_COMMANDS
+PIN_COMMANDS = ("/invoflatten", "/invoreset", "/livekill")
 # take an Invo username (block / unblock: the username, then the portfolio) as their argument
 WALLET_COMMANDS = ("/invofollow", "/invounfollow", "/invoblock", "/invounblock")
 _INVO_WORDS = re.compile(r"/invo(" + "|".join(VERBS) + r")\b")
@@ -57,6 +59,8 @@ HELP = ("🤖 <b>Copybot (paper)</b> · 🧾 Invo calls (copied on Hyperliquid p
         "block · unblock &lt;user&gt; &lt;portfolio&gt; – stop / restart copying one portfolio\n"
         "pause · resume – new copies (exits and stops always run)\n"
         "flatten &lt;PIN&gt; – close every trade and pause · reset &lt;PIN&gt; – back to the start, traders kept\n\n"
+        "💵 REAL money (when live trading is on): livestatus · livepause · liveresume · livekill &lt;PIN&gt; – close "
+        "every live position and pause\n\n"
         "Examples: /wallets · /follow nicush · /block nicush Kitchen\n"
         "/restart – restart the bot")
 

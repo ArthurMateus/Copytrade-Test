@@ -116,25 +116,26 @@ class MarginPositionManager(PositionManager):
             self._rec(dict(ev="intent", intent=iid, action=kind, coin=p.coin))
             try:
                 f = self.broker.market(p.coin, p.side > 0 if adding else p.side < 0, d.size,
-                                       **({} if adding else dict(exit=True, mid=px)))
+                                       **(dict(leverage=p.leverage) if adding else dict(exit=True, mid=px)))
             except NoBook as exc:
                 self._rec(dict(ev="intent_abort", intent=iid))
                 reason = self._skip("no_book", coin=p.coin, leader=m.leader, err=str(exc))
             else:
                 shares = {a: dict(v) for a, v in p.shares.items()}
                 s = shares[m.leader]
+                sz = f.size                      # a live fill can be partial (copybot/live.py)
                 if adding:
-                    s["entry_px"] = (before * s["entry_px"] + d.size * f.px) / (before + d.size)
-                    s["notional"] += d.size * f.px
+                    s["entry_px"] = (before * s["entry_px"] + sz * f.px) / (before + sz)
+                    s["notional"] += sz * f.px
                     s["realized"] -= f.fee
                 else:
-                    s["realized"] += p.side * (f.px - s["entry_px"]) * d.size - f.fee
+                    s["realized"] += p.side * (f.px - s["entry_px"]) * sz - f.fee
                 s["fees"] += f.fee
-                s["size"] = max(0, before + (d.size if adding else -d.size))
+                s["size"] = max(0, before + (sz if adding else -sz))
                 s["exposure"] = abs(m.end_pos)
                 s["k"] = s["size"] / abs(m.end_pos) if m.end_pos else 0
                 event = dict(ev="add" if adding else "reduce", intent=iid, coin=p.coin,
-                             pos_id=p.pos_id, sz=d.size, px=f.px, fee=f.fee,
+                             pos_id=p.pos_id, sz=sz, px=f.px, fee=f.fee,
                              lag_ms=self._lag(self.health(), m), shares=shares,
                              reason="trader_share_resize")
                 self._rec(event)
