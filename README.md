@@ -180,6 +180,97 @@ setx HL_AGENT_KEY "<the API wallet's private key>"
 If something is wrong (keys missing, API wallet not approved, coin list unreadable), the start message says
 `LIVE is off: ...` or the live wallet starts paused, and the paper wallets run as usual.
 
+## Web dashboard
+
+A read-only web page with the live wallet (balance vs its start, today vs the day's start, floor, paused or not, open
+and closed trades, a balance chart), the live wallet vs its paper twin in % since the live start, the 18 paper wallets
+ranked by return (the live wallet's twin highlighted), what each trader made, and the open and last closed trades of
+every wallet. It refreshes itself every 15 s. Times follow `utc_offset_hours` in `config/discord.toml`. The same data
+is at `/api/summary` (JSON).
+
+It is a **separate program** from the bot: it only reads `data/wallets/*/ledger.jsonl`, never writes anything, and
+cannot change a trade (any request other than reading gets "405"). If it crashes, the bot does not notice. Prices of
+open trades come from Hyperliquid's public prices; when they cannot be read, the page says so and counts open trades at
+their entry price.
+
+### Starting it
+
+In a NEW PowerShell window on the bot PC (the bot keeps running in its own window):
+
+```powershell
+cd C:\Users\gedeo\Copytrade-test
+```
+
+```powershell
+uv run copybot-dashboard
+```
+
+Then open http://127.0.0.1:8787 in a browser on that PC. It listens only on this PC (127.0.0.1): nobody else on the
+network can open it. Another port, if 8787 is taken:
+
+```powershell
+uv run copybot-dashboard --port 8790
+```
+
+### Starting it automatically
+
+This creates a Windows task that starts the dashboard (and restarts it if it stops) every time you sign in to
+Windows:
+
+```powershell
+schtasks /Create /TN copybot-dashboard /SC ONLOGON /TR "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Minimized -File C:\Users\gedeo\Copytrade-test\tools\dashboard_loop.ps1"
+```
+
+Start it now without signing out:
+
+```powershell
+schtasks /Run /TN copybot-dashboard
+```
+
+To remove it later:
+
+```powershell
+schtasks /Delete /TN copybot-dashboard /F
+```
+
+After a `git pull` the dashboard keeps the old code until it restarts: sign out and in again, or close its minimized
+PowerShell window (the task starts again at the next sign-in; `schtasks /Run /TN copybot-dashboard` starts it now).
+
+### Opening it from anywhere (Cloudflare Tunnel + Cloudflare Access)
+
+The page has no password of its own. Remote access goes through Cloudflare: a **tunnel** carries the page from the
+PC to Cloudflare (no port is opened on your router), and **Access** asks for a one-time code sent to your email before
+it shows anything. You do the sign-up and every sign-in yourself. Cloudflare's menu names change from time to time, so
+they may differ slightly from the ones below. The free plan is enough.
+
+1. **A domain on Cloudflare.** Sign up at https://dash.cloudflare.com. The tunnel needs a domain whose DNS is on
+   Cloudflare: add one you own (**Add a domain**, then change its nameservers where you bought it, as Cloudflare
+   shows), or buy one in **Domain Registration**. Below it is called `yourdomain.com`.
+2. **Zero Trust.** In the dashboard open **Zero Trust** and pick a team name and the Free plan (it may ask for a card
+   even for the free plan).
+3. **Who may open it, FIRST** (so the page is never public, not even for a minute): **Zero Trust → Access →
+   Applications → Add an application → Self-hosted**. Name `copybot`, domain `bot.yourdomain.com`. Add a policy:
+   name `owner`, action **Allow**, include **Emails** = your email address. Under login methods keep
+   **One-time PIN**. Save.
+4. **Install cloudflared** on the bot PC:
+
+```powershell
+winget install --id Cloudflare.cloudflared
+```
+
+5. **Create the tunnel:** **Zero Trust → Networks → Tunnels → Create a tunnel → Cloudflared**, name `copybot`, choose
+   Windows. Cloudflare shows a command like `cloudflared.exe service install eyJ...`. Open PowerShell **as
+   administrator** (Start menu, right-click PowerShell, "Run as administrator") and paste that command there yourself.
+   The long `eyJ...` part is the tunnel's secret: never put it in a chat, a file in the repo or a screenshot. This
+   installs cloudflared as a Windows service, so it starts with the PC.
+6. **Point the tunnel at the dashboard:** in the tunnel's **Public Hostname** (or "Routes") tab add subdomain `bot`,
+   domain `yourdomain.com`, service type **HTTP**, URL `127.0.0.1:8787`. Save.
+7. **Test** on your phone with Wi-Fi off: open https://bot.yourdomain.com, type your email, type the code it sends.
+   You should see the dashboard. Any other email gets no code and no page.
+
+To cut remote access at any time: delete the tunnel (or its public hostname) in Zero Trust; the dashboard keeps
+working on the PC itself.
+
 ## Findings from the real API (recorded in `tests/fixtures`)
 - Hyperliquid closes the websocket about every 3 h ("Expired"); the bot reconnects in seconds. Only an outage longer
   than `runtime.ws_alert_after_s` (60 s) alerts on Discord. New copies wait while it is down; exits keep working.
