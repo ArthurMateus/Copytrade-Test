@@ -9,8 +9,8 @@ the venv needs `hyperliquid-python-sdk`).
 ## 2026-11-03: going live (branch `live/phase1`, from `invo-only`)
 - Owner plan: `docs/PRODUCTION_PLAN.md` (5 phases: live engine on testnet then mainnet, a server, a web dashboard,
   a public read-only Discord, later a paid product only after a lawyer). Owner decisions: Hyperliquid (checked for
-  Brazil), 300$ live, 5% margin · 8% stop (`invo_risk_5pct_stop8`), daily stop -15% NET from the day's start, floor
-  150$, home PC for now, traders from the daily Claude report (changed by hand).
+  Brazil), 100$ live (first 300$), 5% margin · 8% stop (`invo_risk_5pct_stop8`), daily stop -15% NET from the day's start, floor
+  50$, one coin <= 70$, home PC for now, traders from the daily Claude report (changed by hand).
 - Built Phase 1 (CLAUDE.md "The live wallet"). Not yet run against the real testnet: the owner has created the
   Hyperliquid account (public address given in chat, kept out of the public repo) but has not deposited or made the
   API wallet yet. Next: owner creates the API wallet, `setx` the two variables, `enabled = true`, testnet for a few

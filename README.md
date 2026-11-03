@@ -56,8 +56,8 @@ Run the tests: `uv run pytest` (about 4 minutes; this includes real-process kill
 | `/follow <user>` | follow an Invo trader: every portfolio of it is copied (at most `invo.max_traders`) |
 | `/unfollow <user>` | stop following it (its open copies still follow its exits) |
 | `/block <user> <portfolio>` | stop copying one portfolio (matched by the start of its name); `/unblock` undoes it |
-| `/pause`, `/resume` | stop / allow new copies (exits and stops always run) |
-| `/flatten <PIN>` | close every copy and pause |
+| `/pause`, `/resume` | stop / allow new paper copies (exits and stops always run) |
+| `/flatten <PIN>` | close every paper copy and pause |
 | `/reset <PIN>` | every wallet back to $300, traders kept, old history archived (refused while a copy is open) |
 | `/help`, `/restart` | the list, a restart (the loop above starts it again) |
 | `/livestatus` | the live wallet: balance, the real account, today vs the daily stop, open trades and their stops on the exchange, live vs paper |
@@ -136,19 +136,24 @@ If Invo refuses the login later, the bot alerts on Discord; repeat steps 1-4.
 ## Live trading (real money, Hyperliquid)
 
 One wallet, `live`, copies the paper wallet `copy_wallet` in `config/live.toml` (5% margin · 8% stop) with real orders:
-the same calls, the same sizes and stop, on its own 300$ ledger (`data/wallets/live/`). On top of the paper limits:
+the same calls and stop, sized the same way on its own 100$ ledger (`data/wallets/live/`; the paper wallets keep
+300$, so compare percentages). On top of the paper limits:
 
 - **Daily stop:** no new entries once the day's NET result is −15% of the day's start (a day at +30% that falls back
-  to +15% does not stop).
-- **Floor:** no new entries once the wallet is at or below 150$, until `/liveresume`.
-- **Position cap:** one coin never above 200$ notional. Entries fill at most 0.5% from the mid, else they are skipped.
+  to +15% does not stop). It holds until your next day (local midnight, `discord.utc_offset_hours`).
+- **Floor:** no new entries once the wallet is at or below 50$, until `/liveresume`.
+- **Position cap:** one coin never above 70$ notional (a bigger order is trimmed to it). Entries fill at most 0.5%
+  from the mid, else they are skipped. All open stops together risk at most 30% of the wallet, and liquidation sits
+  at least 1.25x the stop distance away (so the leverage can be a step lower than the paper twin's).
 - **Stops on the exchange:** every live position's stop also rests on Hyperliquid as a stop-market order, so it fires
   while the bot or the PC is down. Exits are reduce-only and can never open a position.
 - **Reconcile:** every 15 s the ledger is compared with the real account. A stop the exchange fired is booked at its
   real price; anything the bot did not open pauses live entries. **Use the Hyperliquid account only for the bot.**
-- `/flatten`, `/pause`, `/resume` act on every Invo wallet including the live one; `/reset` never touches it.
+- `/flatten`, `/pause`, `/resume` and `/reset` act on the paper wallets only; the live wallet has its own
+  `/livekill`, `/livepause`, `/liveresume`.
 
-Fees are booked at 0.045% (`/livestatus` shows the real account value next to the ledger's).
+Fees are booked at 0.045% (`/livestatus` shows the real account value next to the ledger's; an account holding less
+than the ledger alerts).
 
 ### Turning it on (testnet first)
 
@@ -170,7 +175,7 @@ setx HL_AGENT_KEY "<the API wallet's private key>"
 4. In `config/live.toml` set `enabled = true` (keep `network = "testnet"`), open a NEW PowerShell window for the
    restart loop, and send `/restart`. The start message says `paper + LIVE testnet`; `/livestatus` shows the wallet.
 5. After a few days on testnet with no mismatch alert, set `network = "mainnet"` and the API wallet key of the mainnet
-   account, deposit the 300$ USDC, `/restart`.
+   account, deposit the 100$ USDC, `/restart`.
 
 If something is wrong (keys missing, API wallet not approved, coin list unreadable), the start message says
 `LIVE is off: ...` or the live wallet starts paused, and the paper wallets run as usual.

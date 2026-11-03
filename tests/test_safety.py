@@ -27,7 +27,8 @@ MONEY_OUT = re.compile(r"withdraw|transfer|usdSend|spotSend|sendAsset|approveAge
                        r"sign_usd|sign_spot|sign_send|sign_withdraw|sign_approve|sign_token|setReferrer|"
                        r"mnemonic|seed_phrase", re.I)
 ACTIONS = {"order", "cancel", "updateLeverage"}           # the only signed actions
-READS = {"userRole", "metaAndAssetCtxs", "clearinghouseState", "frontendOpenOrders", "userFillsByTime", "allMids"}
+READS = {"userRole", "metaAndAssetCtxs", "clearinghouseState", "frontendOpenOrders", "userFillsByTime", "allMids",
+         "orderStatus"}
 
 
 def test_source_has_no_signing_or_keys_outside_the_live_module():

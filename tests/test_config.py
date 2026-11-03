@@ -88,7 +88,7 @@ def test_only_the_invo_book_is_configured(tmp_path):
     cfg = config.load(d, env={})
     assert not cfg.live.enabled and cfg.live.network == "testnet"      # live trading is off until the owner turns it on
     assert (cfg.live.copy_wallet, cfg.live.start_equity, cfg.live.daily_loss_pct, cfg.live.floor_usd) == \
-        ("invo_risk_5pct_stop8", 300.0, 15.0, 150.0)                    # owner decisions 2026-11-03
+        ("invo_risk_5pct_stop8", 100.0, 15.0, 50.0)                     # owner decisions 2026-11-03
     assert cfg.invo.max_traders == 10 and not hasattr(cfg, "sol") and not hasattr(cfg, "selection")
     for key in ("search", "arena", "always_copy"):
         assert not hasattr(cfg.invo, key)

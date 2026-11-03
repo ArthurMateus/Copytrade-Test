@@ -187,10 +187,15 @@ tests of the new allocation policy.
 ## The live wallet (owner request 2026-11-03; docs/PRODUCTION_PLAN.md Phase 1)
 - `config/live.toml` (`enabled = false` by default, `network` testnet/mainnet). `Bot.live_setup` builds `SideWallet`
   `live` (`data/wallets/live/`) as a copy of `live.copy_wallet` (owner: `invo_risk_5pct_stop8`, 5% margin · 8% stop):
-  the twin's risk config is copied field by field, then `start_equity` (300), `daily_loss_pct` (15: the day mark is
+  the twin's risk config is copied field by field, then `start_equity` (100), `daily_loss_pct` (15: the day mark is
   the day's start, so it is the NET day; owner: "+30% then -15% is still +15%, don't stop"), `weekly_loss_pct` 100,
-  `max_positions`. `base_name` = the twin's deciding wallet, so it copies exactly the calls the twin copies. It is the
-  last of `invo_wallets()` (routing, baseline, follows); `invo_paper_wallets()` (the 18) feed `/wallets` and `/reset`.
+  `max_positions`, and real budgets instead of the twin's loose ones (values review 2026-11-03):
+  `max_total_risk_pct` (30), per coin a third of it, `liq_buffer_mult` >= 1.25 (`LIVE_LIQ_BUFFER`; at 1 a 25x coin's
+  short liquidated inside the 8% stop). `LiveBroker` trims an order to `max_position_usd` (70) instead of refusing it.
+  `Desk.check_day` holds the daily stop until the owner's next day (pause reason `live_daily_stop:<day>`); day and
+  week marks of every wallet are local (`discord.utc_offset_hours`). An account value under the ledger alerts. `base_name` = the twin's deciding wallet, so it copies exactly the calls the twin copies. It is the
+  last of `invo_wallets()` (routing, baseline, follows); `invo_paper_wallets()` (the 18) feed `/wallets`,
+  `/pause`, `/resume`, `/flatten` and `/reset` (the live wallet has only its `/live…` commands; code review 2026-11-03).
 - Off (start message "LIVE is off: ...", `Bot.live_off`) without both env vars, with the main wallet's key, or with a
   bad `copy_wallet`. `Desk.boot` checks `userRole` (the key must be an agent of the account) and loads the network's
   own coin list (asset ids); a failure pauses live entries.
@@ -202,8 +207,14 @@ tests of the new allocation policy.
   first, then cancel old; retried every 5 s if refused); every `reconcile_s` (15) the account's positions and trigger
   orders are read: exchange smaller -> `pm.close/reduce` (`exchange_closed`/`exchange_reduced`, the broker books the
   gone part from `userFillsByTime`); exchange bigger or an unknown coin -> `pause live_mismatch` + alert (re-paused
-  while it differs). Floor `floor_usd` (150): pause once per crossing; `/liveresume` below it holds.
+  while it differs). Floor `floor_usd` (50): pause once per crossing; `/liveresume` below it holds.
 - Testnet: the live wallet uses the testnet's own mids (`Desk.mids`, allMids every 1 s); on mainnet the shared ones.
+- Code review 2026-11-03: an order with no answer (`LiveUnknown`) is looked up by its cloid (`orderStatus` +
+  fills by oid) before it counts as not placed; an exchange "no" = NoBook. A position (or extra size) the ledger does
+  not know gets a guard stop / a stop covering the real size (`Desk.real`). Exits book `fill.size`; a failed live exit
+  aborts its intent and waits 5 s / 30 s / 2 min (`LiveBroker.can_exit`; `PaperBroker.can_exit` is always True);
+  `check_stops` runs every coin even when one fails; a reduce the exchange did rescales the trader shares; /livekill
+  works coin by coin and keeps the orders of what it could not close; a fired stop is priced from its own oid's fills.
 - Fees are booked at `broker.taker_fee_pct`; `/livestatus` shows the real account value next to the ledger's.
 - Tests: `tests/fakes_live.py` (loopback exchange that checks every signature recovers to the API wallet),
   `tests/test_live.py`. The SDK (`hyperliquid-python-sdk==0.24.0`) is a dependency (also needed for the tests).

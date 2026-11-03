@@ -18,9 +18,9 @@ Phases 4–5 turn it into a product.
 | Rollout | Small live wallet next to the paper wallets |
 | Live setup | 5% margin · 8% stop; later 2% margin with a bigger balance |
 | Where it runs | The home PC for now; a small server later, when there is money for it |
-| Live balance | 300$ |
+| Live balance | 100$ (owner, 2026-11-03; first planned 300$) |
 | Daily stop | No new entries once the **day's net result** is −15% of the balance at the start of the day. Measured from the day's start, **not** from the day's best: a day that goes +30% then falls to +15% does not stop |
-| Total stop | No new entries once the live wallet is at or below **150$** (−50% of 300$), until the owner resumes it |
+| Total stop | No new entries once the live wallet is at or below **50$** (−50% of 100$), until the owner resumes it |
 | Hyperliquid account | Not yet: the owner creates it (Phase 0) |
 | Traders | The ones the owner follows, picked from the daily Claude report and changed by hand at any time |
 | Discord | Owner control stays private; a public read-only server later; then a paid product |
@@ -53,7 +53,7 @@ the exchanges' own docs and the legal points with the CVM / a lawyer before rely
 | Item | Who | Why |
 |---|---|---|
 | Read Hyperliquid's current Terms of Use (no VPN) | Owner | Confirm Brazil is allowed |
-| Create a Hyperliquid account, deposit 300$ USDC | Owner | The live wallet |
+| Create a Hyperliquid account, deposit 100$ USDC | Owner | The live wallet |
 | Create an **API / agent key** in Hyperliquid's settings | Owner | It can trade but **can't withdraw**, so a leaked key cannot take the money out |
 | Store the key as an environment variable on the bot PC | Owner | Claude never sees, types or handles the key |
 | Brazilian lawyer (crypto / CVM) | Owner | Required before Phase 5 charges anyone; can run in parallel with Phases 1–4 |
@@ -75,7 +75,7 @@ A **LiveBroker** with the same shape is added, so the RiskGate, ledger, Position
 5. **Live wallet limits** (its own, separate from the paper ceilings in `risk.toml`):
    - balance used: 300$
    - daily stop: −15% net for the day (see the owner decisions above), resets at local midnight
-   - total stop: wallet at or below 150$ (balance + open P&L) → no new entries, Discord alert, until `/liveresume`;
+   - total stop: wallet at or below 50$ (balance + open P&L) → no new entries, Discord alert, until `/liveresume`;
      open copies keep their stops and the traders' exits
    - a maximum size per trade
 6. **Kill switch.** `/livekill <PIN>` closes everything and stops entries. `/livepause` and `/liveresume`.
@@ -90,7 +90,7 @@ A **LiveBroker** with the same shape is added, so the RiskGate, ledger, Position
    - live mode needs an explicit `live = true` setting **and** the key; otherwise it stays paper
    - CLAUDE.md and context.md are updated to the new rules in the same change
 
-**Done when:** 3+ days on testnet with no mismatch, then mainnet with the 300$.
+**Done when:** 3+ days on testnet with no mismatch, then mainnet with the 100$.
 
 **Status (2026-11-03):** the code is built on branch `live/phase1` (`src/copybot/live.py`, `config/live.toml`, README
 "Live trading") and tested against a fake exchange that checks every signature. Not yet run on the real testnet:

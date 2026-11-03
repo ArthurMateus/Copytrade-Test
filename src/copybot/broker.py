@@ -64,6 +64,10 @@ class PaperBroker:
         slip = (px - ref) / ref * 1e4 * (1 if is_buy else -1)
         return PaperFill(px, size, fee, slip, source)
 
+    def can_exit(self, coin: str) -> bool:
+        """Paper exits never fail (the live broker waits after a failed one: copybot/live.py)."""
+        return True
+
 
 def funding_payment(side: int, size: float, mark: float, rate: float) -> float:
     """Hourly funding received (+) or paid (-). Positive rate: longs pay shorts."""

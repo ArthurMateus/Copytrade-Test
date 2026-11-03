@@ -28,6 +28,7 @@ class Desk:
     def __init__(self, tmp_path, fx: FakeExchange, key=None, **live_cfg):
         self.fx = fx
         cfg = config.load("config", env={})
+        live_cfg = {"max_position_usd": 200.0, **live_cfg}     # (this wallet starts with 300$)
         for k, v in live_cfg.items():
             setattr(cfg.live, k, v)
         self.ex = live.Exchange("testnet", ACCOUNT, key or AGENT.key.hex(), base=fx.base)
@@ -102,8 +103,35 @@ def test_an_entry_that_finds_no_liquidity_is_skipped_and_nothing_is_booked(tmp_p
 
 def test_one_coin_never_grows_past_the_live_position_cap(tmp_path, fx):
     d = Desk(tmp_path, fx, max_position_usd=50.0)
-    assert d.call() == "no_book"                            # a ~150$ copy is over the 50$ cap
-    assert not fx.positions
+    d.call()                                                # a ~150$ copy is trimmed to the 50$ cap
+    assert 40 < fx.positions["ETH"] * 3000 <= 50.0
+    assert d.w.st.positions["ETH"].size == pytest.approx(fx.positions["ETH"])
+    d.close()
+    d2 = Desk(tmp_path / "b", fx, max_position_usd=12.0)
+    d2.desk.mids["ETH"] = fx.mids["ETH"] = 3000.0
+    d2.call()
+    d2.call(start=0.5, exposure=1.0)                        # the trader adds: no room left above 10$, refused
+    assert fx.positions["ETH"] * 3000 <= 12.0
+
+
+def test_the_daily_stop_holds_until_the_next_day(tmp_path, fx):
+    d = Desk(tmp_path, fx)
+    d.w.rec({"ev": "mark", "kind": "day", "key": "2026-11-03", "equity": 400.0})   # the day started at 400$
+    d.desk.check_day()                                      # 300$ now: -25% today
+    assert d.w.st.entries_paused and d.w.st.pause_reason == "live_daily_stop:2026-11-03"
+    d.w.rec({"ev": "mark", "kind": "day", "key": "2026-11-03", "equity": 330.0})   # (still -9%: stays stopped)
+    d.desk.check_day()
+    assert d.w.st.entries_paused
+    d.w.rec({"ev": "mark", "kind": "day", "key": "2026-11-04", "equity": 300.0})
+    d.desk.check_day()
+    assert not d.w.st.entries_paused and any("New day" in t for t in d.said)
+
+
+def test_an_account_holding_less_than_the_ledger_alerts(tmp_path, fx):
+    d = Desk(tmp_path, fx)
+    fx.account_value = 250.0                                # the ledger counts 300$
+    d.desk.reconcile()
+    assert any("ledger counts" in t for t in d.said)
 
 
 def test_a_stop_the_exchange_fired_is_booked_at_its_real_fill(tmp_path, fx):
@@ -142,9 +170,59 @@ def test_an_exit_the_exchange_refuses_keeps_the_position_and_its_stop(tmp_path, 
     with pytest.raises(live.LiveError):
         d.close()
     assert "ETH" in d.w.st.positions and fx.stops("ETH")    # still held, still protected on the exchange
+    assert not d.w.st.open_intents                          # (its intent aborted: nothing uncertain at a restart)
+    assert not d.broker.can_exit("ETH")                     # the next try waits 5 s (not every tick)
+    n = len(fx.actions)
+    d.w.pm.check_stops()
+    d.close()
+    assert len(fx.actions) == n                             # nothing sent while waiting
     fx.down = False
+    d.broker.exit_wait.clear()                              # (5 s later)
     d.close()
     assert "ETH" not in d.w.st.positions and "ETH" not in fx.positions
+
+
+def test_an_entry_with_no_answer_is_looked_up_and_booked_if_it_filled(tmp_path, fx, monkeypatch):
+    d = Desk(tmp_path, fx)
+    real = d.ex.act
+
+    def lost_answer(action):                                # the order reaches the exchange, the answer is lost
+        res = real(action)
+        if action["type"] == "order" and "limit" in action["orders"][0]["t"]:
+            raise live.LiveUnknown("order: timeout")
+        return res
+    monkeypatch.setattr(d.ex, "act", lost_answer)
+    monkeypatch.setattr(live.time, "sleep", lambda s: None)
+    d.call()
+    p = d.w.st.positions["ETH"]
+    assert p.size == pytest.approx(fx.positions["ETH"]) and fx.stops("ETH")    # booked and protected
+
+
+def test_a_position_the_ledger_does_not_know_gets_a_guard_stop(tmp_path, fx):
+    d = Desk(tmp_path, fx)
+    fx.positions["SOL"] = -2.0
+    d.desk.reconcile()
+    [g] = fx.stops("SOL")
+    assert g["side"] == "B" and g["reduceOnly"] and float(g["triggerPx"]) == pytest.approx(150 * 1.08, rel=1e-3)
+    fx.positions.pop("SOL")                                 # the owner closed it by hand
+    fx.orders.clear()
+    d.desk.reconcile()
+    d.desk.resume()
+    d.call()
+    fx.positions["ETH"] += 0.01                             # more than the ledger: the stop covers all of it
+    d.desk.reconcile()
+    assert float(fx.stops("ETH")[0]["sz"]) == pytest.approx(fx.positions["ETH"])
+
+
+def test_a_stop_the_exchange_partly_filled_shrinks_every_traders_share(tmp_path, fx):
+    d = Desk(tmp_path, fx)
+    d.call()
+    p = d.w.st.positions["ETH"]
+    fx.positions["ETH"] = round(p.size / 2, 4)              # half closed on the exchange
+    d.desk.reconcile()
+    p = d.w.st.positions["ETH"]
+    assert p.size == pytest.approx(fx.positions["ETH"])
+    assert sum(s["size"] for s in p.shares.values()) == pytest.approx(p.size)
 
 
 def test_the_floor_pauses_new_entries_once(tmp_path, fx):
@@ -220,7 +298,10 @@ def test_the_bot_copies_an_invo_call_with_real_orders_next_to_its_paper_twin(inv
             cid = f.open_call(pid, "ETH", long=True, leverage=10, size=0.05, entry=2990.0)
             assert wait_for(lambda: "ETH" in bot.live.st.positions and "ETH" in twin.st.positions, timeout=10)
             p, q = bot.live.st.positions["ETH"], twin.st.positions["ETH"]
-            assert p.size * p.entry_px == pytest.approx(q.size * q.entry_px, rel=0.05)    # the twin's size
+            # the twin's size scaled to the live start (owner: 100$ live, the paper wallets keep 300$)
+            # (margin sizes: 5% x its own leverage, lower than the twin's: liquidation 1.25x past the stop)
+            want = 100 * 0.05 * p.leverage if layout else q.size * q.entry_px * 100 / 300
+            assert p.size * p.entry_px == pytest.approx(want, rel=0.05) and p.leverage <= q.leverage
             assert fx.positions["ETH"] == pytest.approx(p.size)
             assert wait_for(lambda: fx.stops("ETH"))                # (placed right after the fill is booked)
             dc.say("/livestatus")
@@ -228,6 +309,9 @@ def test_the_bot_copies_an_invo_call_with_real_orders_next_to_its_paper_twin(inv
                                         for m in dc.sent))
             f.close_call(pid, cid)
             assert wait_for(lambda: "ETH" not in bot.live.st.positions and "ETH" not in fx.positions, timeout=10)
+            dc.say("/pause")                                # the paper wallets only (code review 2026-11-03)
+            assert wait_for(lambda: bot.invo.st.entries_paused)
+            assert not bot.live.st.entries_paused
             dc.say("/livekill wrong")
             assert wait_for(lambda: any("Wrong or missing PIN" in m["text"] for m in dc.sent))
             from tests.test_e2e import PIN

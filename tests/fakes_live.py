@@ -24,6 +24,7 @@ class FakeExchange:
         self.fills: list[dict] = []
         self.actions: list[dict] = []               # every accepted action
         self.leverage: dict[str, tuple] = {}
+        self.cloids: dict[str, int] = {}            # client order id -> exchange order id
         self.account_value = 300.0
         self.fill_ratio = 1.0                       # < 1: IOC orders fill partly
         self.no_fill = False                        # IOC orders find no liquidity
@@ -82,6 +83,9 @@ class FakeExchange:
                     "assetPositions": [{"position": {"coin": c, "szi": str(s)}} for c, s in self.positions.items() if s]}
         if t == "frontendOpenOrders":
             return [dict(o) for o in self.orders.values()]
+        if t == "orderStatus":
+            oid = self.cloids.get(body["oid"])
+            return {"status": "order", "order": {"order": {"oid": oid}, "status": "filled"}} if oid else                 {"status": "unknownOid"}
         if t == "userFillsByTime":
             return [f for f in self.fills if f["time"] >= body.get("startTime", 0)]
         return None
@@ -127,6 +131,8 @@ class FakeExchange:
         if sz <= 0:
             return {"error": "Order could not immediately match against any resting orders."}
         self._oid += 1
+        if w.get("c"):
+            self.cloids[w["c"]] = self._oid
         self._fill(coin, buy, sz, fill_px, self._oid)
         return {"filled": {"totalSz": str(sz), "avgPx": str(fill_px), "oid": self._oid}}
 

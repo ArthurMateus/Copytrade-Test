@@ -31,6 +31,9 @@ from copybot.broker import PaperBroker
 from copybot.invo import (DELETED as INVO_DELETED, PREFIX as INVO, REPLACED_S as INVO_REPLACED_S,
                           RESIZE_MIN as INVO_RESIZE_MIN, InvoClient, Watcher as InvoWatcher)
 
+# the live wallet's liquidation sits at least 1.25x its stop distance away (values review 2026-11-03: at 1x a 25x coin's
+# isolated short liquidates at 7.84%, inside the 8% stop)
+LIVE_LIQ_BUFFER = 1.25
 EMERGENCY_STOP_PCT = 30.0   # "trader's exit" Invo wallets: the farthest stop, only a guard (a normal trade never gets
                             # there), lowered for big copies to just before their liquidation (invo_emergency_stop)
 
@@ -286,6 +289,11 @@ class Bot:
                 r = x.cfg.risk
                 r.start_equity, r.daily_loss_pct, r.weekly_loss_pct = lc.start_equity, lc.daily_loss_pct, 100.0
                 r.max_positions = min(r.max_positions, lc.max_positions)
+                # the twin's wallet-wide budgets are loose on purpose (a comparison wallet); real money gets real ones
+                # (values review 2026-11-03): all open stops together, one coin, and liquidation well past the stop
+                r.max_total_risk_pct = lc.max_total_risk_pct
+                r.max_symbol_risk_pct = min(r.max_symbol_risk_pct, lc.max_total_risk_pct / 3)
+                r.liq_buffer_mult = max(r.liq_buffer_mult, LIVE_LIQ_BUFFER)
                 x.gate.follow_leverage, x.gate.call_leverage = twin.gate.follow_leverage, twin.gate.call_leverage
                 x.pm.handover = twin.pm.handover
                 x.base_name = getattr(twin, "base_name", twin.name)   # copies only the calls the twin's deciding
@@ -446,12 +454,12 @@ class Bot:
         if c.name == "/invoprogress":
             return self.ui.send("🧾 " + cardfmt.progress_text(w.st, self.mids, self.mids.get("BTC"), now_ms()))
         if c.name == "/invopause":
-            for x in self.invo_wallets():
+            for x in self.invo_paper_wallets():
                 x.rec({"ev": "pause", "reason": "/invopause"})
-            return self.ui.send("⏸️ 🧾 <b>Invo copies paused</b> (every Invo wallet). Exits and stops keep running. "
-                                "/invoresume to continue.")
+            return self.ui.send("⏸️ 🧾 <b>Invo copies paused</b> (every paper Invo wallet; the live one has /livepause)."
+                                " Exits and stops keep running. /invoresume to continue.")
         if c.name == "/invoresume":
-            for x in self.invo_wallets():
+            for x in self.invo_paper_wallets():
                 if x.st.uncertain:
                     x.rec({"ev": "ack", "items": list(x.st.uncertain)})
                 x.rec({"ev": "resume"})
@@ -462,13 +470,13 @@ class Bot:
                 return self.ui.send(f"⛔ Wrong or missing PIN. Usage: {c.name} &lt;PIN&gt;")
             if c.name == "/invoflatten":
                 n = 0
-                for x in self.invo_wallets():
+                for x in self.invo_paper_wallets():
                     n += len(x.st.positions)
                     x.rec({"ev": "pause", "reason": "/invoflatten"})
                     x.pm.flatten("flatten")
                 return self.ui.send(f"🛑 🧾 <b>Invo flattened</b>: {n} trade(s) closed in the Invo wallets. ⏸️ Invo "
                                     "copies paused · /invoresume to continue.")
-            n_open = sum(len(x.st.positions) for x in self.invo_wallets())
+            n_open = sum(len(x.st.positions) for x in self.invo_paper_wallets())
             if n_open:
                 return self.ui.send(f"⛔ 🧾 <b>Invo reset refused</b>: {n_open} open trade(s). Wait for them to close, "
                                     "or /invoflatten &lt;PIN&gt; first.")
@@ -1077,7 +1085,9 @@ class Bot:
         now = now_ms()
 
         def marks(w):
-            for kind, key in (("day", day_key(now)), ("week", week_key(now))):
+            # the owner's day (discord.utc_offset_hours: Brazil -3): the live wallet's daily stop starts at local midnight
+            local = now + self.cfg.discord.utc_offset_hours * 3_600_000
+            for kind, key in (("day", day_key(local)), ("week", week_key(local))):
                 if w.st.marks.get(kind, {}).get("key") != key:
                     w.rec({"ev": "mark", "kind": kind, "key": key, "equity": w.st.equity(w.pm.mids)})
         self.on_sides("marks", marks)

@@ -116,11 +116,12 @@ class Live:
     enabled: bool = False
     network: str = "testnet"              # "testnet" (fake money) or "mainnet" (real money)
     copy_wallet: str = "invo_risk_5pct_stop8"   # the paper wallet whose sizes, stop and calls it copies
-    start_equity: float = 300.0           # the money the bot may use (the ledger's start), USD
+    start_equity: float = 100.0           # the money the bot may use (the ledger's start), USD (owner: 100$)
     daily_loss_pct: float = 15.0          # the day's NET result this % below the day's start -> no new entries
-    floor_usd: float = 150.0              # the wallet at or below this -> no new entries until /liveresume
-    max_position_usd: float = 200.0       # one coin's position never grows above this notional
+    floor_usd: float = 50.0               # the wallet at or below this -> no new entries until /liveresume
+    max_position_usd: float = 70.0        # one coin's position never grows above this notional
     max_positions: int = 10
+    max_total_risk_pct: float = 30.0      # every open stop hit at once loses at most this % of the wallet
     entry_slippage_bps: float = 50.0      # an entry never fills worse than this from the book's mid (else skipped)
     exit_slippage_bps: float = 100.0      # exits try this, then 3x and 8x it, until filled
     reconcile_s: float = 15.0             # compare with the real account (positions, stop orders) this often
@@ -211,6 +212,7 @@ CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
     ("live", "floor_usd"): (0, 100_000),
     ("live", "max_position_usd"): (10, 100_000),
     ("live", "max_positions"): (1, 20),
+    ("live", "max_total_risk_pct"): (5, 60),
     ("live", "entry_slippage_bps"): (5, 300),
     ("live", "exit_slippage_bps"): (20, 1000),
     ("live", "reconcile_s"): (5, 300),
@@ -273,6 +275,8 @@ def validate(cfg: Config) -> None:
         raise ConfigError('live.network: "testnet" or "mainnet"')
     if cfg.live.floor_usd >= cfg.live.start_equity:
         raise ConfigError("live.floor_usd must be below live.start_equity")
+    if cfg.live.max_position_usd > cfg.live.start_equity:
+        raise ConfigError("live.max_position_usd must be at most live.start_equity")
 
 
 def scaled(cfg: Config, risk_pct: float) -> Config:
