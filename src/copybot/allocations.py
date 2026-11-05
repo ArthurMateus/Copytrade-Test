@@ -102,6 +102,19 @@ class MarginPositionManager(PositionManager):
         if math.isclose(delta, 0, abs_tol=1e-12):
             return
         px = self.mids.get(p.coin) or m.px or p.entry_px
+        if delta > 0 and px > 0:
+            # A trader's resize may never take their share past the wallet's margin level (owner 2026-11-05: a real-money
+            # call of ~0.03% resized to 0.2% made a 6x copy). Shares already above it (adopted) are not topped up.
+            # (one full level for every trader: a backer enters at half but may grow to a full level.)
+            room = self.st.equity(self.mids) * self.margin_pct / 100 * p.leverage / px
+            target = min(target, max(room, before))
+            delta = target - before
+            if math.isclose(delta, 0, abs_tol=1e-12):   # keep the ratio, so a later trim scales from the real size
+                shares = {a: dict(v) for a, v in p.shares.items()}
+                shares[m.leader]["exposure"] = abs(m.end_pos)
+                shares[m.leader]["k"] = before / abs(m.end_pos) if m.end_pos else 0
+                self.record_shares(p, shares)
+                return "margin_level"
         adding = delta > 0
         kind = ("add" if m.leader == p.leader else "boost") if adding else "reduce"
         order = Order(kind, p.coin, p.side, abs(delta), px, leader=m.leader,

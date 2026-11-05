@@ -104,6 +104,25 @@ def test_owner_resizes_do_not_resize_backers_and_replay_keeps_all_shares(rig):
     conserved(rig.st.positions["ETH"])
 
 
+def test_a_big_trader_resize_never_takes_a_share_past_its_margin_level(rig):
+    """XPL 2026-11-05: a real-money call resized 0.03% -> 0.2% made a copy 6x the wallet's margin level."""
+    move(rig, LEADER, 0, .03)
+    p = rig.st.positions["ETH"]
+    first = p.shares[LEADER]["size"]
+    level = rig.st.equity(rig.mids) * .05 * p.leverage / rig.mids["ETH"]
+    move(rig, LEADER, .03, .2)                 # 6.7x the trader's size
+    assert p.shares[LEADER]["size"] <= level * 1.001
+    assert p.shares[LEADER]["size"] == pytest.approx(first)     # the first copy already is the full level
+    assert p.size * rig.mids["ETH"] / p.leverage <= rig.st.equity(rig.mids) * .05 * 1.001
+    move(rig, LEADER, .2, .4)                  # a further add changes nothing
+    assert p.shares[LEADER]["size"] <= level * 1.001
+    move(rig, OTHER, 0, .02)
+    backer = p.shares[OTHER]["size"]
+    move(rig, OTHER, .02, .5)                  # a backer enters at half a level, may grow to one, not further
+    assert backer < p.shares[OTHER]["size"] <= level * 1.001
+    conserved(p)
+
+
 def test_a_tiny_share_exit_waits_instead_of_closing_other_traders(rig):
     move(rig, LEADER, 0, .4)
     p = rig.st.positions["ETH"]
