@@ -344,6 +344,12 @@ class State:
             p.stop_px = float(ev["stop_px"])
 
     def _ev_follow(self, ev):
+        if ev["leader"] not in self.followed:
+            # a (re)follow starts the trader's drawdown and losing streak afresh (horse, 2026-11-06: one old -22$ loss
+            # dropped him again at his first close after the owner followed him back). Totals and trades stay.
+            st = self.leader_stats.get(ev["leader"])
+            if st is not None:
+                st.peak, st.consec_losses = st.cum, 0
         self.followed[ev["leader"]] = int(ev["ts"])
         self.paused_leaders.pop(ev["leader"], None)
         if ev.get("picked"):

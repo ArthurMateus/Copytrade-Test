@@ -40,6 +40,27 @@ def test_replay_reproduces_live_state(tmp_path):
     assert st2.leader_stats["0xabc"].consec_losses == 1
 
 
+def test_following_a_trader_again_starts_his_drawdown_afresh(tmp_path):
+    """Horse (2026-11-06): the leader pause measures drawdown from the trader's best over his whole history, so one old
+    loss dropped him again at his first close after the owner followed him back. A (re)follow resets it."""
+    lg = Ledger(tmp_path / "l.jsonl")
+    st = lg.replay()
+    _live(lg, st, {"ev": "genesis", "equity0": 300, "btc_px0": 50000})
+    _live(lg, st, {"ev": "follow", "leader": "0xabc", "ts": 1})
+    _live(lg, st, {"ev": "intent", "intent": "i1", "action": "open", "coin": "BTC"})
+    _live(lg, st, {"ev": "open", "intent": "i1", "pos": _pos(size=1.0), "fee": 0.0, "lag_ms": 1})
+    _live(lg, st, {"ev": "close", "coin": "BTC", "pos_id": "p1", "px": 80.0, "fee": 0.0, "reason": "stop"})
+    assert st.leader_stats["0xabc"].drawdown == 20.0 and st.leader_stats["0xabc"].consec_losses == 1
+    _live(lg, st, {"ev": "follow", "leader": "0xabc", "ts": 2})            # already followed: nothing changes
+    assert st.leader_stats["0xabc"].drawdown == 20.0
+    _live(lg, st, {"ev": "unfollow", "leader": "0xabc", "ts": 3})
+    _live(lg, st, {"ev": "follow", "leader": "0xabc", "ts": 4})            # followed back: a fresh start
+    s = st.leader_stats["0xabc"]
+    assert s.drawdown == 0.0 and s.consec_losses == 0 and s.cum == -20.0 and s.trades == 1
+    lg.close()
+    assert Ledger(tmp_path / "l.jsonl").replay().leader_stats["0xabc"].drawdown == 0.0   # a restart agrees
+
+
 def test_open_position_and_stop_survive_restart(tmp_path):
     lg = Ledger(tmp_path / "l.jsonl")
     st = lg.replay()

@@ -1029,6 +1029,33 @@ def test_after_a_restart_only_the_copied_call_moves_our_copy(invo_env, monkeypat
         stop_bot(bot, th)
 
 
+def test_a_copy_whose_call_is_over_is_closed_even_when_the_close_found_no_copy(invo_env, monkeypatch):
+    """Horse's HYPE copy (2026-11-03): his call closed with a win but the close never reached our copy (the id it
+    carried was not the one the copy followed), and the copy lived on until a stop-out. The orphan check closes a copy
+    whose call is not open at Invo any more."""
+    from copybot import runner
+    monkeypatch.setattr(runner, "INVO_ORPHAN_S", 2.0)
+    hl, dc, data, cdir, f, tok = invo_env
+    pid = f.add_user("horse")[0]
+    bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
+    try:
+        dc.say("/invofollow horse")
+        assert wait_for(lambda: "invo:horse" in bot.invo.st.followed)
+        assert wait_for(lambda: bot.invo_watch.known.get("horse") is not None, timeout=10)
+        a = f.open_call(pid, "ETH", long=True, leverage=7, size=0.01, entry=3000.0)
+        assert wait_for(lambda: "ETH" in bot.invo.st.positions, timeout=10)
+        p = bot.invo.st.positions["ETH"]
+        # break the bookkeeping like the real case: the copy follows an id that is not the call that closes
+        bot.invo.rec({"ev": "invo_link", "pos_id": p.pos_id, "call": "ghost-id"})
+        for k in [k for k in bot.invo_calls if k[1] == a]:
+            bot.invo_calls[(k[0], "ghost-id")] = bot.invo_calls.pop(k)
+        f.close_call(pid, a)
+        assert wait_for(lambda: "ETH" not in bot.invo.st.positions, timeout=15)
+        assert bot.invo.st.invo_links[p.pos_id]["closed_by"] == "orphan"
+    finally:
+        stop_bot(bot, th)
+
+
 def test_a_resize_or_a_new_id_while_the_bot_was_off_is_applied_at_the_restart(invo_env, monkeypatch):
     """Owner request 2026-10-13 ("if the trader resizes it, resize it, always"): an add or a trim made while the bot
     was off is mirrored when it starts again, also when Invo re-ided the call meanwhile."""

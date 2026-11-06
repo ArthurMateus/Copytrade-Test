@@ -36,6 +36,7 @@ from copybot.invo import (DELETED as INVO_DELETED, PREFIX as INVO, REPLACED_S as
 # the live wallet's liquidation sits at least 1.25x its stop distance away (values review 2026-11-03: at 1x a 25x coin's
 # isolated short liquidates at 7.84%, inside the 8% stop)
 LIVE_LIQ_BUFFER = 1.25
+INVO_ORPHAN_S = 90.0         # a copy whose call is not open at Invo this long (no re-id pending) is closed
 BY_OWNER = "closed by you"   # the close reason of a copy the owner closed with /close (its card says so)
 HEALTH_NAMES = {"prices": "prices", "invo": "Invo", "live": "the live account check"}
 EMERGENCY_STOP_PCT = 30.0   # "trader's exit" Invo wallets: the farthest stop, only a guard (a normal trade never gets
@@ -122,6 +123,7 @@ class Bot:
         self._invo_call = None                       # the call being opened (read by invo_size)
         self.invo_info: dict[str, str] = {}          # our position id -> what the trader called (for its card)
         self._invo_close_why: str | None = None      # the trader's close reason while it is being mirrored
+        self.invo_orphan_seen: dict[tuple, float] = {}  # (wallet, pos_id, call id) -> when its call was first not open
         self.invo_baseline_wait: dict[str, list] = {}  # trader -> its first read, held until Hyperliquid's coins load
         self.side_broker = side_broker
         self.live: SideWallet | None = None          # the REAL-money wallet (config/live.toml, copybot/live.py)
@@ -693,6 +695,49 @@ class Bot:
                 finally:
                     self._invo_close_why = None
 
+    def invo_orphans(self) -> None:
+        """Safety net (horse's HYPE copy, 2026-11-03: his call closed with a win, the close found no copy under that id
+        and returned silently, the copy lived on and was stopped out for -8%). A copy whose call is no longer among the
+        trader's open calls and is not waiting on a re-id or a re-read, for INVO_ORPHAN_S in a row, is closed: its call
+        is over, whatever the id bookkeeping says. Never touches a trader that has no baseline yet (the baseline does
+        that at a restart) or an unwatched one."""
+        if self.invo_watch is None or self.invo_baseline_wait:
+            return
+        now = time.time()
+        live = set()
+        for w in self.invo_wallets():
+            for p in list(w.st.positions.values()):
+                link = w.st.invo_links.get(p.pos_id)
+                if not link or not p.leader.startswith(INVO) or p.shares.get(p.leader, {}).get("closing"):
+                    continue
+                trader = p.leader[len(INVO):]
+                known = self.invo_watch.known.get(trader)
+                cid = link["call"]
+                if known is None or cid in known or cid in self.invo_watch.missing:
+                    continue
+                key = (w.name, p.pos_id, cid)
+                live.add(key)
+                first = self.invo_orphan_seen.setdefault(key, now)
+                if now - first < INVO_ORPHAN_S:
+                    continue
+                self.invo_orphan_seen.pop(key, None)
+                log.warn("invo_copy_orphaned", wallet=w.name, trader=trader, coin=p.coin, call=cid,
+                         why="its call is not open at Invo and no close reached the copy")
+                self._invo_close_why = "its call is no longer open"
+                try:
+                    w.pm.on_move(Move(p.leader, p.coin, p.side * 1.0, 0.0, int(now * 1000), int(now * 1000), 0, (),
+                                      0.0, 1))
+                    if self.cfg.invo.margin_allocations and w.st.positions.get(p.coin) is p:
+                        self.invo_sync_owner(w, p)
+                    else:
+                        self.invo_closed_by(w, p, cid, "orphan")
+                except Exception:
+                    log.exception("invo_wallet_error", wallet=w.name, kind="invo_orphan")
+                finally:
+                    self._invo_close_why = None
+        for key in set(self.invo_orphan_seen) - live:
+            self.invo_orphan_seen.pop(key, None)
+
     def invo_agree(self, w, leader: str, trader: str, call, coin: str, side: int, fx: float) -> None:
         """A second followed trader opens the coin and side a copy already holds (owner request 2026-10-13, "B"):
         it becomes a backer and the copy gets extra size (`risk.consensus_risk_pct`, scaled like the wallet's other
@@ -950,6 +995,9 @@ class Bot:
         p = w.st.positions.get(held) if held else None
         if self.cfg.invo.margin_allocations:
             if p is None or p.side != side or leader not in p.shares:
+                if primary:
+                    log.warn("invo_close_unmatched", trader=trader, coin=coin, call=call.id, held=held,
+                             why="no copy of this call under that id (the orphan check closes a copy whose call is over)")
                 return
             before = p.size
             self._invo_close_why = call.reason_closed or "closed"
@@ -1062,6 +1110,7 @@ class Bot:
                 if time.time() - last_ui >= 1.0:
                     self.refresh_ui()
                     self.public_tick()
+                    self.invo_orphans()
                     last_ui = time.time()
                 if time.time() - last_beat >= 60:
                     self.heartbeat()
