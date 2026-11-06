@@ -311,6 +311,8 @@ def test_the_bot_copies_an_invo_call_with_real_orders_next_to_its_paper_twin(inv
             dc.say("/liveclose ETH 0000")
             assert wait_for(lambda: any("Usage: /liveclose" in m["text"] for m in dc.sent))
             assert "ETH" in bot.live.st.positions
+            dc.say("/liveresume")                           # the PIN is needed for real money too
+            assert wait_for(lambda: any("Usage: /liveresume" in m["text"] for m in dc.sent))
             dc.say(f"/liveclose eth {PIN}")                 # the live copy only: the paper twin keeps its own
             assert wait_for(lambda: "ETH" not in bot.live.st.positions and "ETH" not in fx.positions, timeout=10)
             assert "ETH" in twin.st.positions
@@ -346,3 +348,129 @@ def test_without_the_keys_live_stays_off_and_says_why(invo_env, monkeypatch):
         assert wait_for(lambda: any("Live trading is off" in m["text"] for m in dc.sent))
     finally:
         stop_bot(bot, th)
+
+
+def test_the_floor_is_not_skipped_when_the_daily_stop_paused_entries_first(tmp_path, fx):
+    d = Desk(tmp_path, fx, floor_usd=299.0)
+    d.w.rec({"ev": "mark", "kind": "day", "key": "2026-11-03", "equity": 400.0})
+    d.desk.check_day()                                      # the daily stop pauses first (300$ is -25%)
+    assert d.w.st.pause_reason == "live_daily_stop:2026-11-03"
+    d.desk.floor_armed = True
+    d.w.st.equity = lambda mids=None: 298.0                 # the wallet falls through the floor while paused
+    d.desk.check_floor()
+    assert d.w.st.pause_reason == "live_floor"              # the floor replaced the daily-stop reason
+    d.w.rec({"ev": "mark", "kind": "day", "key": "2026-11-04", "equity": 298.0})
+    d.desk.check_day()                                      # a new day must not resume entries below the floor
+    assert d.w.st.entries_paused
+
+
+def test_a_new_day_does_not_resume_a_wallet_that_booted_below_its_floor(tmp_path, fx):
+    d = Desk(tmp_path, fx, floor_usd=299.0)
+    d.w.rec({"ev": "pause", "reason": "live_daily_stop:2026-11-03"})
+    d.w.rec({"ev": "mark", "kind": "day", "key": "2026-11-04", "equity": 298.0})
+    d.w.st.equity = lambda mids=None: 298.0                 # (no floor_armed: the bot restarted below it)
+    d.desk.check_day()
+    assert d.w.st.entries_paused and d.w.st.pause_reason == "live_floor"
+
+
+def test_an_http_gateway_error_is_unknown_not_a_refusal(tmp_path, fx, monkeypatch):
+    import io
+    import urllib.error
+    d = Desk(tmp_path, fx)
+
+    def bad_gateway(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 502, "bad gateway", {}, io.BytesIO(b"upstream"))
+    monkeypatch.setattr(live.urllib.request, "urlopen", bad_gateway)
+    with pytest.raises(live.LiveUnknown):
+        d.ex.act({"type": "cancel", "cancels": []})
+
+
+def test_a_filled_order_is_booked_from_its_status_while_the_fills_are_not_listed_yet(tmp_path, fx, monkeypatch):
+    d = Desk(tmp_path, fx)
+    real = d.ex.act
+
+    def lost_answer(action):
+        res = real(action)
+        if action["type"] == "order" and "limit" in action["orders"][0]["t"]:
+            raise live.LiveUnknown("order: timeout")
+        return res
+    read = d.ex._read
+
+    def status_without_fills(body):
+        r = read(body)
+        if body.get("type") == "orderStatus" and r.get("status") == "order":
+            r["order"]["order"].update(origSz=str(fx.positions["ETH"]), sz="0.0", limitPx=str(fx.mids["ETH"]))
+        return r
+    monkeypatch.setattr(d.ex, "act", lost_answer)
+    monkeypatch.setattr(d.ex, "_read", status_without_fills)
+    monkeypatch.setattr(d.ex, "fills_since", lambda ms: [])
+    monkeypatch.setattr(live.time, "sleep", lambda s: None)
+    d.call()
+    assert d.w.st.positions["ETH"].size == pytest.approx(fx.positions["ETH"]) and fx.stops("ETH")
+
+
+def test_an_entry_the_exchange_never_answers_or_lists_pauses_entries_at_once(tmp_path, fx, monkeypatch):
+    d = Desk(tmp_path, fx)
+    real = d.ex.act
+
+    def lost(action):                                       # the order never reaches the exchange
+        if action["type"] == "order" and "limit" in action["orders"][0]["t"]:
+            raise live.LiveUnknown("order: timeout")
+        return real(action)
+    monkeypatch.setattr(d.ex, "act", lost)
+    monkeypatch.setattr(live.time, "sleep", lambda s: None)
+    with pytest.raises(live.LiveUnknown):
+        d.call()
+    assert d.w.st.entries_paused and d.w.st.pause_reason == "live_unknown_order"
+    assert any("no answer" in t for t in d.said)
+
+
+def test_a_partly_filled_exit_is_booked_by_the_reconcile_and_the_rest_keeps_its_stop(tmp_path, fx, monkeypatch):
+    d = Desk(tmp_path, fx)
+    monkeypatch.setattr(live.time, "sleep", lambda s: None)
+    d.call()
+    full = d.w.st.positions["ETH"].size
+    fx.fill_ratio = 0.5                                     # each exit try fills half of what is left
+    with pytest.raises(live.LiveError):
+        d.close()                                           # not all of it: the exit raises, as before
+    d.broker.exit_wait.clear()                              # (the 5 s backoff has passed)
+    d.desk.reconcile()                                      # ... and the account's real state is booked
+    p = d.w.st.positions["ETH"]
+    assert 0 < p.size < full and p.size == pytest.approx(fx.positions["ETH"])
+    assert sum(v["size"] for v in p.shares.values()) == pytest.approx(p.size)    # the traders' shares add up
+    assert fx.stops("ETH")
+    fx.fill_ratio = 1.0
+    d.broker.exit_wait.clear()
+    d.close()
+    assert "ETH" not in d.w.st.positions and "ETH" not in fx.positions
+
+
+def test_the_kill_does_not_wait_out_a_failed_exits_backoff(tmp_path, fx):
+    d = Desk(tmp_path, fx)
+    d.call()
+    d.broker.exit_wait["ETH"] = (live.time.time() + 100, 2)   # an exit failed 2 times: nothing is tried for 100 s
+    msg = d.desk.kill()
+    assert "ETH" not in d.w.st.positions and "ETH" not in fx.positions and "1 position" in msg
+
+
+def test_a_kill_that_could_not_close_says_the_exit_is_pending(tmp_path, fx, monkeypatch):
+    d = Desk(tmp_path, fx)
+    monkeypatch.setattr(live.time, "sleep", lambda s: None)
+    d.call()
+    fx.no_fill = True                                       # no liquidity: the exit fills nothing
+    msg = d.desk.kill()
+    assert "ETH" in d.w.st.positions and "0 position" in msg and "ETH" in msg
+
+
+def test_chat_text_never_carries_a_secret_out(tmp_path):
+    from copybot import chat
+    log.add_secret("SUPERSECRETVALUE123")
+    cfg = config.load("config", env={})
+    ui = chat.ChatUI(cfg, lambda c: None, lambda k, m: None, None)
+    ui.enabled = True
+    log.add_secret("1234")                                  # a short PIN is not redacted in chat (prices carry it)
+    ui.send("error: key SUPERSECRETVALUE123 refused at 61234.5$")
+    out = ui.outbox.get_nowait()
+    assert "SUPERSECRETVALUE123" not in out and "61234.5$" in out
+    ui.set_card("k", "x SUPERSECRETVALUE123")
+    assert "SUPERSECRETVALUE123" not in ui.cards["k"].want

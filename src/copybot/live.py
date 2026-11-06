@@ -146,6 +146,8 @@ class Exchange:
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
                 res = json.loads(r.read())
         except urllib.error.HTTPError as e:
+            if e.code >= 500:                           # a proxy/gateway error: the order may have been placed
+                raise LiveUnknown(f"{action['type']}: HTTP {e.code}") from None
             raise LiveError(f"{action['type']}: HTTP {e.code} {e.read()[:200].decode(errors='replace')}") from None
         except (OSError, ValueError) as e:              # no answer, timeout, not JSON: it may have been done
             raise LiveUnknown(f"{action['type']}: {type(e).__name__}: {e}") from None
@@ -170,16 +172,26 @@ class Exchange:
         statuses = (res.get("data") or {}).get("statuses") or [{}]
         return statuses[0] if isinstance(statuses[0], dict) else {"error": str(statuses[0])}
 
-    def filled_by_cloid(self, cloid: str, since_ms: int) -> tuple[float, float, float]:
+    def filled_by_cloid(self, cloid: str, since_ms: int) -> tuple[float, float, float] | None:
         """(size, average price, fee) an order really filled, found by its cloid (LiveError if the account cannot be
-        read). An order the exchange never saw is (0, 0, 0)."""
+        read). None: the exchange does not (yet) know the order. The size comes from the order's own status
+        (original minus remaining), the price from its fills (its limit price while the fills are not listed yet) and
+        the fee from the fills (0: the caller estimates it)."""
         r = self._read({"type": "orderStatus", "user": self.account, "oid": cloid}) or {}
         if r.get("status") != "order":
-            return 0.0, 0.0, 0.0
-        oid = int(((r.get("order") or {}).get("order") or {}).get("oid", -1))
+            return None
+        o = (r.get("order") or {}).get("order") or {}
+        oid = int(o.get("oid", -1))
         fills = [f for f in self.fills_since(since_ms) if f.oid == oid]
-        sz = sum(f.sz for f in fills)
-        return (sz, sum(f.sz * f.px for f in fills) / sz, sum(f.fee for f in fills)) if sz > 0 else (0.0, 0.0, 0.0)
+        fsz = sum(f.sz for f in fills)
+        sz = fsz
+        if o.get("origSz") is not None and o.get("sz") is not None:
+            sz = max(fsz, float(o["origSz"]) - float(o["sz"]))
+        if sz <= 0:
+            return 0.0, 0.0, 0.0
+        if fsz > 0:
+            return sz, sum(f.sz * f.px for f in fills) / fsz, sum(f.fee for f in fills)
+        return sz, float(o.get("limitPx") or 0), 0.0
 
     def cancel(self, coin: str, oid: int) -> None:
         self.act({"type": "cancel", "cancels": [{"a": self.asset(coin).index, "o": int(oid)}]})
@@ -201,6 +213,7 @@ class LiveBroker:
         self.held = lambda coin: (0.0, 0)    # (our size in the ledger, opened ms) of a coin: set by Desk.attach
         self.stop_oids = lambda coin: set()  # our stop orders' ids on a coin (Desk): what a fired stop filled
         self.exit_wait: dict[str, tuple[float, int]] = {}   # coin -> (no new exit try before, failures in a row)
+        self.on_unknown = lambda coin: None  # an entry the exchange never answered (Desk.attach pauses entries)
 
     def can_exit(self, coin: str) -> bool:
         """A failing exit is retried after 5 s, 30 s, then every 2 min (code review: not every 0.25 s tick, each
@@ -231,15 +244,19 @@ class LiveBroker:
             return sz, px, px * sz * self.fee_pct / 100
         except LiveUnknown as e:
             log.warn("live_order_unanswered", coin=coin, what=what, cloid=cloid, err=str(e)[:120])
-            for wait in (0.5, 1.5):
+            for wait in ((0.5, 1.5, 3.0) if what == "entry" else (0.5, 1.5)):
                 time.sleep(wait)
                 try:
                     got = self.ex.filled_by_cloid(cloid, t0)
                 except LiveError:
                     continue
+                if got is None:                  # not listed yet: it may still be indexed
+                    continue
+                if got[0] > 0 and got[2] <= 0:
+                    got = (got[0], got[1], got[0] * got[1] * self.fee_pct / 100)
                 log.warn("live_order_found", coin=coin, cloid=cloid, sz=got[0], px=got[1])
                 return got
-            raise
+            raise                                # never seen: unknown, the caller pauses and the reconcile guards
 
     @staticmethod
     def _filled(st: dict, coin: str, what: str) -> tuple[float, float]:
@@ -279,8 +296,9 @@ class LiveBroker:
         limit = ref * (1 + (1 if is_buy else -1) * self.cfg.entry_slippage_bps / 1e4)
         try:
             sz, px, fee = self._send(coin, is_buy, size, limit, False, "entry")
-        except LiveUnknown:
-            raise                                # unknown even after looking: the reconcile guards what it finds
+        except LiveUnknown:                      # unknown even after looking: no more entries until the owner looks,
+            self.on_unknown(coin)                # and the reconcile guards what it finds
+            raise
         except LiveError as e:                   # the exchange answered "no": nothing was placed
             raise NoBook(f"{coin}: live entry refused ({str(e)[:120]})") from None
         if sz <= 0:
@@ -324,7 +342,7 @@ class LiveBroker:
             if sz > 0:
                 parts.append((sz, px, fee))
                 left = round(left - sz, a.sz_decimals)
-        if left >= lot / 2 or not parts:
+        if left >= lot / 2 or not parts:         # (a part that did fill is booked by the reconcile from the account)
             raise LiveError(f"{coin}: exit not filled, {left:g} left (the stop order on the exchange still holds it)")
         return self._fill(coin, is_buy, ref or parts[0][1], parts)
 
@@ -384,6 +402,13 @@ class Desk:
         self.broker.held = lambda c: ((w.st.positions[c].size, w.st.positions[c].opened_ms)
                                       if c in w.st.positions else (0.0, 0))
         self.broker.stop_oids = lambda c: self.stop_ids.get(c, set())
+        self.broker.on_unknown = self._unknown_order
+
+    def _unknown_order(self, coin: str) -> None:
+        if not self.w.st.entries_paused:
+            self.w.rec({"ev": "pause", "reason": "live_unknown_order"})
+        self.say(f"⚠️ 💵 <b>LIVE {cardfmt.esc(coin)}: an order got no answer</b> · ⏸️ new live entries paused. The "
+                 "reconcile guards whatever filled; check Hyperliquid, then /liveresume.", "live_unknown", 0)
 
     def boot(self) -> None:
         """Raises LiveError when the account cannot be traded (the caller pauses the live wallet's entries)."""
@@ -427,6 +452,9 @@ class Desk:
             return
         if st.entries_paused and st.pause_reason.startswith(DAILY_STOP):
             if st.pause_reason[len(DAILY_STOP):] != day["key"]:          # a new day
+                if st.equity(self.mids) <= self.cfg.floor_usd:           # (never past the floor: it needs /liveresume)
+                    self.w.rec({"ev": "pause", "reason": "live_floor"})
+                    return
                 self.w.rec({"ev": "resume"})
                 self.say("▶️ 💵 New day: live copies resumed after yesterday's daily stop.", "live_day", 0)
             return
@@ -444,8 +472,8 @@ class Desk:
             self.floor_armed = True
         elif self.floor_armed:
             self.floor_armed = False
-            if not self.w.st.entries_paused:
-                self.w.rec({"ev": "pause", "reason": "live_floor"})
+            if self.w.st.pause_reason != "live_floor":
+                self.w.rec({"ev": "pause", "reason": "live_floor"})   # (replaces a daily-stop reason: no automatic resume)
             log.warn("live_floor", equity=round(eq, 2), floor=self.cfg.floor_usd)
             self.say(f"⚠️ 💵 <b>LIVE wallet at {eq:.2f}$</b>, at or below its {self.cfg.floor_usd:g}$ floor: no new "
                      "live entries. Open trades keep their stops. /liveresume continues.", "live_floor", 0)
@@ -593,9 +621,13 @@ class Desk:
         w.rec({"ev": "pause", "reason": "/livekill"})
         n, errors = 0, []
         for coin in list(w.st.positions):
+            self.broker.exit_wait.pop(coin, None)   # (the owner's command does not wait out a failed exit's backoff)
             try:
                 w.pm.close(coin, "live_kill")
-                n += 1
+                if coin in w.st.positions:
+                    errors.append(f"{coin}: exit pending (not filled yet; its exchange stop still holds it)")
+                else:
+                    n += 1
             except Exception as e:
                 errors.append(f"{coin}: {str(e)[:100]}")
         try:

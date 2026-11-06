@@ -18,9 +18,11 @@ def add_secret(s: str) -> None:
         _SECRETS.append(s)
 
 
-def redact(text: str) -> str:
+def redact(text: str, min_len: int = 0) -> str:
+    """min_len: skip shorter secrets (chat text: a 4-digit PIN would garble prices and ids, and show itself)."""
     for s in _SECRETS:
-        text = text.replace(s, "***")
+        if len(s) >= min_len:
+            text = text.replace(s, "***")
     return _TOKEN_RE.sub("***", text)
 
 

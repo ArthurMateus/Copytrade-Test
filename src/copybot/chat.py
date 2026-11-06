@@ -34,7 +34,7 @@ LIVE_COMMANDS = ("/livestatus", "/livepause", "/liveresume", "/liveclose", "/liv
 COMMANDS = tuple(dict.fromkeys(("/help", "/restart") + tuple(ALIASES) + INVO_COMMANDS + LIVE_COMMANDS))
 # what Discord shows in its slash-command list
 SLASH_COMMANDS = ("/help", "/restart") + tuple(f"/{v}" for v in VERBS) + LIVE_COMMANDS
-PIN_COMMANDS = ("/invoflatten", "/invoreset", "/livekill", "/liveclose")
+PIN_COMMANDS = ("/invoflatten", "/invoreset", "/livekill", "/liveclose", "/liveresume")
 # take a coin (BTC, ETH ...) as their argument: close that one trade (owner request 2026-11-03)
 COIN_COMMANDS = ("/invoclose", "/liveclose")
 # take an Invo username (block / unblock: the username, then the portfolio) as their argument
@@ -62,7 +62,7 @@ HELP = ("🤖 <b>Copybot (paper)</b> · 🧾 Invo calls (copied on Hyperliquid p
         "pause · resume – new copies (exits and stops always run)\n"
         "close &lt;coin&gt; – close that trade now in every paper wallet (e.g. /close BTC)\n"
         "flatten &lt;PIN&gt; – close every trade and pause · reset &lt;PIN&gt; – back to the start, traders kept\n\n"
-        "💵 REAL money (when live trading is on): livestatus · livepause · liveresume · liveclose &lt;coin&gt; "
+        "💵 REAL money (when live trading is on): livestatus · livepause · liveresume &lt;PIN&gt; · liveclose &lt;coin&gt; "
         "&lt;PIN&gt; – close that live trade · livekill &lt;PIN&gt; – close every live position and pause\n\n"
         "Examples: /wallets · /follow nicush · /block nicush Kitchen\n"
         "/restart – restart the bot")
@@ -114,13 +114,13 @@ class ChatUI:
     # ---- API used by the trading loop (non-blocking) ------------------------------------------
     def send(self, text: str) -> None:
         if self.enabled:
-            self.outbox.put(text)
+            self.outbox.put(log.redact(text, 12))       # (an error text can never carry a key or token out)
             self.wake.set()
 
     def send_public(self, text: str) -> None:
         """A message for the public read-only channel (Phase 4), when the platform has one."""
         if self.enabled and getattr(self, "public_channel", ""):
-            self.outbox.put(("public", text))
+            self.outbox.put(("public", log.redact(text, 12)))
             self.wake.set()
 
     def restore_card(self, key: str, msg_id: int) -> None:
@@ -137,7 +137,7 @@ class ChatUI:
             c = self.cards.get(key)
             if c is None or new:
                 c = self.cards[key] = Card(key, None)
-            c.want = text
+            c.want = log.redact(text, 12)
             if buttons is not None:
                 c.buttons = list(buttons)
         self.wake.set()
@@ -148,7 +148,7 @@ class ChatUI:
         with self.lock:
             c = self.cards.get(key) or Card(key, None)
             self.cards[key] = c
-            c.want, c.final, c.buttons = text, True, []      # a final card never keeps its buttons
+            c.want, c.final, c.buttons = log.redact(text, 12), True, []      # a final card never keeps its buttons
         self.wake.set()
 
     def has_card(self, key: str) -> bool:

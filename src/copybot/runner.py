@@ -1273,6 +1273,9 @@ class Bot:
             return self.ui.send("⏸️ 💵 <b>Live copies paused</b>. Live exits and stops keep running. /liveresume "
                                 "continues.")
         if c.name == "/liveresume":
+            if not self.ui.check_pin(c.arg):
+                log.warn("live_bad_pin")
+                return self.ui.send("⛔ Wrong or missing PIN. Usage: /liveresume &lt;PIN&gt;")
             d.resume()
             return self.ui.send("▶️ 💵 <b>Live copies resumed</b>" + (" (the account still does not match the "
                                 "ledger: see /livestatus)" if d.problems else ""))
@@ -1301,9 +1304,12 @@ class Bot:
             if coin is None:
                 continue
             self._invo_close_why = BY_OWNER
+            getattr(w.pm.broker, "exit_wait", {}).pop(coin, None)     # (an owner command does not wait out a backoff)
             try:
                 w.pm.close(coin, "closed_by_owner")
                 n += coin not in w.st.positions
+                if coin in w.st.positions:
+                    errors.append(f"{w.label}: exit pending")
             except Exception as e:                   # (a live exit the exchange refused: retried by /liveclose)
                 log.exception("close_coin_failed", wallet=w.name, coin=coin)
                 errors.append(f"{w.label}: {type(e).__name__}")

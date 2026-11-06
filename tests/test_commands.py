@@ -27,7 +27,7 @@ def test_discord_lists_the_short_names_only():
     assert not any(c.startswith(("/hyper", "/fomo", "/invo")) for c in SLASH_COMMANDS)
     assert not {"/search", "/add", "/picks", "/arena"} & set(COMMANDS)
     assert all(len(c) - 1 <= 32 and c[1:].islower() for c in SLASH_COMMANDS)          # Discord's name rules
-    assert set(PIN_COMMANDS) == {canon("/flatten"), canon("/reset"), "/livekill", "/liveclose"}
+    assert set(PIN_COMMANDS) == {canon("/flatten"), canon("/reset"), "/livekill", "/liveclose", "/liveresume"}
     assert set(WALLET_COMMANDS) == {canon(f"/{v}") for v in ("follow", "unfollow", "block", "unblock")}
 
 
