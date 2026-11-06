@@ -296,7 +296,8 @@ class Bot:
                 for f in fields(twin.cfg.risk):          # the twin's limits, then the live ones on top
                     setattr(x.cfg.risk, f.name, getattr(twin.cfg.risk, f.name))
                 r = x.cfg.risk
-                r.start_equity, r.daily_loss_pct, r.weekly_loss_pct = lc.start_equity, lc.daily_loss_pct, 100.0
+                r.start_equity, r.daily_loss_pct, r.weekly_loss_pct = (lc.start_equity, lc.daily_loss_pct,
+                                                                       lc.weekly_loss_pct)
                 r.max_positions = min(r.max_positions, lc.max_positions)
                 # the twin's wallet-wide budgets are loose on purpose (a comparison wallet); real money gets real ones
                 # (values review 2026-11-03): all open stops together, one coin, and liquidation well past the stop

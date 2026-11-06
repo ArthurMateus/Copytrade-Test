@@ -123,7 +123,8 @@ class Live:
     copy_wallet: str = "invo_risk_5pct_stop8"   # the paper wallet whose sizes, stop and calls it copies
     start_equity: float = 100.0           # the money the bot may use (the ledger's start), USD (owner: 100$)
     daily_loss_pct: float = 15.0          # the day's NET result this % below the day's start -> no new entries
-    floor_usd: float = 50.0               # the wallet at or below this -> no new entries until /liveresume
+    weekly_loss_pct: float = 25.0         # the week's NET result this % below the week's start -> no new entries
+    floor_usd: float = 75.0               # the wallet at or below this -> no new entries until /liveresume (-25%)
     max_position_usd: float = 70.0        # one coin's position never grows above this notional
     max_positions: int = 10
     max_total_risk_pct: float = 30.0      # every open stop hit at once loses at most this % of the wallet
@@ -229,6 +230,7 @@ CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
     ("runtime", "backup_keep"): (1, 365),
     ("live", "start_equity"): (10, 100_000),
     ("live", "daily_loss_pct"): (1, 50),
+    ("live", "weekly_loss_pct"): (1, 100),
     ("live", "floor_usd"): (0, 100_000),
     ("live", "max_position_usd"): (10, 100_000),
     ("live", "max_positions"): (1, 20),
