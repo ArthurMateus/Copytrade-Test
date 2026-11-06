@@ -1,0 +1,20 @@
+# LIVE trading: one wallet copying the paper wallet `copy_wallet` with REAL orders on Hyperliquid (copybot/live.py,
+# docs/PRODUCTION_PLAN.md Phase 1). Off unless enabled = true AND these two are set in the environment:
+#   HL_ACCOUNT_ADDRESS  your Hyperliquid account's address (0x...)
+#   HL_AGENT_KEY        the private key of an API wallet made for it (app.hyperliquid.xyz > More > API): it can trade
+#                       but never withdraw. Never your main wallet's key (refused) and never in a file.
+# Use the Hyperliquid account ONLY for the bot: anything the bot did not open pauses its entries.
+# Allowed ranges in brackets.
+enabled = false
+network = "testnet"       # "testnet" (fake money: run it here first) or "mainnet" (REAL money)
+copy_wallet = "invo_risk_5pct_stop8"   # 5% margin · 8% stop (owner choice 2026-11-03)
+start_equity = 100.0      # the money the bot may use, USD (owner 2026-11-03: start with 100$)       [10, 100000]
+daily_loss_pct = 15.0     # the day's NET result this % below the day's start -> no new entries     [1, 50]
+                          # (owner 2026-11-03: +30% then back to +15% is still a +15% day: no stop)
+floor_usd = 50.0          # the wallet at or below this -> no new entries until /liveresume (-50%)  [0, 100000]
+max_position_usd = 70.0   # one coin's position never grows above this notional (70% of the wallet) [10, 100000]
+max_positions = 10        #                                                                          [1, 20]
+max_total_risk_pct = 30.0 # every open trade hitting its stop at once loses at most this % (~7 trades) [5, 60]
+entry_slippage_bps = 50.0 # an entry fills at most 0.5% from the mid, else it is skipped            [5, 300]
+exit_slippage_bps = 100.0 # exits try 1%, then 3%, then 8% from the mid until filled                [20, 1000]
+reconcile_s = 15.0        # compare the ledger with the real account (positions, stop orders)       [5, 300]

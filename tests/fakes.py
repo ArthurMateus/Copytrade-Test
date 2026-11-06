@@ -304,6 +304,7 @@ class FakeDiscord:
         self.fail_429 = 0
         self.rl_headers: dict = {}              # rate-limit headers added to every REST answer
         self.next_id = 10_000
+        self.public: list[dict] = []          # messages posted to any other channel (the public one)
         self.seq = 0
         self.lock = threading.Lock()
         self._conns: list = []
@@ -385,6 +386,11 @@ class FakeDiscord:
                 self.sent.append({**body["embeds"][0], "id": mid, "message_id": mid, "buttons": self.buttons[mid],
                                   "text": md_to_card(body["embeds"][0]["description"])})
                 return 200, {"id": str(mid), "channel_id": self.channel}
+            if verb == "POST" and p.startswith("/channels/") and p.endswith("/messages"):   # another channel
+                self.public.append({"channel": p.split("/")[2],
+                                    "text": md_to_card(body["embeds"][0]["description"])})
+                self.next_id += 1
+                return 200, {"id": str(self.next_id), "channel_id": p.split("/")[2]}
             if verb == "PATCH" and p.startswith(f"/channels/{self.channel}/messages/"):
                 mid = int(p.rsplit("/", 1)[1])
                 if mid not in self.messages:
@@ -434,11 +440,15 @@ class FakeDiscord:
     def say(self, text: str, user=None) -> None:
         """The owner types a slash command, e.g. "/hyperadd 0xabc" or "/reset 1234": the argument goes in the
         option the bot registers for it ("pin" or "wallet"). Waits for the bot's gateway connection first."""
-        from copybot.chat import PIN_COMMANDS, WALLET_COMMANDS, canon
+        from copybot.chat import COIN_COMMANDS, PIN_COMMANDS, WALLET_COMMANDS, canon
         end = time.time() + 15
         while not self.connected() and time.time() < end:
             time.sleep(0.02)
         name, _, arg = text.strip().partition(" ")
+        if canon(name) in COIN_COMMANDS:                 # "/liveclose BTC 1234": the coin, then the PIN
+            coin, _, pin = arg.strip().partition(" ")
+            opts = {k: v for k, v in (("coin", coin), ("pin", pin.strip())) if v}
+            return self.interact(name.lstrip("/"), opts or None, user=user)
         opt = "pin" if canon(name) in PIN_COMMANDS else ("wallet" if canon(name) in WALLET_COMMANDS else None)
         self.interact(name.lstrip("/"), {opt: arg.strip()} if opt and arg.strip() else None, user=user)
 

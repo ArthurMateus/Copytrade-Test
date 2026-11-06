@@ -195,6 +195,35 @@ def closed_card(t: dict) -> str:
     ])
 
 
+# ---- the public channel (Phase 4): percentages only, never dollar amounts ------------------------------
+def public_open(p, show_traders: bool = False) -> str:
+    who = f" · @{esc(short(p.leader))}" if show_traders else ""
+    return (f"🆕 <b>{esc(p.sym or p.coin)}</b> {side_tag(p.side)} · {p.leverage:g}x · entry {fpx(p.entry_px)}"
+            f" · stop {fpx(p.stop_px)}{who}")
+
+
+def public_close(t: dict, wallet_before: float, show_traders: bool = False) -> str:
+    """The trade's result on its own size and on the whole wallet."""
+    on_trade = t["pnl"] / (t["notional"] or 1) * 100
+    on_wallet = t["pnl"] / wallet_before * 100 if wallet_before > 0 else 0.0
+    who = ""
+    if show_traders:
+        names = t.get("allocation_traders") if t.get("allocated") else [t["leader"]]
+        who = " · " + ", ".join(f"@{esc(short(a))}" for a in names or [])
+    return (f"{'✅ WIN' if t['pnl'] >= 0 else '❌ LOSS'} · <b>{esc(t.get('sym') or t['coin'])}</b> "
+            f"{side_tag(t['side'])} · {fpct(on_trade)} on the trade ({fpct(on_wallet)} of the wallet) · held "
+            f"{dur(t['closed_ms'] - t['opened_ms'])} · {esc(REASONS.get(t['reason'], t['reason']))}{who}")
+
+
+def public_daily(st: State, mids: dict, title: str, day_start: float | None) -> str:
+    eq = st.equity(mids)
+    won = sum(1 for t in st.closed if t["pnl"] >= 0)
+    n = len(st.closed)
+    today = f"{fpct((eq / day_start - 1) * 100)} today · " if day_start else ""
+    return (f"📊 <b>{esc(title)}</b> · {today}{fpct((eq / st.equity0 - 1) * 100 if st.equity0 else 0)} since the "
+            f"start\n{n} trades closed · {won / n * 100 if n else 0:.0f}% won · {len(st.positions)} open now")
+
+
 # ---- wallet-level cards -------------------------------------------------------------------------
 def pctl(xs: list[float], q: float) -> float | None:
     if not xs:

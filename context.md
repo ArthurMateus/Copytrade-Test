@@ -1,9 +1,26 @@
-# context.md: where the project stands (2026-10-26), for a new chat or another account
+# context.md: where the project stands (2026-11-03), for a new chat or another account
 
 Start here, then read CLAUDE.md (design, decisions, hard rules; the source of truth) and README.md (how to run and use
-it). Repo: https://github.com/ArthurMateus/Copytrade-Test. Everything is **PAPER ONLY**: no keys, no signing, no order
-endpoints (`tests/test_safety.py` enforces it). Tests: `PYTHONPATH=src python -m pytest` on the Claude PC (~180 tests,
-~4 min).
+it). Repo: https://github.com/ArthurMateus/Copytrade-Test. The 18 Invo wallets are paper; one optional LIVE wallet
+(`live.py`, off by default) trades real money on Hyperliquid. Signing and keys exist only in `live.py`
+(`tests/test_safety.py` enforces it). Tests: `PYTHONPATH=src python -m pytest` on the Claude PC (~210 tests, ~5 min;
+the venv needs `hyperliquid-python-sdk`).
+
+## 2026-11-03: going live (everything is on `invo-only` again: the bot PC only runs `git pull` there)
+- Phase 4 (public read-only Discord channel) built on `phase4/public-discord`; merge it into `invo-only`.
+- Owner plan: `docs/PRODUCTION_PLAN.md` (5 phases: live engine on testnet then mainnet, a server, a web dashboard,
+  a public read-only Discord, later a paid product only after a lawyer). Owner decisions: Hyperliquid (checked for
+  Brazil), 100$ live (first 300$), 5% margin · 8% stop (`invo_risk_5pct_stop8`), daily stop -15% NET from the day's start, floor
+  50$, one coin <= 70$, home PC for now, traders from the daily Claude report (changed by hand).
+- Built Phase 1 (CLAUDE.md "The live wallet"). Not yet run against the real testnet: the owner has created the
+  Hyperliquid account (public address given in chat, kept out of the public repo) but has not deposited or made the
+  API wallet yet. Next: owner creates the API wallet, `setx` the two variables, `enabled = true`, testnet for a few
+  days, then mainnet.
+- The repo is PUBLIC: never commit the owner's addresses or anything about their accounts.
+- Phase 2 started (branch `phase2/ops` from `live/phase1`): health alerts + healthchecks.io check-in, Windows
+  auto-start task, daily backups of data/, server files in `deploy/` (CLAUDE.md "Running unattended"). Phase 3 (the
+  read-only web dashboard) is being built in parallel. Owner still to do: healthchecks.io account + `setx
+  HEALTHCHECK_URL`, install the task, `powercfg /change standby-timeout-ac 0`.
 
 ## 2026-10-26: only the Invo book is left (branch `invo-only`)
 - Owner request: "delete arena wallets, also everything related to hyperwallet and fomowallet, and take it off the code,

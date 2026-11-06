@@ -8,3 +8,4 @@ logs/
 secrets/
 *.cookie
 reports/
+backups/

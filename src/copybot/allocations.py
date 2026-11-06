@@ -116,6 +116,8 @@ class MarginPositionManager(PositionManager):
                 self.record_shares(p, shares)
                 return "margin_level"
         adding = delta > 0
+        if not adding and not self.broker.can_exit(p.coin):
+            return "exit_waiting"
         kind = ("add" if m.leader == p.leader else "boost") if adding else "reduce"
         order = Order(kind, p.coin, p.side, abs(delta), px, leader=m.leader,
                       fill_time_ms=m.time_ms if adding else 0, keep_remainder=not adding)
@@ -128,26 +130,27 @@ class MarginPositionManager(PositionManager):
             iid = uuid.uuid4().hex[:12]
             self._rec(dict(ev="intent", intent=iid, action=kind, coin=p.coin))
             try:
-                f = self.broker.market(p.coin, p.side > 0 if adding else p.side < 0, d.size,
-                                       **({} if adding else dict(exit=True, mid=px)))
+                f = (self.broker.market(p.coin, p.side > 0, d.size, leverage=p.leverage) if adding
+                     else self._exit_fill(iid, p.coin, p.side < 0, d.size, px))
             except NoBook as exc:
                 self._rec(dict(ev="intent_abort", intent=iid))
                 reason = self._skip("no_book", coin=p.coin, leader=m.leader, err=str(exc))
             else:
                 shares = {a: dict(v) for a, v in p.shares.items()}
                 s = shares[m.leader]
+                sz = f.size                      # a live fill can be partial (copybot/live.py)
                 if adding:
-                    s["entry_px"] = (before * s["entry_px"] + d.size * f.px) / (before + d.size)
-                    s["notional"] += d.size * f.px
+                    s["entry_px"] = (before * s["entry_px"] + sz * f.px) / (before + sz)
+                    s["notional"] += sz * f.px
                     s["realized"] -= f.fee
                 else:
-                    s["realized"] += p.side * (f.px - s["entry_px"]) * d.size - f.fee
+                    s["realized"] += p.side * (f.px - s["entry_px"]) * sz - f.fee
                 s["fees"] += f.fee
-                s["size"] = max(0, before + (d.size if adding else -d.size))
+                s["size"] = max(0, before + (sz if adding else -sz))
                 s["exposure"] = abs(m.end_pos)
                 s["k"] = s["size"] / abs(m.end_pos) if m.end_pos else 0
                 event = dict(ev="add" if adding else "reduce", intent=iid, coin=p.coin,
-                             pos_id=p.pos_id, sz=d.size, px=f.px, fee=f.fee,
+                             pos_id=p.pos_id, sz=sz, px=f.px, fee=f.fee,
                              lag_ms=self._lag(self.health(), m), shares=shares,
                              reason="trader_share_resize")
                 self._rec(event)
@@ -182,6 +185,8 @@ class MarginPositionManager(PositionManager):
                            share_owner=owner, share_closes=trades, ts=ts))
             return
         px = self.mids.get(p.coin) or p.entry_px
+        if not self.broker.can_exit(p.coin):
+            return "exit_waiting"
         d = self.gate.check(Order("reduce", p.coin, p.side, size, px, keep_remainder=True),
                             self.st, self.health(), self.mids, None)
         if not d:
@@ -194,12 +199,12 @@ class MarginPositionManager(PositionManager):
             return d.reason
         iid = uuid.uuid4().hex[:12]
         self._rec(dict(ev="intent", intent=iid, action="reduce", coin=p.coin))
-        f = self.broker.market(p.coin, p.side < 0, d.size, exit=True, mid=px)
+        f = self._exit_fill(iid, p.coin, p.side < 0, d.size, px)
         ts = now_ms()
         trades = [State.allocation_trade(p, a, p.shares[a], f.px,
                                          f.fee * p.shares[a]["size"] / size, ts, "trader_share_close")
                   for a in closing if p.shares[a].get("notional", 0) > 0]
-        self._rec(dict(ev="reduce", intent=iid, coin=p.coin, pos_id=p.pos_id, sz=d.size,
+        self._rec(dict(ev="reduce", intent=iid, coin=p.coin, pos_id=p.pos_id, sz=f.size,
                        px=f.px, fee=f.fee, reason="trader_share_close", shares=remaining,
                        share_owner=owner, lag_ms=self._lag(self.health(), move), share_closes=trades, ts=ts))
         self.gate.record_order()
@@ -216,7 +221,16 @@ class MarginPositionManager(PositionManager):
                 self._check_leader(leader)
 
     def check_stops(self):
-        super().check_stops()
+        first = None
+        try:
+            super().check_stops()
+        except Exception as e:
+            first = e
         for p in list(self.st.positions.values()):
-            if p.shares:
-                self.flush_closing(p)
+            try:                      # (one coin's failing live exit never skips the others)
+                if p.shares:
+                    self.flush_closing(p)
+            except Exception as e:
+                first = first or e
+        if first is not None:
+            raise first

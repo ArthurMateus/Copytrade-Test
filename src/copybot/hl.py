@@ -103,14 +103,15 @@ class Asset:
     funding: float     # hourly rate
     mark: float
     delisted: bool
+    index: int = -1    # position in the universe = the asset id orders use (copybot/live.py)
 
 
 def parse_meta(obj: list) -> dict[str, Asset]:
     meta, ctxs = obj
     out = {}
-    for u, c in zip(meta["universe"], ctxs):
+    for i, (u, c) in enumerate(zip(meta["universe"], ctxs)):
         out[u["name"]] = Asset(u["name"], int(u["szDecimals"]), float(u["maxLeverage"]),
-                               float(c.get("funding") or 0), float(c.get("markPx") or 0), bool(u.get("isDelisted")))
+                               float(c.get("funding") or 0), float(c.get("markPx") or 0), bool(u.get("isDelisted")), i)
     return out
 
 

@@ -57,6 +57,11 @@ class Discord:
     edit_min_interval_s: float = 5.0      # per message
     min_send_interval_s: float = 1.1      # all API writes to the channel, globally
     utc_offset_hours: float = 0.0         # times on every card are shown in this time zone (Brazil: -3)
+    # the PUBLIC read-only channel (docs/PRODUCTION_PLAN.md Phase 4; DISCORD_PUBLIC_CHANNEL_ID, off when unset): one
+    # wallet's new trades, closed trades and a daily summary, in % only (no dollar amounts)
+    public_wallet: str = "invo_risk_5pct_stop8"   # which wallet is shown ("live" for the real-money one)
+    public_daily_hour: int = 21           # the daily summary, at this local hour
+    public_show_traders: bool = False     # name the Invo traders behind each trade
 
 
 @dataclass
@@ -109,6 +114,26 @@ class Invo:
 
 
 @dataclass
+class Live:
+    """REAL-money copies on Hyperliquid (owner request 2026-11-03, docs/PRODUCTION_PLAN.md Phase 1; copybot/live.py).
+    One wallet copying exactly what the paper wallet `copy_wallet` copies. Needs HL_ACCOUNT_ADDRESS and HL_AGENT_KEY
+    (an API / agent wallet: it can trade but not withdraw) in the environment, else it stays off."""
+    enabled: bool = False
+    network: str = "testnet"              # "testnet" (fake money) or "mainnet" (real money)
+    copy_wallet: str = "invo_risk_5pct_stop8"   # the paper wallet whose sizes, stop and calls it copies
+    start_equity: float = 100.0           # the money the bot may use (the ledger's start), USD (owner: 100$)
+    daily_loss_pct: float = 15.0          # the day's NET result this % below the day's start -> no new entries
+    floor_usd: float = 50.0               # the wallet at or below this -> no new entries until /liveresume
+    max_position_usd: float = 70.0        # one coin's position never grows above this notional
+    max_positions: int = 10
+    max_total_risk_pct: float = 30.0      # every open stop hit at once loses at most this % of the wallet
+    entry_slippage_bps: float = 50.0      # an entry never fills worse than this from the book's mid (else skipped)
+    exit_slippage_bps: float = 100.0      # exits try this, then 3x and 8x it, until filled
+    reconcile_s: float = 15.0             # compare with the real account (positions, stop orders) this often
+    api_base: str = ""                    # "" = the network's own address (tests point it at a fake exchange)
+
+
+@dataclass
 class Runtime:
     info_url: str = "https://api.hyperliquid.xyz/info"
     ws_url: str = "wss://api.hyperliquid.xyz/ws"
@@ -121,6 +146,13 @@ class Runtime:
     reconcile_s: float = 60.0
     clock_refresh_s: float = 60.0
     ws_alert_after_s: float = 60.0        # alert only when the websocket stays down this long (it reconnects in seconds)
+    # health (docs/PRODUCTION_PLAN.md Phase 2, owner request 2026-11-03): a Discord alert when one of these is late
+    stale_prices_alert_s: float = 60.0    # prices older than this
+    invo_silent_alert_s: float = 300.0    # no Invo round answered for this long (while traders are followed)
+    # daily copy of data/ (every ledger) as a zip in this folder, newest `backup_keep` kept; "" = off. Point it at a
+    # OneDrive / Google Drive folder for a copy that survives the PC
+    backup_dir: str = "backups"
+    backup_keep: int = 14
 
 
 @dataclass
@@ -130,15 +162,20 @@ class Config:
     discord: Discord = field(default_factory=Discord)
     runtime: Runtime = field(default_factory=Runtime)
     invo: Invo = field(default_factory=Invo)
+    live: Live = field(default_factory=Live)
     # secrets (env only, never logged)
     pin: str = field(default="", repr=False)
     dc_token: str = field(default="", repr=False)
     dc_channel_id: str = field(default="", repr=False)
     dc_owner_id: str = field(default="", repr=False)
     invo_token_file: str = field(default="", repr=False)     # INVO_TOKEN_FILE: the bot's Invo login (optional)
+    # HEALTHCHECK_URL: a check-in address (e.g. healthchecks.io) pinged every minute; when the pings stop (PC off, no
+    # internet, bot dead) that service warns the owner. Optional
+    healthcheck_url: str = field(default="", repr=False)
+    dc_public_channel_id: str = field(default="", repr=False)   # DISCORD_PUBLIC_CHANNEL_ID (Phase 4), optional
 
 
-SECTIONS = ("risk", "broker", "discord", "runtime", "invo")
+SECTIONS = ("risk", "broker", "discord", "runtime", "invo", "live")
 
 # (section, key) -> (min, max). The documented hard ceilings; a config outside them refuses to start.
 CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
@@ -169,6 +206,7 @@ CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
     ("broker", "extra_slippage_bps"): (0, 100),
     ("broker", "no_book_slippage_bps"): (5, 500),
     ("discord", "utc_offset_hours"): (-12, 14),
+    ("discord", "public_daily_hour"): (0, 23),
     ("discord", "edit_min_interval_s"): (0.05, 600),
     ("discord", "min_send_interval_s"): (0.0, 60),
     ("runtime", "trading_timeout_s"): (0.1, 2.0),
@@ -186,6 +224,18 @@ CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
     ("invo", "pause_dd_pct"): (0.5, 50.0),
     ("invo", "max_traders"): (0, 20),
     ("runtime", "ws_alert_after_s"): (1, 3600),
+    ("runtime", "stale_prices_alert_s"): (10, 3600),
+    ("runtime", "invo_silent_alert_s"): (30, 7200),
+    ("runtime", "backup_keep"): (1, 365),
+    ("live", "start_equity"): (10, 100_000),
+    ("live", "daily_loss_pct"): (1, 50),
+    ("live", "floor_usd"): (0, 100_000),
+    ("live", "max_position_usd"): (10, 100_000),
+    ("live", "max_positions"): (1, 20),
+    ("live", "max_total_risk_pct"): (5, 60),
+    ("live", "entry_slippage_bps"): (5, 300),
+    ("live", "exit_slippage_bps"): (20, 1000),
+    ("live", "reconcile_s"): (5, 300),
 }
 
 
@@ -218,6 +268,8 @@ def load(config_dir: str | os.PathLike, env: dict | None = None) -> Config:
     cfg.dc_channel_id = env.get("DISCORD_CHANNEL_ID", "")
     cfg.dc_owner_id = env.get("DISCORD_OWNER_ID", "")
     cfg.invo_token_file = env.get("INVO_TOKEN_FILE", "").strip()
+    cfg.healthcheck_url = env.get("HEALTHCHECK_URL", "").strip()
+    cfg.dc_public_channel_id = env.get("DISCORD_PUBLIC_CHANNEL_ID", "").strip()
     return cfg
 
 
@@ -241,6 +293,12 @@ def validate(cfg: Config) -> None:
         raise ConfigError(f"invo.main_stop_pct: one of invo.stops_pct ({', '.join(f'{v:g}' for v in st)})")
     if not all(isinstance(k, str) and isinstance(v, str) and v for k, v in cfg.invo.aliases.items()):
         raise ConfigError('invo.aliases: Invo ticker = "Hyperliquid coin", e.g. { MATIC = "POL" }')
+    if cfg.live.network not in ("testnet", "mainnet"):
+        raise ConfigError('live.network: "testnet" or "mainnet"')
+    if cfg.live.floor_usd >= cfg.live.start_equity:
+        raise ConfigError("live.floor_usd must be below live.start_equity")
+    if cfg.live.max_position_usd > cfg.live.start_equity:
+        raise ConfigError("live.max_position_usd must be at most live.start_equity")
 
 
 def scaled(cfg: Config, risk_pct: float) -> Config:
@@ -263,6 +321,7 @@ def scaled(cfg: Config, risk_pct: float) -> Config:
 def public_dict(cfg: Config) -> dict:
     """Config without secrets, safe to log."""
     d = asdict(cfg)
-    for k in ("pin", "dc_token", "dc_channel_id", "dc_owner_id", "invo_token_file"):
+    for k in ("pin", "dc_token", "dc_channel_id", "dc_owner_id", "invo_token_file", "healthcheck_url",
+              "dc_public_channel_id"):
         d.pop(k)
     return d

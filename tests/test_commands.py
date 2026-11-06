@@ -3,12 +3,12 @@ long/short breakdown of /progress."""
 from dataclasses import asdict
 
 from copybot import cardfmt
-from copybot.chat import (ALIASES, COMMANDS, INVO_COMMANDS, PIN_COMMANDS, SLASH_COMMANDS, VERBS, WALLET_COMMANDS,
-                          canon, short_names)
+from copybot.chat import (ALIASES, COMMANDS, INVO_COMMANDS, LIVE_COMMANDS, PIN_COMMANDS, SLASH_COMMANDS, VERBS,
+                          WALLET_COMMANDS, canon, short_names)
 from copybot.ledger import Position, State, now_ms
 
 # the canonical names the bot handles (Bot.command)
-HANDLED = set(INVO_COMMANDS) | {"/restart", "/help"}
+HANDLED = set(INVO_COMMANDS) | set(LIVE_COMMANDS) | {"/restart", "/help"}
 
 
 # ---- names ------------------------------------------------------------------------------------------------------
@@ -23,11 +23,11 @@ def test_every_command_name_resolves_to_something_the_bot_handles():
 
 def test_discord_lists_the_short_names_only():
     """Owner request 2026-10-26: only Invo, so no book prefix (and no Hyperliquid, FOMO, search or arena commands)."""
-    assert SLASH_COMMANDS == ("/help", "/restart") + tuple(f"/{v}" for v in VERBS)
+    assert SLASH_COMMANDS == ("/help", "/restart") + tuple(f"/{v}" for v in VERBS) + LIVE_COMMANDS   # + live (11-03)
     assert not any(c.startswith(("/hyper", "/fomo", "/invo")) for c in SLASH_COMMANDS)
     assert not {"/search", "/add", "/picks", "/arena"} & set(COMMANDS)
     assert all(len(c) - 1 <= 32 and c[1:].islower() for c in SLASH_COMMANDS)          # Discord's name rules
-    assert set(PIN_COMMANDS) == {canon("/flatten"), canon("/reset")}
+    assert set(PIN_COMMANDS) == {canon("/flatten"), canon("/reset"), "/livekill", "/liveclose"}
     assert set(WALLET_COMMANDS) == {canon(f"/{v}") for v in ("follow", "unfollow", "block", "unblock")}
 
 

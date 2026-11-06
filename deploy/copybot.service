@@ -1,0 +1,20 @@
+# systemd unit for a Linux server (docs/PRODUCTION_PLAN.md Phase 2; installed by deploy/setup_server.sh).
+# The secrets live in /etc/copybot.env (readable by root only), never in the repo.
+[Unit]
+Description=Copybot (Invo copies, paper + live)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=copybot
+WorkingDirectory=/opt/copybot
+EnvironmentFile=/etc/copybot.env
+ExecStart=/home/copybot/.local/bin/uv run copybot
+# /restart in Discord stops the bot: systemd starts it again (like the PowerShell loop on Windows)
+Restart=always
+RestartSec=10
+# a bot killed at any moment is safe (append-only ledgers); give it a few seconds to flush
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

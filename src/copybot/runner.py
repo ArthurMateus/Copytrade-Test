@@ -21,13 +21,23 @@ import sys
 import threading
 import time
 import traceback
+import urllib.request
+import zipfile
 from pathlib import Path
 
+from dataclasses import fields
+
 from copybot import config, hl, log, cardfmt
+from copybot import live as livemod
 from copybot.broker import PaperBroker
 from copybot.invo import (DELETED as INVO_DELETED, PREFIX as INVO, REPLACED_S as INVO_REPLACED_S,
                           RESIZE_MIN as INVO_RESIZE_MIN, InvoClient, Watcher as InvoWatcher)
 
+# the live wallet's liquidation sits at least 1.25x its stop distance away (values review 2026-11-03: at 1x a 25x coin's
+# isolated short liquidates at 7.84%, inside the 8% stop)
+LIVE_LIQ_BUFFER = 1.25
+BY_OWNER = "closed by you"   # the close reason of a copy the owner closed with /close (its card says so)
+HEALTH_NAMES = {"prices": "prices", "invo": "Invo", "live": "the live account check"}
 EMERGENCY_STOP_PCT = 30.0   # "trader's exit" Invo wallets: the farthest stop, only a guard (a normal trade never gets
                             # there), lowered for big copies to just before their liquidation (invo_emergency_stop)
 
@@ -114,9 +124,14 @@ class Bot:
         self._invo_close_why: str | None = None      # the trader's close reason while it is being mirrored
         self.invo_baseline_wait: dict[str, list] = {}  # trader -> its first read, held until Hyperliquid's coins load
         self.side_broker = side_broker
+        self.live: SideWallet | None = None          # the REAL-money wallet (config/live.toml, copybot/live.py)
+        self.desk: livemod.Desk | None = None
+        self.live_off = "off in config/live.toml"   # why there is no live wallet (shown by /livestatus)
         if cfg.invo.enabled and cfg.invo_token_file:
             self.invo, self.invo_extra = self.invo_set(dict(notify=self.on_invo_notify, pause_leaders=True))
             self.sides += [self.invo, *self.invo_extra]
+            if cfg.live.enabled:
+                self.live_setup()
             # watched: the followed traders AND the unfollowed ones we still hold a copy of (their exits are copied);
             # rebuilt on the trading thread (invo_refresh_watched), read by the watcher
             self.invo_watched: frozenset[str] = frozenset()
@@ -147,6 +162,9 @@ class Bot:
         self.live_cards: set[str] = set()
         self.ws_down_since = 0.0     # websocket down since (0 = up); alerted only if it stays down
         self.ws_alerted = False
+        self.started = time.time()
+        self.pub_seen: tuple[set, int] | None = None   # the public wallet's open pos_ids and closed count, last seen
+        self.health_problems: dict[str, str] = {}   # what the watchdog found wrong (alerted once, then "back")
 
     def invo_set(self, primary_kw: dict) -> tuple:
         """Every Invo size x every stop (owner request 2026-10-12): the trader-size wallet and the 1-20% risk wallets,
@@ -250,6 +268,61 @@ class Bot:
                 r.daily_loss_pct = r.weekly_loss_pct = 100.0
         return first, others
 
+    def live_setup(self) -> None:
+        """The live wallet (owner request 2026-11-03, docs/PRODUCTION_PLAN.md Phase 1): a copy of the paper wallet
+        `live.copy_wallet` (same sizes, stop, calls and limits) on the real exchange, with its own start, daily stop,
+        floor and position cap. Its ledger is data/wallets/live/ (never archived by /invoreset)."""
+        cfg, lc = self.cfg, self.cfg.live
+        twin = next((x for x in self.invo_wallets() if x.name == lc.copy_wallet), None)
+        creds = livemod.credentials()
+        if twin is None:
+            self.live_off = f"live.copy_wallet {lc.copy_wallet!r} is not one of the Invo wallets"
+        elif isinstance(creds, str):
+            self.live_off = creds
+        else:
+            try:
+                ex = livemod.Exchange(lc.network, *creds, base=lc.api_base or None)
+            except (livemod.LiveError, ValueError, ImportError) as e:
+                self.live_off = f"{type(e).__name__}: {e}"
+            else:
+                broker = livemod.LiveBroker(ex, lc, cfg.broker.taker_fee_pct)
+                desk = livemod.Desk(ex, lc, broker, self.live_say, self.mids)
+                allocations = cfg.invo.margin_allocations
+                x = SideWallet(cfg, twin.risk_pct, self.data, broker, self.health, desk.mids, desk.assets,
+                               name="live", label=f"LIVE · {twin.label}", sizer=twin.pm.sizer, cap=twin.pm.cap,
+                               margin_pct=twin.pm.margin_pct if allocations else None, notify=desk.on_notify)
+                for f in fields(twin.cfg.risk):          # the twin's limits, then the live ones on top
+                    setattr(x.cfg.risk, f.name, getattr(twin.cfg.risk, f.name))
+                r = x.cfg.risk
+                r.start_equity, r.daily_loss_pct, r.weekly_loss_pct = lc.start_equity, lc.daily_loss_pct, 100.0
+                r.max_positions = min(r.max_positions, lc.max_positions)
+                # the twin's wallet-wide budgets are loose on purpose (a comparison wallet); real money gets real ones
+                # (values review 2026-11-03): all open stops together, one coin, and liquidation well past the stop
+                r.max_total_risk_pct = lc.max_total_risk_pct
+                r.max_symbol_risk_pct = min(r.max_symbol_risk_pct, lc.max_total_risk_pct / 3)
+                r.liq_buffer_mult = max(r.liq_buffer_mult, LIVE_LIQ_BUFFER)
+                x.gate.follow_leverage, x.gate.call_leverage = twin.gate.follow_leverage, twin.gate.call_leverage
+                x.pm.handover = twin.pm.handover
+                x.base_name = getattr(twin, "base_name", twin.name)   # copies only the calls the twin's deciding
+                x.size_label, x.stop_label = twin.size_label, twin.stop_label   # wallet copied
+                if allocations and x.st.margin_policy.get("margin_pct") != twin.pm.margin_pct:
+                    x.rec(dict(ev="margin_policy", policy=dict(version=1, margin_pct=twin.pm.margin_pct,
+                                                               agreement_fraction=.5)))
+                desk.attach(x, twin)
+                self.live, self.desk = x, desk
+                self.sides.append(x)
+                log.info("live_on", network=lc.network, copies=twin.name, account=creds[0], agent=ex.agent)
+                return
+        log.error("live_off", why=self.live_off)
+
+    def live_say(self, text: str, key: str, every_s: float = 0) -> None:
+        """A live-wallet message (HTML, already escaped), at most once per every_s for its key (0 = always)."""
+        if every_s and time.time() - self.last_alert.get(key, 0) < every_s:
+            return
+        self.last_alert[key] = time.time()
+        log.warn("live_alert", key=key)
+        self.ui.send(text)
+
     # ---- health ------------------------------------------------------------------------------------
     def health(self) -> Health:
         now = time.time()
@@ -296,7 +369,7 @@ class Bot:
     # ---- startup -----------------------------------------------------------------------------------
     def boot(self) -> None:
         cfg = self.cfg
-        log.info("boot", paper=True, cfg=str(config.public_dict(cfg)).replace(" ", ""))
+        log.info("boot", paper=self.live is None, cfg=str(config.public_dict(cfg)).replace(" ", ""))
         if not self.st.genesis_ms:
             btc = 0.0
             try:
@@ -310,6 +383,15 @@ class Bot:
         except Exception as e:
             log.warn("boot_meta_failed", err=str(e))
         self.on_sides("boot", self.boot_side)
+        if self.desk is not None:
+            try:
+                self.desk.boot()
+            except Exception as e:                   # the account cannot be traded: no live entries until fixed
+                log.exception("live_boot_failed")
+                if not self.live.st.entries_paused:
+                    self.live.rec({"ev": "pause", "reason": "live_boot_failed"})
+                self.live_say(f"⚠️ 💵 <b>LIVE wallet could not start</b> ({cardfmt.esc(str(e)[:200])}) · ⏸️ live "
+                              "entries paused. Fix it, then /restart and /liveresume.", "live_boot", 0)
         for key, mid in self.st.cards.items():
             if key.startswith("dc:"):                 # (keys without the prefix were Telegram messages)
                 self.ui.restore_card(key[3:], mid)
@@ -319,7 +401,14 @@ class Bot:
                          f"{_traders(len(self.invo.st.followed))}" + (" · ⏸️ paused" if self.invo.st.entries_paused else ""))
         else:
             lines.append("🧾 Invo is off: save the bot's Invo login in a file and set INVO_TOKEN_FILE to it")
-        self.ui.send("🤖 <b>Copybot started</b> (paper)\n" + "\n".join(lines))
+        if self.live is not None:
+            lines.append(f"💵 LIVE on Hyperliquid {self.cfg.live.network}: {len(self.live.st.positions)} open · "
+                         f"{cardfmt.fusd(self.live.st.equity(self.desk.mids), sign=False)}"
+                         + (" · ⏸️ paused" if self.live.st.entries_paused else "") + " · /livestatus")
+        elif self.cfg.live.enabled:
+            lines.append(f"💵 LIVE is off: {cardfmt.esc(self.live_off)}")
+        mode = f"paper + LIVE {self.cfg.live.network}" if self.live is not None else "paper"
+        self.ui.send(f"🤖 <b>Copybot started</b> ({mode})\n" + "\n".join(lines))
 
     def boot_side(self, w) -> None:
         """Genesis, boot and restart repair of one wallet."""
@@ -372,12 +461,12 @@ class Bot:
         if c.name == "/invoprogress":
             return self.ui.send("🧾 " + cardfmt.progress_text(w.st, self.mids, self.mids.get("BTC"), now_ms()))
         if c.name == "/invopause":
-            for x in self.invo_wallets():
+            for x in self.invo_paper_wallets():
                 x.rec({"ev": "pause", "reason": "/invopause"})
-            return self.ui.send("⏸️ 🧾 <b>Invo copies paused</b> (every Invo wallet). Exits and stops keep running. "
-                                "/invoresume to continue.")
+            return self.ui.send("⏸️ 🧾 <b>Invo copies paused</b> (every paper Invo wallet; the live one has /livepause)."
+                                " Exits and stops keep running. /invoresume to continue.")
         if c.name == "/invoresume":
-            for x in self.invo_wallets():
+            for x in self.invo_paper_wallets():
                 if x.st.uncertain:
                     x.rec({"ev": "ack", "items": list(x.st.uncertain)})
                 x.rec({"ev": "resume"})
@@ -388,13 +477,13 @@ class Bot:
                 return self.ui.send(f"⛔ Wrong or missing PIN. Usage: {c.name} &lt;PIN&gt;")
             if c.name == "/invoflatten":
                 n = 0
-                for x in self.invo_wallets():
+                for x in self.invo_paper_wallets():
                     n += len(x.st.positions)
                     x.rec({"ev": "pause", "reason": "/invoflatten"})
                     x.pm.flatten("flatten")
                 return self.ui.send(f"🛑 🧾 <b>Invo flattened</b>: {n} trade(s) closed in the Invo wallets. ⏸️ Invo "
                                     "copies paused · /invoresume to continue.")
-            n_open = sum(len(x.st.positions) for x in self.invo_wallets())
+            n_open = sum(len(x.st.positions) for x in self.invo_paper_wallets())
             if n_open:
                 return self.ui.send(f"⛔ 🧾 <b>Invo reset refused</b>: {n_open} open trade(s). Wait for them to close, "
                                     "or /invoflatten &lt;PIN&gt; first.")
@@ -412,6 +501,8 @@ class Bot:
             return self.ui.set_card(key, self.render_card(key, self.health(), now_ms()), new=True)
         if c.name in ("/invoblock", "/invounblock"):
             return self.invo_block(c)
+        if c.name == "/invoclose":
+            return self.ui.send(self.close_coin(self.invo_paper_wallets(), c.arg, "🧾 paper"))
         name = c.arg.strip().lstrip("@")
         if not re.fullmatch(r"[A-Za-z0-9_.]{2,40}", name):
             return self.ui.send(f"Usage: {c.name} &lt;Invo username&gt; (as in app.invoapp.com/&lt;username&gt;)")
@@ -687,14 +778,19 @@ class Bot:
 
     def invo_wallets(self) -> list:
         """The trader-size Invo wallet first (it owns the followed list, the cards and the notes), then the fixed-risk
-        Invo wallets (`invo.risk_wallets_pct`), which follow the same traders and get the same calls."""
+        Invo wallets (`invo.risk_wallets_pct`), which follow the same traders and get the same calls; the live wallet
+        last (it copies what its paper twin's deciding wallet copied)."""
+        return [*self.invo_paper_wallets(), *([self.live] if self.live is not None else [])]
+
+    def invo_paper_wallets(self) -> list:
+        """The 18 paper wallets: /invowallets compares them, /invoreset archives them (never the live one)."""
         return [self.invo, *self.invo_extra] if self.invo is not None else []
 
     def sync_invo_extras(self) -> None:
-        """The fixed-risk Invo wallets follow exactly the trader-size wallet's Invo traders."""
+        """The other Invo wallets (and the live one) follow exactly the trader-size wallet's Invo traders."""
         if self.invo is None:
             return
-        for w in self.invo_extra:
+        for w in self.invo_wallets()[1:]:
             for a, t in self.invo.st.followed.items():
                 if a not in w.st.followed:
                     w.rec({"ev": "follow", "leader": a, "ts": t})
@@ -912,8 +1008,9 @@ class Bot:
         info = self.invo_info.pop(t["pos_id"], "")
         if info and not info.startswith("🧾"):
             info = "🧾 " + info
-        self.ui.final_card(key, cardfmt.closed_card(t) + (f"\n{info}" if info else "\n🧾 Invo")
-                           + (f"\n🏁 closed by the trader ({cardfmt.esc(why)})" if why else ""))
+        end = ("\n✂️ closed by you (/close)" if why == BY_OWNER else
+               f"\n🏁 closed by the trader ({cardfmt.esc(why)})" if why else "")
+        self.ui.final_card(key, cardfmt.closed_card(t) + (f"\n{info}" if info else "\n🧾 Invo") + end)
 
     # ---- workers (never touch state: they only enqueue) ---------------------------------------------
     def health_worker(self) -> None:
@@ -953,6 +1050,7 @@ class Bot:
         last_ui = 0.0
         last_lag_log = time.time()
         last_beat = 0.0
+        last_watch = time.time()
         while not self.stop.is_set():
             t0 = time.time()
             if self.restart_at and t0 >= self.restart_at:
@@ -963,6 +1061,7 @@ class Bot:
                 self.tick()
                 if time.time() - last_ui >= 1.0:
                     self.refresh_ui()
+                    self.public_tick()
                     last_ui = time.time()
                 if time.time() - last_beat >= 60:
                     self.heartbeat()
@@ -970,6 +1069,10 @@ class Bot:
                 if time.time() - last_lag_log >= 3600:
                     self.log_lag()
                     last_lag_log = time.time()
+                if time.time() - last_watch >= 30:
+                    last_watch = time.time()
+                    self.watchdog()
+                    self.backup_if_due()
             except Exception as e:
                 log.exception("loop_error")
                 self.alert(f"trading loop error: {type(e).__name__}: {e}"[:300], key=f"loop:{type(e).__name__}")
@@ -998,10 +1101,19 @@ class Bot:
         now = now_ms()
 
         def marks(w):
-            for kind, key in (("day", day_key(now)), ("week", week_key(now))):
+            # the owner's day (discord.utc_offset_hours: Brazil -3): the live wallet's daily stop starts at local midnight
+            local = now + self.cfg.discord.utc_offset_hours * 3_600_000
+            for kind, key in (("day", day_key(local)), ("week", week_key(local))):
                 if w.st.marks.get(kind, {}).get("key") != key:
-                    w.rec({"ev": "mark", "kind": kind, "key": key, "equity": w.st.equity(self.mids)})
+                    w.rec({"ev": "mark", "kind": kind, "key": key, "equity": w.st.equity(w.pm.mids)})
         self.on_sides("marks", marks)
+        # 4. the live wallet: its stops on the exchange, the real account vs its ledger, its floor
+        if self.desk is not None:
+            try:
+                self.desk.tick()
+            except Exception as e:
+                log.exception("live_tick_error")
+                self.alert(f"live wallet: {type(e).__name__}: {e}"[:300], key=f"live:{type(e).__name__}")
         if self.ws_down_since and not self.ws_alerted and \
                 time.time() - self.ws_down_since >= self.cfg.runtime.ws_alert_after_s:
             self.ws_alerted = True
@@ -1025,8 +1137,8 @@ class Bot:
 
             def funding(w):
                 if w.st.marks.get("funding", {}).get("key") != hk:
-                    w.pm.apply_funding(self.assets, hk)
-                    w.rec({"ev": "mark", "kind": "funding", "key": hk, "equity": w.st.equity(self.mids)})
+                    w.pm.apply_funding(w.pm.assets, hk)
+                    w.rec({"ev": "mark", "kind": "funding", "key": hk, "equity": w.st.equity(w.pm.mids)})
             if at % 3_600_000 < 600_000:
                 self.on_sides("funding", funding)
         elif kind == "ws_up":
@@ -1128,7 +1240,7 @@ class Bot:
         if self.invo is not None:
             w = self.invo
             if key == "invo:wallets":
-                return cardfmt.invo_wallets_card([(x.size_label, x.stop_label, x.st) for x in self.invo_wallets()],
+                return cardfmt.invo_wallets_card([(x.size_label, x.stop_label, x.st) for x in self.invo_paper_wallets()],
                                                  self.mids, now)
             if key == "invo:trades":
                 return cardfmt.trades_card(w.st, self.mids, now, title="🧾 <b>Invo trades</b>", infos=self.invo_info)
@@ -1142,11 +1254,70 @@ class Bot:
         """Every accepted name is canonical here (chat.canon): /invo<verb>, /help or /restart."""
         if c.name.startswith("/invo"):
             return self.invo_command(c)
+        if c.name.startswith("/live"):
+            return self.live_command(c)
         if c.name == "/restart":
             self.ui.send("🔄 <b>Restarting</b>… back in about 15 seconds.")
             self.restart_at = time.time() + 3
             return
         self.ui.send(HELP)
+
+    def live_command(self, c) -> None:
+        d = self.desk
+        if d is None:
+            return self.ui.send(f"💵 Live trading is off: {cardfmt.esc(self.live_off)}. See the README, Live trading.")
+        if c.name == "/livestatus":
+            return self.ui.send(d.status_text())
+        if c.name == "/livepause":
+            self.live.rec({"ev": "pause", "reason": "/livepause"})
+            return self.ui.send("⏸️ 💵 <b>Live copies paused</b>. Live exits and stops keep running. /liveresume "
+                                "continues.")
+        if c.name == "/liveresume":
+            d.resume()
+            return self.ui.send("▶️ 💵 <b>Live copies resumed</b>" + (" (the account still does not match the "
+                                "ledger: see /livestatus)" if d.problems else ""))
+        if c.name == "/liveclose":
+            coin, _, pin = c.arg.partition(" ")
+            if not self.ui.check_pin(pin.strip()):
+                log.warn("live_bad_pin")
+                return self.ui.send("⛔ Wrong or missing PIN. Usage: /liveclose &lt;coin&gt; &lt;PIN&gt;")
+            return self.ui.send(self.close_coin([self.live], coin, "💵 LIVE"))
+        if c.name == "/livekill":
+            if not self.ui.check_pin(c.arg):
+                log.warn("live_bad_pin")
+                return self.ui.send("⛔ Wrong or missing PIN. Usage: /livekill &lt;PIN&gt;")
+            return self.ui.send(d.kill())
+
+    def close_coin(self, wallets: list, arg: str, where: str) -> str:
+        """/close <coin> (paper wallets) and /liveclose <coin> <PIN> (owner request 2026-11-03: a copy held on a coin
+        blocks every opposite call on it). Closes that coin's copy now in each wallet; the traders' later resizes and
+        closes of those calls then find no copy and do nothing, and new calls on the coin are copied again."""
+        name = arg.strip().upper().lstrip("$")
+        if not re.fullmatch(r"[A-Z0-9]{1,20}", name):
+            return f"Usage: /close &lt;coin&gt;, e.g. /close BTC (the open trades: /trades)"
+        n, errors = 0, []
+        for w in wallets:
+            coin = next((c for c in w.st.positions if c.upper() in (name, "K" + name)), None)
+            if coin is None:
+                continue
+            self._invo_close_why = BY_OWNER
+            try:
+                w.pm.close(coin, "closed_by_owner")
+                n += coin not in w.st.positions
+            except Exception as e:                   # (a live exit the exchange refused: retried by /liveclose)
+                log.exception("close_coin_failed", wallet=w.name, coin=coin)
+                errors.append(f"{w.label}: {type(e).__name__}")
+            finally:
+                self._invo_close_why = None
+            for k in [k for k, v in self.invo_calls.items() if k[0] == w.name and v == coin]:
+                if coin not in w.st.positions:
+                    self.invo_calls.pop(k, None)
+        self.invo_refresh_watched()
+        log.info("close_coin", coin=name, where=where, closed=n, errors=len(errors))
+        if not n and not errors:
+            return f"{where}: no open {cardfmt.esc(name)} trade."
+        return (f"✂️ {where} <b>{cardfmt.esc(name)}</b> closed in {n} wallet(s); new calls on it are copied again."
+                + "".join(f"\n⚠️ not closed: {cardfmt.esc(x)} (its stop still holds it; try again)" for x in errors))
 
     def invo_reset(self) -> str:
         """/invoreset: archive the Invo wallets' ledgers and start fresh ones that keep the followed traders. The caller
@@ -1155,7 +1326,7 @@ class Bot:
         arch = self.data / "archive" / f"invo-reset-{stamp}" / "wallets"
         arch.mkdir(parents=True, exist_ok=True)
         follows = dict(self.invo.st.followed)
-        for w in self.invo_wallets():
+        for w in self.invo_paper_wallets():          # the live wallet's ledger is the real account's: kept
             w.ledger.frozen = True
             w.ledger.close()
             d = self.data / "wallets" / w.name
@@ -1172,6 +1343,123 @@ class Bot:
         lg.close()
         log.info("invo_reset", archive=arch.parent.as_posix(), followed=len(follows))
         return arch.parent.as_posix()
+
+    # ---- the public read-only channel (docs/PRODUCTION_PLAN.md Phase 4, owner request 2026-11-03) -----------
+    def public_wallet(self):
+        name = self.cfg.discord.public_wallet
+        return next((w for w in self.invo_wallets() if w.name == name), None)
+
+    def public_tick(self) -> None:
+        """Every second: the public wallet's new and closed trades since the last look (nothing from before the
+        start: the first look only remembers), and the daily summary at discord.public_daily_hour (local)."""
+        w = self.public_wallet()
+        if w is None or not self.cfg.dc_public_channel_id:
+            return
+        d = self.cfg.discord
+        ids = {p.pos_id for p in w.st.positions.values()}
+        if self.pub_seen is not None:
+            seen, n_closed = self.pub_seen
+            eq = w.st.equity0 + sum(t["pnl"] for t in w.st.closed[:n_closed])
+            for t in w.st.closed[n_closed:]:
+                self.ui.send_public(cardfmt.public_close(t, eq, d.public_show_traders))
+                eq += t["pnl"]
+            for p in w.st.positions.values():
+                if p.pos_id not in seen:
+                    self.ui.send_public(cardfmt.public_open(p, d.public_show_traders))
+        self.pub_seen = (ids, len(w.st.closed))
+        local = now_ms() + d.utc_offset_hours * 3_600_000
+        day = day_key(local)
+        if time.gmtime(local / 1000).tm_hour >= d.public_daily_hour and \
+                self.st.marks.get("public_daily", {}).get("key") != day:
+            self.rec({"ev": "mark", "kind": "public_daily", "key": day, "equity": w.st.equity(w.pm.mids)})
+            mark = w.st.marks.get("day")
+            title = "LIVE wallet" if w is self.live else "Copy wallet"
+            self.ui.send_public(cardfmt.public_daily(w.st, w.pm.mids, title, mark["equity"] if mark else None))
+
+    # ---- health and backups (docs/PRODUCTION_PLAN.md Phase 2, owner request 2026-11-03) ------------------------
+    def health_check(self) -> dict[str, str]:
+        """What is wrong right now: {key: plain text}. Empty = healthy."""
+        rt, now = self.cfg.runtime, time.time()
+        out = {}
+        age = self.health().mids_age_s
+        if age > rt.stale_prices_alert_s and now - self.started > rt.stale_prices_alert_s:
+            out["prices"] = f"Hyperliquid prices are {age:.0f}s old: new copies are refused (stops use the last prices)"
+        w = self.invo_watch
+        if w is not None and self.invo_watched:
+            since = w.last_ok or self.started
+            if now - since > rt.invo_silent_alert_s:
+                out["invo"] = (f"Invo has not answered for {(now - since) / 60:.0f} min: new calls and the traders' "
+                               "closes are not seen (our stops still run)")
+        d = self.desk
+        if d is not None:
+            late = max(120.0, 4 * self.cfg.live.reconcile_s)
+            if now - d.last_ok > late:
+                out["live"] = (f"the live account has not been checked for {(now - d.last_ok) / 60:.0f} min "
+                               "(Hyperliquid not answering?): the stops resting on the exchange still protect it")
+        return out
+
+    def watchdog(self) -> None:
+        """Every 30 s: a Discord alert for each new problem and a note when it is over; and the check-in ping, so an
+        outside service warns the owner when the pings stop (PC off, no internet, bot dead)."""
+        now_bad = self.health_check()
+        for k, text in now_bad.items():
+            if k not in self.health_problems:
+                log.warn("health_problem", what=k, text=text)
+                self.ui.send(f"⚠️ <b>Health</b>: {cardfmt.esc(text)}")
+        for k in set(self.health_problems) - set(now_bad):
+            log.info("health_ok", what=k)
+            self.ui.send(f"✅ <b>Health</b>: {HEALTH_NAMES.get(k, k)} OK again")
+        self.health_problems = now_bad
+        url = self.cfg.healthcheck_url
+        if url and time.time() - getattr(self, "_last_ping", 0.0) >= 60:
+            self._last_ping = time.time()
+            body = "\n".join(now_bad.values()).encode()
+            threading.Thread(target=self._ping, args=(url.rstrip("/") + ("/fail" if now_bad else ""), body),
+                             name="ping", daemon=True).start()
+
+    @staticmethod
+    def _ping(url: str, body: bytes) -> None:
+        try:
+            urllib.request.urlopen(urllib.request.Request(url, data=body or None), timeout=10).read()
+        except Exception as e:
+            log.warn("healthcheck_ping_failed", err=type(e).__name__)
+
+    def backup_if_due(self) -> None:
+        """Once a day (the owner's day): data/ zipped into runtime.backup_dir, the newest backup_keep kept."""
+        rt = self.cfg.runtime
+        if not rt.backup_dir:
+            return
+        day = day_key(now_ms() + self.cfg.discord.utc_offset_hours * 3_600_000)
+        if getattr(self, "_backup_day", None) == day:
+            return
+        self._backup_day = day
+        dest = Path(rt.backup_dir)
+        if not dest.is_absolute():               # next to data/ (the repo folder on the bot PC)
+            dest = self.data.resolve().parent / dest
+        if any(dest.glob(f"copybot-data-{day}*.zip")):
+            return
+        threading.Thread(target=self.backup, args=(dest, day), name="backup", daemon=True).start()
+
+    def backup(self, dest: Path, day: str) -> Path | None:
+        rt = self.cfg.runtime
+        try:
+            dest.mkdir(parents=True, exist_ok=True)
+            out = dest / f"copybot-data-{day}-{time.strftime('%H%M%S')}.zip"
+            tmp = out.with_suffix(".part")
+            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+                for f in sorted(self.data.rglob("*")):
+                    if f.is_file() and f.name != "bot.lock" and "archive" not in f.relative_to(self.data).parts[:1]:
+                        z.write(f, f.relative_to(self.data).as_posix())
+            tmp.replace(out)
+            old = sorted(dest.glob("copybot-data-*.zip"))[:-rt.backup_keep]
+            for f in old:
+                f.unlink()
+            log.info("backup", file=out.as_posix(), kb=round(out.stat().st_size / 1024), removed=len(old))
+            return out
+        except Exception as e:
+            log.exception("backup_failed")
+            self.alert(f"daily backup of data/ failed ({type(e).__name__}: {e})"[:300], key="backup", every_s=86400)
+            return None
 
     def heartbeat(self) -> None:
         h = self.health()
@@ -1201,7 +1489,7 @@ DEFAULT_INVO_TOKEN = os.path.join("secrets", "invo.token")   # used when INVO_TO
 
 
 def main(argv: list[str] | None = None) -> None:
-    ap = argparse.ArgumentParser(description="Invo calls copy-trading bot - PAPER MODE ONLY")
+    ap = argparse.ArgumentParser(description="Invo calls copy-trading bot (paper wallets + an optional live one)")
     ap.add_argument("--config", default="config")
     args = ap.parse_args(argv)
     try:
@@ -1209,7 +1497,7 @@ def main(argv: list[str] | None = None) -> None:
     except config.ConfigError as e:
         print(f"config error: {e}", file=sys.stderr)
         raise SystemExit(2)
-    for s in (cfg.pin, cfg.dc_token):
+    for s in (cfg.pin, cfg.dc_token, cfg.healthcheck_url):
         log.add_secret(s)
     log.setup(cfg.runtime.log_dir)
     if not cfg.invo_token_file and os.path.exists(DEFAULT_INVO_TOKEN):

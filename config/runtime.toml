@@ -11,3 +11,11 @@ reconcile_s = 60.0            # check leaders' real positions against our copies
 clock_refresh_s = 60.0
 ws_alert_after_s = 60.0       # Hyperliquid closes the websocket about every 3 h ("Expired") and the bot reconnects
                               # in seconds; alert only when it stays down longer than this  [1, 3600]
+# Health alerts on Discord (each problem once, then "OK again"). For an alert when the whole PC is off, also set
+# HEALTHCHECK_URL (README, "Health alerts").
+stale_prices_alert_s = 60.0   # prices older than this                                   [10, 3600]
+invo_silent_alert_s = 300.0   # Invo not answering for this long (traders followed)      [30, 7200]
+# Daily copy of data/ (every wallet's ledger) as a zip. A OneDrive / Google Drive folder keeps a copy off the PC,
+# e.g. backup_dir = "C:/Users/gedeo/OneDrive/copybot-backups". "" = off.
+backup_dir = "backups"
+backup_keep = 14              # newest backups kept                                      [1, 365]

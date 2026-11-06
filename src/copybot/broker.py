@@ -43,9 +43,11 @@ class PaperBroker:
             cost += left * last * (1.01 if is_buy else 0.99)
         return cost / size
 
-    def market(self, coin: str, is_buy: bool, size: float, exit: bool = False, mid: float | None = None) -> PaperFill:
+    def market(self, coin: str, is_buy: bool, size: float, exit: bool = False, mid: float | None = None,
+               leverage: float | None = None) -> PaperFill:
         """Entries need a real book (else NoBook). Exits never fail: without a book they fill at mid +/- a
-        penalty slippage."""
+        penalty slippage. `leverage` is only used by the live broker (copybot/live.py). A paper fill is always the
+        whole size; the engine still books `fill.size`, since a live fill can be partial."""
         try:
             book = self.get_book(coin)
             ref = book.mid
@@ -61,6 +63,10 @@ class PaperBroker:
         fee = px * size * self.cfg.taker_fee_pct / 100
         slip = (px - ref) / ref * 1e4 * (1 if is_buy else -1)
         return PaperFill(px, size, fee, slip, source)
+
+    def can_exit(self, coin: str) -> bool:
+        """Paper exits never fail (the live broker waits after a failed one: copybot/live.py)."""
+        return True
 
 
 def funding_payment(side: int, size: float, mark: float, rate: float) -> float:

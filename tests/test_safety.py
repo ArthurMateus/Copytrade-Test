@@ -1,4 +1,6 @@
-"""Paper mode only: no signing library, no key handling, no exchange order endpoint anywhere."""
+"""Signing, keys and the exchange's order endpoint exist in ONE module, copybot/live.py (the live wallet, owner request
+2026-11-03), and it can only place and cancel orders and set leverage: no withdrawal or transfer code anywhere. The
+paper bot never loads a signing library."""
 import re
 import subprocess
 import sys
@@ -18,13 +20,38 @@ FORBIDDEN = re.compile(r"eth_account|eth_keys|eth_keyfile|coincurve|ecdsa|nacl|w
                        r"private_key|privkey|secret_key|mnemonic|/exchange\b|sign_l1|sign_typed", re.I)
 
 
-def test_source_has_no_signing_or_keys():
+LIVE = SRC / "live.py"
+# what could move money out of the account or hand control of it to someone else
+MONEY_OUT = re.compile(r"withdraw|transfer|usdSend|spotSend|sendAsset|approveAgent|approveBuilder|builder|vault"
+                       r"Transfer|subAccount|tokenDelegate|cDeposit|cWithdraw|MultiSig|sign_user_signed|sign_agent|"
+                       r"sign_usd|sign_spot|sign_send|sign_withdraw|sign_approve|sign_token|setReferrer|"
+                       r"mnemonic|seed_phrase", re.I)
+ACTIONS = {"order", "cancel", "updateLeverage"}           # the only signed actions
+READS = {"userRole", "metaAndAssetCtxs", "clearinghouseState", "frontendOpenOrders", "userFillsByTime", "allMids",
+         "orderStatus"}
+
+
+def test_source_has_no_signing_or_keys_outside_the_live_module():
     for f in SRC.rglob("*.py"):
+        if f == LIVE:
+            continue
         for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
             assert not FORBIDDEN.search(line), f"{f.name}:{i}: {line.strip()}"
+            assert not re.search(r"(environ|getenv|env\.get)\W.*HL_AGENT_KEY", line), f"{f.name}:{i}"   # key: live.py
+
+
+def test_the_live_module_can_only_trade_never_move_money():
+    text = LIVE.read_text(encoding="utf-8")
+    for i, line in enumerate(text.splitlines(), 1):
+        assert not MONEY_OUT.search(line), f"live.py:{i}: {line.strip()}"
+    types = set(re.findall(r'"type":\s*"(\w+)"', text))
+    assert types <= ACTIONS | READS, types - ACTIONS - READS
+    assert "order_wires_to_order_action" in text and text.count("self.act(") == 3   # order, cancel, leverage
+    assert "os.environ" in text and "HL_AGENT_KEY" in text                           # the key: environment only
 
 
 def test_importing_the_bot_loads_no_signing_library():
+    """(copybot/live.py imports the SDK only when the live wallet starts)"""
     code = ("import sys, copybot.runner; bad=[m for m in sys.modules if m.split('.')[0] in "
             "('eth_account','eth_keys','coincurve','ecdsa','nacl','web3','hyperliquid')]; print(bad)")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout

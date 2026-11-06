@@ -23,7 +23,7 @@ from websockets.sync.client import connect
 
 from copybot import log
 from copybot.config import Config
-from copybot.chat import (COMMANDS, PIN_COMMANDS, SLASH_COMMANDS, WALLET_COMMANDS, ChatError, ChatUI, Command, canon,
+from copybot.chat import (COIN_COMMANDS, COMMANDS, PIN_COMMANDS, SLASH_COMMANDS, WALLET_COMMANDS, ChatError, ChatUI, Command, canon,
                           short_names)
 
 GREEN, RED, ORANGE, BLURPLE = 0x2ECC71, 0xE74C3C, 0xF39C12, 0x5865F2
@@ -40,11 +40,17 @@ DESCRIPTIONS = {
     "/block": "Stop copying one portfolio of a trader (user, then the portfolio name)",
     "/unblock": "Copy a blocked portfolio again (user, then the portfolio name)",
     "/pause": "Pause new copies (exits and stops keep running)",
+    "/close": "Close one trade now in every paper wallet (e.g. BTC), so other calls on that coin can be copied",
+    "/liveclose": "Close one REAL-money trade now (the coin, then the PIN)",
     "/resume": "Resume new copies",
     "/flatten": "Close every trade and pause (needs the PIN)",
     "/reset": "Every wallet back to the start, no open trades, traders kept (needs the PIN)",
     "/help": "List the commands",
     "/restart": "Restart the bot",
+    "/livestatus": "The REAL-money wallet: balance, today, open trades, stops on the exchange",
+    "/livepause": "Pause new REAL-money copies (exits and stops keep running)",
+    "/liveresume": "Resume new REAL-money copies",
+    "/livekill": "Close every REAL-money position, cancel its orders and pause (needs the PIN)",
 }
 
 _TAG = re.compile(r"(</?(?:b|i|code|pre)>)")
@@ -141,6 +147,7 @@ class DiscordUI(ChatUI):
         self.enabled = bool(cfg.dc_token and cfg.dc_channel_id and cfg.dc_owner_id)
         self.api = DiscordApi(cfg.discord.api_base, cfg.dc_token) if self.enabled else None
         self.channel = cfg.dc_channel_id
+        self.public_channel = cfg.dc_public_channel_id    # read-only for others (Phase 4); "" = none
         self.owner = str(cfg.dc_owner_id)
         self.registered = False
         self.connected = False
@@ -150,7 +157,7 @@ class DiscordUI(ChatUI):
         rows = components(params.get("buttons") or [])
         params = {**params, "text": short_names(params["text"])}
         if method == "sendMessage":
-            r = self.api.call("POST", f"/channels/{self.channel}/messages",
+            r = self.api.call("POST", f"/channels/{params.get('channel') or self.channel}/messages",
                               {"embeds": [embed(params["text"])], "allowed_mentions": {"parse": []},
                                **({"components": rows} if rows else {})}, on_limit=self._bucket_empty)
             return {"message_id": int(r["id"])}
@@ -234,7 +241,13 @@ class DiscordUI(ChatUI):
         cmds = []
         for c in SLASH_COMMANDS:
             cmd = {"name": c[1:], "description": DESCRIPTIONS.get(c, c[1:]), "type": 1}
-            if canon(c) in PIN_COMMANDS:
+            if canon(c) in COIN_COMMANDS:
+                cmd["options"] = [{"type": 3, "name": "coin", "required": True,
+                                   "description": "The coin of the trade, e.g. BTC"}]
+                if canon(c) in PIN_COMMANDS:
+                    cmd["options"].append({"type": 3, "name": "pin", "description": "Your COPYBOT_PIN",
+                                           "required": True})
+            elif canon(c) in PIN_COMMANDS:
                 cmd["options"] = [{"type": 3, "name": "pin", "description": "Your COPYBOT_PIN", "required": True}]
             elif canon(c) in WALLET_COMMANDS:
                 cmd["options"] = [{"type": 3, "name": "wallet", "required": True,
@@ -279,5 +292,6 @@ class DiscordUI(ChatUI):
         opts = {o["name"]: o.get("value", "") for o in (d.get("data") or {}).get("options") or []}
         log.info("discord_command", cmd=name)     # never the argument (may be the PIN)
         self._reply(d, f"👍 {typed}" + (" (results in the channel)" if name not in ("/restart", "/invopause", "/invoresume") else ""))
-        self.on_command(Command(name, str(opts.get("pin") or opts.get("wallet") or "").strip()))
+        arg = " ".join(str(v).strip() for v in (opts.get("coin"), opts.get("pin") or opts.get("wallet")) if v)
+        self.on_command(Command(name, arg))
 

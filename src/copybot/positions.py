@@ -103,6 +103,15 @@ class PositionManager:
         self.notify("skip", reason=why, **{("order" if k == "kind" else k): v for k, v in kw.items()})
         return why
 
+    def _exit_fill(self, iid: str, coin: str, is_buy: bool, size: float, mid: float):
+        """An exit fill. A live exit can fail (copybot/live.py): its intent is then aborted, nothing is booked, the
+        exchange's resting stop still holds the position and the next try starts fresh."""
+        try:
+            return self.broker.market(coin, is_buy, size, exit=True, mid=mid)
+        except Exception:
+            self._rec({"ev": "intent_abort", "intent": iid})
+            raise
+
     def _lag(self, h: Health, move: Move | None) -> float | None:
         return None if move is None else h.exchange_now_ms() - move.time_ms
 
@@ -204,18 +213,18 @@ class PositionManager:
         iid = uuid.uuid4().hex[:12]
         self._rec({"ev": "intent", "intent": iid, "action": "boost", "coin": m.coin})
         try:
-            f = self.broker.market(m.coin, pos.side > 0, d.size)
+            f = self.broker.market(m.coin, pos.side > 0, d.size, leverage=pos.leverage)
         except NoBook as e:
             self._rec({"ev": "intent_abort", "intent": iid})
             self._rec(back)
             return self._skip("no_book", coin=m.coin, err=str(e))
         lag = self._lag(self.health(), m)
-        k = pos.k * (pos.size + d.size) / pos.size   # the owner's later moves scale the boosted size
-        self._rec({**back, "intent": iid, "sz": d.size, "px": f.px, "fee": f.fee, "k": k, "lag_ms": lag})
+        k = pos.k * (pos.size + f.size) / pos.size   # the owner's later moves scale the boosted size
+        self._rec({**back, "intent": iid, "sz": f.size, "px": f.px, "fee": f.fee, "k": k, "lag_ms": lag})
         self.gate.record_order()
-        log.info("consensus", coin=m.coin, leader=m.leader, holder=pos.leader, boost=d.size, px=f.px,
+        log.info("consensus", coin=m.coin, leader=m.leader, holder=pos.leader, boost=f.size, px=f.px,
                  new_size=pos.size, lag_ms=lag)
-        self.notify("consensus", coin=m.coin, leader=m.leader, size=d.size)
+        self.notify("consensus", coin=m.coin, leader=m.leader, size=f.size)
 
     def conflict(self, pos: Position, m: Move) -> None:
         """A followed leader opens the side opposite to ours: keep the position with the better leader."""
@@ -287,21 +296,21 @@ class PositionManager:
         iid = uuid.uuid4().hex[:12]
         self._rec({"ev": "intent", "intent": iid, "action": "open", "coin": m.coin})
         try:
-            f = self.broker.market(m.coin, side > 0, d.size)
+            f = self.broker.market(m.coin, side > 0, d.size, leverage=d.leverage)
         except NoBook as e:
             self._rec({"ev": "intent_abort", "intent": iid})
             return self._skip("no_book", coin=m.coin, err=str(e))
         lag = self._lag(self.health(), m)
         # the stop is placed at entry, from the actual fill price; it is part of the same durable event
         stop = self.gate.stop_for(side, f.px, d.leverage, asset)
-        pos = Position(pos_id=f"{m.coin}-{iid}", coin=m.coin, side=side, size=d.size, entry_px=f.px,
-                       stop_px=stop, leverage=d.leverage, leader=m.leader, k=d.size / abs(m.end_pos),
+        pos = Position(pos_id=f"{m.coin}-{iid}", coin=m.coin, side=side, size=f.size, entry_px=f.px,
+                       stop_px=stop, leverage=d.leverage, leader=m.leader, k=f.size / abs(m.end_pos),
                        open_oid=m.oid, opened_ms=h.now_ms, open_lag_ms=lag)
         self._rec({"ev": "open", "intent": iid, "pos": asdict(pos), "fee": f.fee, "lag_ms": lag,
                    "slip_bps": f.slippage_bps, "leader_px": m.px})
         self.gate.record_order()
-        log.info("copy_open", coin=m.coin, side="long" if side > 0 else "short", size=d.size, px=f.px, stop=stop,
-                 lev=d.leverage, notional=round(d.size * f.px, 2), fee=f.fee, lag_ms=lag, leader=m.leader,
+        log.info("copy_open", coin=m.coin, side="long" if side > 0 else "short", size=f.size, px=f.px, stop=stop,
+                 lev=d.leverage, notional=round(f.size * f.px, 2), fee=f.fee, lag_ms=lag, leader=m.leader,
                  slip_bps=round(f.slippage_bps, 2))
         self.notify("opened", coin=m.coin)
 
@@ -321,17 +330,17 @@ class PositionManager:
         iid = uuid.uuid4().hex[:12]
         self._rec({"ev": "intent", "intent": iid, "action": "add", "coin": m.coin})
         try:
-            f = self.broker.market(m.coin, pos.side > 0, d.size)
+            f = self.broker.market(m.coin, pos.side > 0, d.size, leverage=pos.leverage)
         except NoBook as e:
             self._rec({"ev": "intent_abort", "intent": iid})
             return self._skip("no_book", coin=m.coin, err=str(e))
         lag = self._lag(self.health(), m)
         # k follows what we actually hold, so a clamped add does not make us chase the leader forever
-        k = (pos.size + d.size) / abs(m.end_pos)
-        self._rec({"ev": "add", "intent": iid, "coin": m.coin, "pos_id": pos.pos_id, "sz": d.size, "px": f.px,
+        k = (pos.size + f.size) / abs(m.end_pos)
+        self._rec({"ev": "add", "intent": iid, "coin": m.coin, "pos_id": pos.pos_id, "sz": f.size, "px": f.px,
                    "fee": f.fee, "k": k, "lag_ms": lag})
         self.gate.record_order()
-        log.info("copy_add", coin=m.coin, size=d.size, px=f.px, new_size=pos.size, lag_ms=lag)
+        log.info("copy_add", coin=m.coin, size=f.size, px=f.px, new_size=pos.size, lag_ms=lag)
         self.notify("updated", coin=m.coin)
 
     # ---- exits (never blocked by staleness, pauses or rate limits) ------------------------------
@@ -339,6 +348,8 @@ class PositionManager:
         pos = self.st.positions.get(coin)
         if pos is None or size <= 0:
             return
+        if not self.broker.can_exit(coin):
+            return "exit_waiting"
         mid = self.mids.get(coin) or pos.entry_px
         d = self.gate.check(Order("reduce", coin, pos.side, size, mid), self.st, self.health(), self.mids, None)
         if not d:
@@ -348,18 +359,19 @@ class PositionManager:
         h = self.health()
         iid = uuid.uuid4().hex[:12]
         self._rec({"ev": "intent", "intent": iid, "action": "reduce", "coin": coin})
-        f = self.broker.market(coin, pos.side < 0, d.size, exit=True, mid=mid)
+        f = self._exit_fill(iid, coin, pos.side < 0, d.size, mid)
         lag = self._lag(self.health(), move)
-        self._rec({"ev": "reduce", "intent": iid, "coin": coin, "pos_id": pos.pos_id, "sz": d.size, "px": f.px,
+        # (a live fill is the lot-rounded size: booking the request drifted from the account, code review)
+        self._rec({"ev": "reduce", "intent": iid, "coin": coin, "pos_id": pos.pos_id, "sz": f.size, "px": f.px,
                    "fee": f.fee, "reason": reason, "lag_ms": lag})
         self.gate.record_order()
-        log.info("copy_reduce", coin=coin, size=d.size, px=f.px, left=pos.size, reason=reason, lag_ms=lag,
+        log.info("copy_reduce", coin=coin, size=f.size, px=f.px, left=pos.size, reason=reason, lag_ms=lag,
                  src=f.source)
         self.notify("updated", coin=coin)
 
     def close(self, coin: str, reason: str, move: Move | None = None) -> None:
         pos = self.st.positions.get(coin)
-        if pos is None:
+        if pos is None or not self.broker.can_exit(coin):
             return
         mid = self.mids.get(coin) or pos.entry_px
         d = self.gate.check(Order("close", coin, pos.side, pos.size, mid), self.st, self.health(), self.mids, None)
@@ -367,7 +379,7 @@ class PositionManager:
         h = self.health()
         iid = uuid.uuid4().hex[:12]
         self._rec({"ev": "intent", "intent": iid, "action": "close", "coin": coin})
-        f = self.broker.market(coin, pos.side < 0, pos.size, exit=True, mid=mid)
+        f = self._exit_fill(iid, coin, pos.side < 0, pos.size, mid)
         lag = self._lag(self.health(), move)
         leader, pos_id = pos.leader, pos.pos_id
         self._rec({"ev": "close", "intent": iid, "coin": coin, "pos_id": pos_id, "px": f.px, "fee": f.fee,
@@ -381,13 +393,20 @@ class PositionManager:
 
     # ---- periodic duties ----------------------------------------------------------------------
     def check_stops(self) -> None:
+        first = None
         for p in list(self.st.positions.values()):
             m = self.mids.get(p.coin)
-            if m and p.stop_hit(m):
-                log.warn("stop_hit", coin=p.coin, mark=m, stop=p.stop_px)
-                self.close(p.coin, "trail_stop" if self.locked_in(p) else "stop")
-            elif m:
-                self.trail(p, m)
+            try:                      # one coin's failing (live) exit never skips the others' stops
+                if m and p.stop_hit(m):
+                    if self.broker.can_exit(p.coin):
+                        log.warn("stop_hit", coin=p.coin, mark=m, stop=p.stop_px)
+                    self.close(p.coin, "trail_stop" if self.locked_in(p) else "stop")
+                elif m:
+                    self.trail(p, m)
+            except Exception as e:
+                first = first or e
+        if first is not None:
+            raise first
 
     def locked_in(self, p: Position) -> bool:
         """The stop sits on the winning side of the entry (it was trailed): a hit closes at a profit."""
