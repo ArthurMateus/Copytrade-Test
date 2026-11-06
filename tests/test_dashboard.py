@@ -137,7 +137,7 @@ def test_the_live_wallet_balance_today_pause_and_open_pnl_at_testnet_prices(serv
     assert lv["pnl"] == pytest.approx(6.93925) and lv["return_pct"] == pytest.approx(6.93925)
     assert lv["today"] == pytest.approx(lv["equity"] - 105.0)
     assert lv["paused"] and lv["pause_reason"] == "live_daily_stop:2025-10-10"
-    assert lv["floor"] == 50.0 and not lv["below_floor"] and lv["network"] == "testnet"
+    assert lv["floor"] == 75.0 and not lv["below_floor"] and lv["network"] == "testnet"
     [p] = lv["positions"]
     assert (p["coin"], p["side"], p["entry"], p["mark"], p["stop"]) == ("ETH", "long", 3000, 3200.0, 2760)
     assert p["pnl"] == pytest.approx(2.0 - 0.0135)
