@@ -5,8 +5,10 @@ gateway_url = "wss://gateway.discord.gg/?v=10&encoding=json"
 edit_min_interval_s = 5.0     # at most one edit per message per this many seconds
 min_send_interval_s = 1.1     # global spacing of all messages/edits to the channel
 utc_offset_hours = -3.0       # card times in your time zone (Brazil = -3)  [-12, 14]
-# The PUBLIC read-only channel (needs DISCORD_PUBLIC_CHANNEL_ID; README "Public results channel"): one wallet's new
-# trades, closed trades and a daily summary, in % only. Commands never work there.
+# The signal channels (README "Signal channels"): DISCORD_PAID_CHANNEL_ID (members, at once) and
+# DISCORD_PUBLIC_CHANNEL_ID (free, free_delay_min later) get one wallet's trades, in % only. Commands never work there.
 public_wallet = "invo_risk_5pct_stop8"   # the wallet shown; "live" = the real-money one
-public_daily_hour = 21        # the daily summary at this local hour                    [0, 23]
+public_daily_hour = 21        # the daily summary at this local hour (both channels)    [0, 23]
+free_delay_min = 30.0         # the free channel's delay, minutes; 0 = instant         [0, 1440]
+weekly_report_day = 6         # the members' weekly report: 0 = Monday ... 6 = Sunday   [0, 6]
 public_show_traders = false   # true = name the Invo traders behind each trade

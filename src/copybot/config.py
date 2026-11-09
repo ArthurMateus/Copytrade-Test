@@ -57,10 +57,12 @@ class Discord:
     edit_min_interval_s: float = 5.0      # per message
     min_send_interval_s: float = 1.1      # all API writes to the channel, globally
     utc_offset_hours: float = 0.0         # times on every card are shown in this time zone (Brazil: -3)
-    # the PUBLIC read-only channel (docs/PRODUCTION_PLAN.md Phase 4; DISCORD_PUBLIC_CHANNEL_ID, off when unset): one
-    # wallet's new trades, closed trades and a daily summary, in % only (no dollar amounts)
+    # the signal channels (Phase 4/5): one wallet's trades in % only (no dollar amounts). DISCORD_PAID_CHANNEL_ID
+    # (members) gets them at once, DISCORD_PUBLIC_CHANNEL_ID (the free channel) free_delay_min later; either can be unset
     public_wallet: str = "invo_risk_5pct_stop8"   # which wallet is shown ("live" for the real-money one)
-    public_daily_hour: int = 21           # the daily summary, at this local hour
+    public_daily_hour: int = 21           # the daily summary, at this local hour (both channels)
+    free_delay_min: float = 30.0          # the free channel's delay (owner request 2026-11-09); 0 = instant
+    weekly_report_day: int = 6            # the members' weekly report on this weekday (0 = Monday, 6 = Sunday)
     public_show_traders: bool = False     # name the Invo traders behind each trade
 
 
@@ -172,7 +174,8 @@ class Config:
     # HEALTHCHECK_URL: a check-in address (e.g. healthchecks.io) pinged every minute; when the pings stop (PC off, no
     # internet, bot dead) that service warns the owner. Optional
     healthcheck_url: str = field(default="", repr=False)
-    dc_public_channel_id: str = field(default="", repr=False)   # DISCORD_PUBLIC_CHANNEL_ID (Phase 4), optional
+    dc_public_channel_id: str = field(default="", repr=False)   # DISCORD_PUBLIC_CHANNEL_ID: the free channel
+    dc_paid_channel_id: str = field(default="", repr=False)     # DISCORD_PAID_CHANNEL_ID: the members' channel
 
 
 SECTIONS = ("risk", "broker", "discord", "runtime", "invo", "live")
@@ -207,6 +210,8 @@ CEILINGS: dict[tuple[str, str], tuple[float, float]] = {
     ("broker", "no_book_slippage_bps"): (5, 500),
     ("discord", "utc_offset_hours"): (-12, 14),
     ("discord", "public_daily_hour"): (0, 23),
+    ("discord", "free_delay_min"): (0, 1440),
+    ("discord", "weekly_report_day"): (0, 6),
     ("discord", "edit_min_interval_s"): (0.05, 600),
     ("discord", "min_send_interval_s"): (0.0, 60),
     ("runtime", "trading_timeout_s"): (0.1, 2.0),
@@ -270,6 +275,7 @@ def load(config_dir: str | os.PathLike, env: dict | None = None) -> Config:
     cfg.invo_token_file = env.get("INVO_TOKEN_FILE", "").strip()
     cfg.healthcheck_url = env.get("HEALTHCHECK_URL", "").strip()
     cfg.dc_public_channel_id = env.get("DISCORD_PUBLIC_CHANNEL_ID", "").strip()
+    cfg.dc_paid_channel_id = env.get("DISCORD_PAID_CHANNEL_ID", "").strip()
     return cfg
 
 
@@ -322,6 +328,6 @@ def public_dict(cfg: Config) -> dict:
     """Config without secrets, safe to log."""
     d = asdict(cfg)
     for k in ("pin", "dc_token", "dc_channel_id", "dc_owner_id", "invo_token_file", "healthcheck_url",
-              "dc_public_channel_id"):
+              "dc_public_channel_id", "dc_paid_channel_id"):
         d.pop(k)
     return d

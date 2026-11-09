@@ -147,7 +147,6 @@ class DiscordUI(ChatUI):
         self.enabled = bool(cfg.dc_token and cfg.dc_channel_id and cfg.dc_owner_id)
         self.api = DiscordApi(cfg.discord.api_base, cfg.dc_token) if self.enabled else None
         self.channel = cfg.dc_channel_id
-        self.public_channel = cfg.dc_public_channel_id    # read-only for others (Phase 4); "" = none
         self.owner = str(cfg.dc_owner_id)
         self.registered = False
         self.connected = False

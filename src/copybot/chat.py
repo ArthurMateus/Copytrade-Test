@@ -117,10 +117,10 @@ class ChatUI:
             self.outbox.put(text)
             self.wake.set()
 
-    def send_public(self, text: str) -> None:
-        """A message for the public read-only channel (Phase 4), when the platform has one."""
-        if self.enabled and getattr(self, "public_channel", ""):
-            self.outbox.put(("public", text))
+    def send_to(self, channel: str, text: str) -> None:
+        """A message for another channel (the signal channels, Phase 4/5)."""
+        if self.enabled and channel:
+            self.outbox.put((channel, text))
             self.wake.set()
 
     def restore_card(self, key: str, msg_id: int) -> None:
@@ -204,8 +204,8 @@ class ChatUI:
             except queue.Empty:
                 break
             params = {"text": text}
-            if isinstance(text, tuple):            # ("public", text): the public channel
-                params = {"text": text[1], "channel": self.public_channel}
+            if isinstance(text, tuple):            # (channel id, text): a signal channel
+                params = {"text": text[1], "channel": text[0]}
             try:
                 self._write("sendMessage", params)
             except ChatError as e:

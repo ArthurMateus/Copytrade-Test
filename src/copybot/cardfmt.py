@@ -195,11 +195,50 @@ def closed_card(t: dict) -> str:
     ])
 
 
-# ---- the public channel (Phase 4): percentages only, never dollar amounts ------------------------------
-def public_open(p, show_traders: bool = False) -> str:
-    who = f" · @{esc(short(p.leader))}" if show_traders else ""
-    return (f"🆕 <b>{esc(p.sym or p.coin)}</b> {side_tag(p.side)} · {p.leverage:g}x · entry {fpx(p.entry_px)}"
-            f" · stop {fpx(p.stop_px)}{who}")
+# ---- the signal channels (Phase 4/5): percentages only, never dollar amounts ------------------------------
+def margin_pct(size: float, px: float, leverage: float, equity: float) -> float:
+    """A position's margin as % of the wallet: what a member puts in to copy it at the same size."""
+    return size * px / max(leverage, 1) / equity * 100 if equity > 0 else 0.0
+
+
+def public_open(p, equity: float, show_traders: bool = False) -> str:
+    """Everything a member needs to copy the trade by hand."""
+    who = f"\nTrader: @{esc(short(p.leader))}" if show_traders else ""
+    stop_pct = abs(p.stop_px / p.entry_px - 1) * 100 if p.entry_px else 0.0
+    m = margin_pct(p.size, p.entry_px, p.leverage, equity)
+    return (f"🆕 <b>{esc(p.sym or p.coin)}</b> {side_tag(p.side)} · {p.leverage:g}x\n"
+            f"Entry: {fpx(p.entry_px)} · Stop: {fpx(p.stop_px)} (−{stop_pct:.1f}%)\n"
+            f"Size: {m:.1f}% of your balance as margin ({m * p.leverage:.0f}% exposure){who}")
+
+
+def public_resize(p, before: float, equity: float) -> str:
+    """The copy grew or shrank (a trader added, trimmed, or a second trader joined)."""
+    word = "raised" if p.size > before else "trimmed"
+    was = margin_pct(before, p.entry_px, p.leverage, equity)
+    now = margin_pct(p.size, p.entry_px, p.leverage, equity)
+    return (f"↕️ <b>{esc(p.sym or p.coin)}</b> {side_tag(p.side)}: size {word} to {now:.1f}% of your balance as "
+            f"margin (was {was:.1f}%)")
+
+
+def public_weekly(st: State, since_ms: int, title: str) -> str:
+    """The members' weekly report: the last 7 days of closed trades."""
+    ts = [t for t in st.closed if t["closed_ms"] >= since_ms]
+    before = st.equity0 + sum(t["pnl"] for t in st.closed if t["closed_ms"] < since_ms)
+    if not ts:
+        return f"🗓️ <b>{esc(title)} · week</b>\nNo trade closed this week."
+    won = sum(1 for t in ts if t["pnl"] >= 0)
+    pct = lambda t: t["pnl"] / (t["notional"] or 1) * 100
+    best, worst = max(ts, key=pct), min(ts, key=pct)
+    coins: dict[str, float] = {}
+    for t in ts:
+        coins[t.get("sym") or t["coin"]] = coins.get(t.get("sym") or t["coin"], 0.0) + t["pnl"]
+    top = sorted(coins.items(), key=lambda kv: -kv[1])[:3]
+    return (f"🗓️ <b>{esc(title)} · week</b>: {fpct(sum(t['pnl'] for t in ts) / before * 100 if before else 0)} of "
+            f"the wallet\n{len(ts)} trades closed · {won / len(ts) * 100:.0f}% won\n"
+            f"Best: {esc(best.get('sym') or best['coin'])} {fpct(pct(best))} · worst: "
+            f"{esc(worst.get('sym') or worst['coin'])} {fpct(pct(worst))}\n"
+            "Coins that made most: " + ", ".join(f"{esc(c)} {fpct(v / before * 100 if before else 0)}"
+                                                  for c, v in top))
 
 
 def public_close(t: dict, wallet_before: float, show_traders: bool = False) -> str:

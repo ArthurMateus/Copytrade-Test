@@ -10,6 +10,7 @@ through one queue.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import datetime as dt
 import math
@@ -163,7 +164,8 @@ class Bot:
         self.ws_down_since = 0.0     # websocket down since (0 = up); alerted only if it stays down
         self.ws_alerted = False
         self.started = time.time()
-        self.pub_seen: tuple[set, int] | None = None   # the public wallet's open pos_ids and closed count, last seen
+        self.pub_seen: tuple[dict, int] | None = None  # the signal wallet's open {pos_id: size} and closed count
+        self.free_queue: list[dict] = self.load_free_queue()   # the free channel's posts waiting for their time
         self.health_problems: dict[str, str] = {}   # what the watchdog found wrong (alerted once, then "back")
 
     def invo_set(self, primary_kw: dict) -> tuple:
@@ -1349,32 +1351,69 @@ class Bot:
         name = self.cfg.discord.public_wallet
         return next((w for w in self.invo_wallets() if w.name == name), None)
 
+    def signal(self, text: str) -> None:
+        """A trade post: the members' channel at once, the free one `free_delay_min` later (kept across restarts)."""
+        cfg, d = self.cfg, self.cfg.discord
+        self.ui.send_to(cfg.dc_paid_channel_id, text)
+        if cfg.dc_public_channel_id:
+            if d.free_delay_min <= 0:
+                return self.ui.send_to(cfg.dc_public_channel_id, text)
+            self.free_queue.append({"due_ms": now_ms() + int(d.free_delay_min * 60_000),
+                                    "text": f"⏱️ <i>{d.free_delay_min:g} min ago</i> · {text}"})
+            self.save_free_queue()
+
+    def load_free_queue(self) -> list[dict]:
+        try:
+            return json.loads((self.data / "free_queue.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+
+    def save_free_queue(self) -> None:
+        tmp = self.data / "free_queue.json.tmp"
+        tmp.write_text(json.dumps(self.free_queue), encoding="utf-8")
+        tmp.replace(self.data / "free_queue.json")
+
     def public_tick(self) -> None:
-        """Every second: the public wallet's new and closed trades since the last look (nothing from before the
-        start: the first look only remembers), and the daily summary at discord.public_daily_hour (local)."""
+        """Every second: the signal wallet's new trades, size changes and closes since the last look (nothing from
+        before the start: the first look only remembers), the free channel's due posts, the daily summary at
+        discord.public_daily_hour (local, both channels) and the members' weekly report on weekly_report_day."""
+        cfg, d = self.cfg, self.cfg.discord
+        due = [q for q in self.free_queue if q["due_ms"] <= now_ms()]
+        if due:
+            for q in due:
+                self.ui.send_to(cfg.dc_public_channel_id, q["text"])
+            self.free_queue = [q for q in self.free_queue if q["due_ms"] > now_ms()]
+            self.save_free_queue()
         w = self.public_wallet()
-        if w is None or not self.cfg.dc_public_channel_id:
+        if w is None or not (cfg.dc_public_channel_id or cfg.dc_paid_channel_id):
             return
-        d = self.cfg.discord
-        ids = {p.pos_id for p in w.st.positions.values()}
+        sizes = {p.pos_id: p.size for p in w.st.positions.values()}
         if self.pub_seen is not None:
             seen, n_closed = self.pub_seen
             eq = w.st.equity0 + sum(t["pnl"] for t in w.st.closed[:n_closed])
             for t in w.st.closed[n_closed:]:
-                self.ui.send_public(cardfmt.public_close(t, eq, d.public_show_traders))
+                self.signal(cardfmt.public_close(t, eq, d.public_show_traders))
                 eq += t["pnl"]
+            now_eq = w.st.equity(w.pm.mids)
             for p in w.st.positions.values():
                 if p.pos_id not in seen:
-                    self.ui.send_public(cardfmt.public_open(p, d.public_show_traders))
-        self.pub_seen = (ids, len(w.st.closed))
+                    self.signal(cardfmt.public_open(p, now_eq, d.public_show_traders))
+                elif abs(p.size - seen[p.pos_id]) > seen[p.pos_id] * 0.05:      # a change members should follow
+                    self.signal(cardfmt.public_resize(p, seen[p.pos_id], now_eq))
+                else:
+                    sizes[p.pos_id] = seen[p.pos_id]                            # (small steps add up)
+        self.pub_seen = (sizes, len(w.st.closed))
         local = now_ms() + d.utc_offset_hours * 3_600_000
-        day = day_key(local)
-        if time.gmtime(local / 1000).tm_hour >= d.public_daily_hour and \
-                self.st.marks.get("public_daily", {}).get("key") != day:
+        day, hour = day_key(local), time.gmtime(local / 1000)
+        title = "LIVE wallet" if w is self.live else "Copy wallet"
+        if hour.tm_hour >= d.public_daily_hour and self.st.marks.get("public_daily", {}).get("key") != day:
             self.rec({"ev": "mark", "kind": "public_daily", "key": day, "equity": w.st.equity(w.pm.mids)})
             mark = w.st.marks.get("day")
-            title = "LIVE wallet" if w is self.live else "Copy wallet"
-            self.ui.send_public(cardfmt.public_daily(w.st, w.pm.mids, title, mark["equity"] if mark else None))
+            text = cardfmt.public_daily(w.st, w.pm.mids, title, mark["equity"] if mark else None)
+            for ch in (cfg.dc_paid_channel_id, cfg.dc_public_channel_id):
+                self.ui.send_to(ch, text)
+            if hour.tm_wday == d.weekly_report_day and cfg.dc_paid_channel_id:
+                self.ui.send_to(cfg.dc_paid_channel_id, cardfmt.public_weekly(w.st, now_ms() - 7 * 86_400_000, title))
 
     # ---- health and backups (docs/PRODUCTION_PLAN.md Phase 2, owner request 2026-11-03) ------------------------
     def health_check(self) -> dict[str, str]:

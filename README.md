@@ -193,26 +193,50 @@ e.g. `backup_dir = "C:/Users/gedeo/OneDrive/copybot-backups"`. To restore: stop 
 itself), `copybot.service` and `copybot.env.example` (the secrets, the same names as above). Never run the bot on two
 machines at once: remove the Windows task first, then copy `data\` over.
 
-## Public results channel (read-only for others)
+## Signal channels: members and free tier (selling the signals)
 
-The bot can post one wallet's trades to a second Discord channel that other people can read but not write in. It
-shows new trades (coin, side, leverage, entry, stop), closed trades (result in % of the trade and of the wallet,
-how long, why) and a summary every day at 21:00 (your time). Never dollar amounts, and no trader names unless you set
-`public_show_traders = true`. Commands keep working only in your own channel, only for you.
+The bot posts one wallet's trades to two Discord channels. Commands keep working only in your own channel, only for
+you. Payments and the members' role are handled by a subscription service (Whop, LaunchPass ...): the bot only posts.
 
-1. In your Discord server create a channel, e.g. `#copy-results`. In its settings → Permissions: `@everyone` may
-   **View Channel** and **Read Message History** but NOT **Send Messages**; the bot's role may **Send Messages** and
-   **Embed Links**.
-2. Discord → User Settings → Advanced → turn on Developer Mode. Right-click the channel → Copy Channel ID.
-3. In PowerShell on the bot PC, then restart the bot:
+| | Members (paid) | Free |
+|---|---|---|
+| New trade: coin, side, leverage, entry, stop, size as % of balance | at once | 30 min later |
+| Size raised / trimmed, trade closed (result in %) | at once | 30 min later |
+| Daily summary (21:00 your time) | ✅ | ✅ |
+| Weekly report (Sundays: result, win rate, best/worst trade, best coins) | ✅ | – |
+
+Never dollar amounts, and no trader names unless you set `public_show_traders = true`. Posts waiting for the free
+channel are kept in `data\free_queue.json`, so a restart does not lose them. Members follow
+[docs/CLIENT_GUIDE.md](docs/CLIENT_GUIDE.md) (how to copy a signal on Hyperliquid); post it in a `#how-to-copy`
+channel.
+
+### Setting up the server (once)
+1. **Roles:** Server Settings → Roles → create `Member` (the paying role). Your subscription service gives and
+   takes it away.
+2. **Channels** (each: Edit Channel → Permissions):
+   - `#free-signals`: `@everyone` may View Channel and Read Message History, NOT Send Messages.
+   - `#member-signals`: `@everyone` may NOT View Channel; `Member` may View Channel and Read Message History, NOT Send
+     Messages.
+   - `#how-to-copy` (the member guide) and a `#help` channel where people may write.
+   - In both signal channels the bot's own role may View Channel, Send Messages and Embed Links.
+3. **Subscription service:** make an account on Whop (https://whop.com) or LaunchPass (you sign up yourself), create
+   a product with your price, connect your Discord server and choose the `Member` role. Check which payment methods
+   your Brazilian buyers can use (card; Pix depends on the service) and the service's fee.
+4. **Channel ids:** Discord → User Settings → Advanced → Developer Mode on. Right-click each signal channel → Copy
+   Channel ID. Then in PowerShell on the bot PC:
 
 ```powershell
-setx DISCORD_PUBLIC_CHANNEL_ID "<the channel id>"
+setx DISCORD_PAID_CHANNEL_ID "<the #member-signals id>"
 ```
 
-`config/discord.toml` picks the wallet (`public_wallet`: the 5% · 8% paper wallet by default, `"live"` for the real
-one once it runs), the hour and whether traders are named. Before inviting paying users, read the legal note in
-`docs/PRODUCTION_PLAN.md` (Phase 5): sharing results is fine, selling copy signals may need a CVM registration.
+```powershell
+setx DISCORD_PUBLIC_CHANNEL_ID "<the #free-signals id>"
+```
+
+5. Restart the bot (a NEW PowerShell window, or the auto-start task).
+
+`config/discord.toml`: `public_wallet` (the wallet shown: the 5% · 8% paper wallet, or `"live"` for the real-money
+one), `public_daily_hour`, `free_delay_min` (30), `weekly_report_day` (6 = Sunday), `public_show_traders`.
 
 ## Live trading (real money, Hyperliquid)
 

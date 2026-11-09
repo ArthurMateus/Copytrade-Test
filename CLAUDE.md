@@ -236,13 +236,18 @@ tests of the new allocation policy.
   on the Claude PC (they change the owner's Windows): parse-checked only.
 - `deploy/` (Linux server, later): `setup_server.sh`, `copybot.service` (systemd, Restart=always), `copybot.env.example`.
 
-## The public channel (Phase 4, owner request 2026-11-03)
-- `DISCORD_PUBLIC_CHANNEL_ID` (env; off when unset) + `discord.public_wallet` / `public_daily_hour` /
-  `public_show_traders`. `Bot.public_tick` (every second, after `refresh_ui`) diffs the wallet's open pos_ids and
-  closed count since the last look (the first look after a start only remembers: nothing is re-posted) and posts
-  `cardfmt.public_open` / `public_close` (% of the trade and of the wallet before it); the daily `public_daily`
-  once per local day (bot-ledger `mark` kind `public_daily`). `ChatUI.send_public` queues `("public", text)`;
-  `DiscordUI._call` posts to `params["channel"]`. No dollar amounts there (tested). Commands stay owner-only.
+## The signal channels (Phase 4, owner request 2026-11-03; members/free tiers Phase 5, 2026-11-09)
+- `DISCORD_PAID_CHANNEL_ID` (members) and `DISCORD_PUBLIC_CHANNEL_ID` (free), each optional, + `discord.public_wallet`
+  / `public_daily_hour` / `free_delay_min` (30) / `weekly_report_day` (6) / `public_show_traders`. Payments and the
+  member role: a subscription service (Whop/LaunchPass) the owner sets up; the bot holds no payment code.
+- `Bot.public_tick` (every second, after `refresh_ui`) diffs the wallet's open {pos_id: size} and closed count since
+  the last look (the first look after a start only remembers: nothing is re-posted): new trade
+  `cardfmt.public_open` (entry, stop, size as % of balance as margin: what a member needs to copy by hand), size change
+  > 5% `public_resize`, close `public_close`. `Bot.signal` sends to members at once and appends the free copy to
+  `free_queue` (`data/free_queue.json`, survives restarts), posted when due. The daily `public_daily` goes to both
+  once per local day (bot-ledger `mark` kind `public_daily`); on `weekly_report_day` members also get
+  `public_weekly`. `ChatUI.send_to(channel, text)`; `DiscordUI._call` posts to `params["channel"]`. No dollar amounts
+  there (tested). Commands stay owner-only. Member guide: `docs/CLIENT_GUIDE.md`.
 
 ## Findings from the real API
 - `tests/test_discord.py::test_rate_limit_is_honoured` is timing-based and can fail rarely under load; rerun before

@@ -125,6 +125,13 @@ waiting for the owner's API wallet.
 traders hidden by default. Waiting for the owner to make the channel and set `DISCORD_PUBLIC_CHANNEL_ID`.
 
 ## Phase 5: Subscription product (only after the lawyer says how)
+
+**Status (2026-11-09):** the owner reports the lawyer cleared both models. Owner choice: **signals first, automatic
+copying later**. Built (README "Signal channels"): members get every trade at once with copy instructions, a daily and
+a weekly report; the free channel gets the same trades 30 minutes later. Payments and the member role run through a
+subscription service (Whop / LaunchPass), so the bot holds no payment code. Member guide: `docs/CLIENT_GUIDE.md`.
+Next: automatic copying for clients (the architecture below), on a real server.
+
 A **rebuild of the core**: today the bot is single-user (one set of files and environment variables).
 
 Architecture
