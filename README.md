@@ -61,6 +61,7 @@ Run the tests: `uv run pytest` (about 4 minutes; this includes real-process kill
 | `/flatten <PIN>` | close every paper copy and pause |
 | `/reset <PIN>` | every wallet back to $300, traders kept, old history archived (refused while a copy is open) |
 | `/help`, `/restart` | the list, a restart (the loop above starts it again) |
+| `/livewallet` | the real account as Hyperliquid itself reports it: value, margin, free balance, spot USDC, positions with their liquidation price, resting stop orders |
 | `/livestatus` | the live wallet: balance, the real account, today vs the daily stop, open trades and their stops on the exchange, live vs paper |
 | `/livepause`, `/liveresume` | stop / allow new live copies (live exits and stops always run) |
 | `/liveclose <coin> <PIN>` | close that one live trade now |
@@ -222,7 +223,8 @@ the same calls and stop, sized the same way on its own 100$ ledger (`data/wallet
 
 - **Daily stop:** no new entries once the day's NET result is −15% of the day's start (a day at +30% that falls back
   to +15% does not stop). It holds until your next day (local midnight, `discord.utc_offset_hours`).
-- **Floor:** no new entries once the wallet is at or below 50$, until `/liveresume`.
+- **Weekly stop:** no new entries while the week's NET result is −25% of the week's start (`live.weekly_loss_pct`).
+- **Floor:** no new entries once the wallet is at or below 75$ (25% under the 100$ start), until `/liveresume <PIN>`.
 - **Position cap:** one coin never above 70$ notional (a bigger order is trimmed to it). Entries fill at most 0.5%
   from the mid, else they are skipped. All open stops together risk at most 30% of the wallet, and liquidation sits
   at least 1.25x the stop distance away (so the leverage can be a step lower than the paper twin's).

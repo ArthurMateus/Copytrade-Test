@@ -81,6 +81,11 @@ class FakeExchange:
         if t == "clearinghouseState":
             return {"marginSummary": {"accountValue": str(self.account_value)},
                     "assetPositions": [{"position": {"coin": c, "szi": str(s)}} for c, s in self.positions.items() if s]}
+        if t == "userAbstraction":
+            return getattr(self, "abstraction", "default")
+        if t == "spotClearinghouseState":
+            usdc = getattr(self, "spot_usdc", 0.0)
+            return {"balances": [{"coin": "USDC", "token": 0, "total": str(usdc), "hold": "0.0", "entryNtl": "0.0"}]}
         if t == "frontendOpenOrders":
             return [dict(o) for o in self.orders.values()]
         if t == "orderStatus":

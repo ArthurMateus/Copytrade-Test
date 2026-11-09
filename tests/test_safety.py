@@ -28,7 +28,7 @@ MONEY_OUT = re.compile(r"withdraw|transfer|usdSend|spotSend|sendAsset|approveAge
                        r"mnemonic|seed_phrase", re.I)
 ACTIONS = {"order", "cancel", "updateLeverage"}           # the only signed actions
 READS = {"userRole", "metaAndAssetCtxs", "clearinghouseState", "frontendOpenOrders", "userFillsByTime", "allMids",
-         "orderStatus"}
+         "orderStatus", "spotClearinghouseState", "userAbstraction"}      # (the last one: /livewallet shows the spot USDC, read-only)
 
 
 def test_source_has_no_signing_or_keys_outside_the_live_module():

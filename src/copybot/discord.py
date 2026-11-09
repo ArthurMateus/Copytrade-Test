@@ -48,6 +48,7 @@ DESCRIPTIONS = {
     "/help": "List the commands",
     "/restart": "Restart the bot",
     "/livestatus": "The REAL-money wallet: balance, today, open trades, stops on the exchange",
+    "/livewallet": "The account as Hyperliquid itself reports it: value, margin, spot USDC, positions, stop orders",
     "/livepause": "Pause new REAL-money copies (exits and stops keep running)",
     "/liveresume": "Resume new REAL-money copies",
     "/livekill": "Close every REAL-money position, cancel its orders and pause (needs the PIN)",

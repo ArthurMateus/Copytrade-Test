@@ -30,7 +30,7 @@ INVO_COMMANDS = tuple(f"/invo{v}" for v in VERBS)
 ALIASES = {f"/{v}": f"/invo{v}" for v in VERBS}
 ALIASES.update({"/invo": "/invostatus", "/positions": "/invotrades", "/leaders": "/invotraders"})
 # the REAL-money wallet (copybot/live.py; owner request 2026-11-03)
-LIVE_COMMANDS = ("/livestatus", "/livepause", "/liveresume", "/liveclose", "/livekill")
+LIVE_COMMANDS = ("/livestatus", "/livewallet", "/livepause", "/liveresume", "/liveclose", "/livekill")
 COMMANDS = tuple(dict.fromkeys(("/help", "/restart") + tuple(ALIASES) + INVO_COMMANDS + LIVE_COMMANDS))
 # what Discord shows in its slash-command list
 SLASH_COMMANDS = ("/help", "/restart") + tuple(f"/{v}" for v in VERBS) + LIVE_COMMANDS
@@ -62,7 +62,7 @@ HELP = ("🤖 <b>Copybot (paper)</b> · 🧾 Invo calls (copied on Hyperliquid p
         "pause · resume – new copies (exits and stops always run)\n"
         "close &lt;coin&gt; – close that trade now in every paper wallet (e.g. /close BTC)\n"
         "flatten &lt;PIN&gt; – close every trade and pause · reset &lt;PIN&gt; – back to the start, traders kept\n\n"
-        "💵 REAL money (when live trading is on): livestatus · livepause · liveresume &lt;PIN&gt; · liveclose &lt;coin&gt; "
+        "💵 REAL money (when live trading is on): livestatus · livewallet – the account as Hyperliquid reports it · livepause · liveresume &lt;PIN&gt; · liveclose &lt;coin&gt; "
         "&lt;PIN&gt; – close that live trade · livekill &lt;PIN&gt; – close every live position and pause\n\n"
         "Examples: /wallets · /follow nicush · /block nicush Kitchen\n"
         "/restart – restart the bot")

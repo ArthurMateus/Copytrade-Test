@@ -1318,6 +1318,8 @@ class Bot:
             return self.ui.send(f"💵 Live trading is off: {cardfmt.esc(self.live_off)}. See the README, Live trading.")
         if c.name == "/livestatus":
             return self.ui.send(d.status_text())
+        if c.name == "/livewallet":
+            return self.ui.send(d.wallet_text())
         if c.name == "/livepause":
             self.live.rec({"ev": "pause", "reason": "/livepause"})
             return self.ui.send("⏸️ 💵 <b>Live copies paused</b>. Live exits and stops keep running. /liveresume "

@@ -118,10 +118,50 @@ class Exchange:
             raise NoBook(f"{coin} is not listed on Hyperliquid {self.network}")
         return a
 
+    UNIFIED = ("unifiedAccount", "portfolioMargin")
+
+    def unified(self) -> bool:
+        """A unified / portfolio-margin account keeps its USDC in the SPOT balance and uses it as perps collateral (the
+        perps view reads 0 until a position exists: live 2026-11-08, 99.75$ shown as 0.00$). Asked at most every 10
+        minutes; if Hyperliquid does not answer, the last answer stands (first time: not unified)."""
+        now = time.time()
+        if now - getattr(self, "_abs_at", 0.0) >= 600:
+            try:
+                got = self._read({"type": "userAbstraction", "user": self.account})
+                self._abs = got if isinstance(got, str) else "default"
+                self._abs_at = now
+            except Exception as e:
+                log.warn("live_abstraction_failed", err=type(e).__name__)
+                self._abs_at = now - 540                      # try again in a minute
+        return getattr(self, "_abs", "default") in self.UNIFIED
+
+    def spot_usdc(self) -> float:
+        r = self._read({"type": "spotClearinghouseState", "user": self.account}) or {}
+        return next((float(b.get("total") or 0) for b in r.get("balances") or [] if b.get("coin") == "USDC"), 0.0)
+
     def state(self) -> tuple[dict[str, float], float]:
-        """({coin: signed size}, account value) of the real account."""
+        """({coin: signed size}, account value) of the real account. A unified account's value is its spot USDC (the
+        collateral, margin held included) plus the positions' unrealized PnL; a standard account's is the perps value."""
         r = self._read({"type": "clearinghouseState", "user": self.account}) or {}
-        return hl.parse_positions(r), float((r.get("marginSummary") or {}).get("accountValue") or 0)
+        value = float((r.get("marginSummary") or {}).get("accountValue") or 0)
+        if self.unified():
+            upnl = sum(float((ap.get("position") or {}).get("unrealizedPnl") or 0) for ap in r.get("assetPositions") or [])
+            value = self.spot_usdc() + upnl
+        return hl.parse_positions(r), value
+
+    def snapshot(self) -> dict:
+        """What Hyperliquid itself says about the account (read-only; the /livewallet card): the perps account, the spot
+        balances (USDC left in spot cannot be traded) and the resting orders. A failed read is None, never a guess."""
+        out = {}
+        for key, body in (("perps", {"type": "clearinghouseState", "user": self.account}),
+                          ("spot", {"type": "spotClearinghouseState", "user": self.account}),
+                          ("orders", {"type": "frontendOpenOrders", "user": self.account})):
+            try:
+                out[key] = self._read(body)
+            except Exception as e:
+                log.warn("live_snapshot_failed", what=key, err=type(e).__name__)
+                out[key] = None
+        return out
 
     def open_orders(self) -> list[dict]:
         return list(self._read({"type": "frontendOpenOrders", "user": self.account}) or [])
@@ -669,6 +709,68 @@ class Desk:
             self.w.rec({"ev": "ack", "items": list(self.w.st.uncertain)})
         self.w.rec({"ev": "resume"})
         self.floor_armed = self.w.st.equity(self.mids) > self.cfg.floor_usd
+
+    def wallet_text(self) -> str:
+        """/livewallet: the real account as Hyperliquid reports it (not the ledger): value, free margin, spot USDC,
+        every position with its liquidation price and every resting order."""
+        snap = self.ex.snapshot()
+        f = lambda v: float(v) if v not in (None, "") else 0.0
+        addr = self.ex.account
+        money = "REAL money" if self.ex.mainnet else "test money"
+        lines = [f"🏦 <b>Hyperliquid account</b> · {self.ex.network} ({money})",
+                 f"Address: <code>{cardfmt.esc(addr[:6])}…{cardfmt.esc(addr[-4:])}</code> · copies "
+                 f"<code>{cardfmt.esc(self.twin.name)}</code>"]
+        perps = snap["perps"]
+        if perps is None:
+            lines.append("⚠️ Hyperliquid did not answer for the perps account: try again in a minute.")
+        else:
+            ms = perps.get("marginSummary") or {}
+            value, used = f(ms.get("accountValue")), f(ms.get("totalMarginUsed"))
+            unified = self.ex.unified()
+            if unified:        # the collateral is the spot USDC: value = it + the open positions' PnL
+                upnl = sum(f((ap.get("position") or {}).get("unrealizedPnl")) for ap in perps.get("assetPositions") or [])
+                value = f(next((b.get("total") for b in (snap["spot"] or {}).get("balances") or []
+                                if b.get("coin") == "USDC"), 0)) + upnl
+            lines.append(f"Account value{' (unified account: spot USDC + open PnL)' if unified else ''}: "
+                         f"{cardfmt.fusd(value, sign=False)} · margin in use "
+                         f"{cardfmt.fusd(used, sign=False)} · free margin "
+                         f"{cardfmt.fusd(max(0.0, value - used), sign=False)}")
+            lines.append(f"Ledger of the bot: {cardfmt.fusd(self.w.st.equity(self.mids), sign=False)} "
+                         f"(started at {cardfmt.fusd(self.w.st.equity0, sign=False)})")
+            for ap in perps.get("assetPositions") or []:
+                p = ap.get("position") or {}
+                szi = f(p.get("szi"))
+                if not szi:
+                    continue
+                lev = (p.get("leverage") or {})
+                liq = p.get("liquidationPx")
+                lines.append(f"{'⬆️' if szi > 0 else '⬇️'} {cardfmt.esc(str(p.get('coin')))} {abs(szi):g} @ "
+                             f"{cardfmt.fpx(f(p.get('entryPx')))} · {lev.get('value', '?')}x {cardfmt.esc(str(lev.get('type', '')))}"
+                             f" · value {cardfmt.fusd(f(p.get('positionValue')), sign=False)} · PnL "
+                             f"{cardfmt.fusd(f(p.get('unrealizedPnl')))}"
+                             + (f" · liquidation {cardfmt.fpx(f(liq))}" if liq not in (None, "") else ""))
+            if not any(f((ap.get("position") or {}).get("szi")) for ap in perps.get("assetPositions") or []):
+                lines.append("No open positions.")
+        spot = snap["spot"]
+        if spot is not None:
+            usdc = next((f(b.get("total")) for b in spot.get("balances") or [] if b.get("coin") == "USDC"), 0.0)
+            lines.append(f"Spot USDC: {cardfmt.fusd(usdc, sign=False)}"
+                         + (" ⚠️ money in spot cannot be used for perps trades: move it to the perps account in the "
+                            "Hyperliquid app" if usdc > 1 and not self.ex.unified() else ""))
+        orders = snap["orders"]
+        if orders is None:
+            lines.append("⚠️ Hyperliquid did not answer for the resting orders.")
+        else:
+            lines.append(f"Resting orders: {len(orders)}" + (" (stops)" if orders else ""))
+            for o in orders[:12]:
+                kind = "stop" if o.get("isTrigger") else "limit"
+                lines.append(f"• {cardfmt.esc(str(o.get('coin')))} {kind} "
+                             f"{'sell' if o.get('side') == 'A' else 'buy'} {cardfmt.esc(str(o.get('sz', '?')))} @ "
+                             f"{cardfmt.fpx(f(o.get('triggerPx') if o.get('isTrigger') else o.get('limitPx')))}"
+                             + (" · reduce-only" if o.get("reduceOnly") else ""))
+        if self.problems:
+            lines += ["⚠️ The bot's ledger and this account differ:"] + [f"• {cardfmt.esc(x)}" for x in self.problems[:5]]
+        return "\n".join(lines)
 
     def status_text(self) -> str:
         w, st = self.w, self.w.st

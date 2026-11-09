@@ -134,6 +134,23 @@ def test_an_account_holding_less_than_the_ledger_alerts(tmp_path, fx):
     assert any("ledger counts" in t for t in d.said)
 
 
+def test_a_unified_account_counts_its_spot_usdc_not_the_empty_perps_view(tmp_path, fx):
+    """Live 2026-11-08: a unified account (userAbstraction) keeps its USDC in the spot balance; the perps view read
+    0.00$, so /livestatus showed 0.00$ and the account-below-ledger alert would have fired every hour."""
+    d = Desk(tmp_path, fx)
+    fx.account_value = 0.0                                  # what the perps view says
+    fx.abstraction, fx.spot_usdc = "unifiedAccount", 300.0
+    d.desk.ex._abs_at = 0.0                                 # (the abstraction is cached for 10 minutes)
+    d.desk.reconcile()
+    assert d.desk.account_value == pytest.approx(300.0)
+    assert not any("ledger counts" in t for t in d.said)
+    assert "Hyperliquid account" in d.desk.wallet_text() and "unified account" in d.desk.wallet_text()
+    fx.abstraction = "default"                              # a standard account: the perps value is the account
+    d.desk.ex._abs_at = 0.0
+    d.desk.reconcile()
+    assert d.desk.account_value == pytest.approx(0.0)
+
+
 def test_a_stop_the_exchange_fired_is_booked_at_its_real_fill(tmp_path, fx):
     d = Desk(tmp_path, fx)
     d.call()
@@ -307,6 +324,9 @@ def test_the_bot_copies_an_invo_call_with_real_orders_next_to_its_paper_twin(inv
             dc.say("/livestatus")
             assert wait_for(lambda: any("Live wallet" in m["text"] and "stop on the exchange" in m["text"]
                                         for m in dc.sent))
+            dc.say("/livewallet")                           # the account as the exchange reports it, not the ledger
+            assert wait_for(lambda: any("Hyperliquid account" in m["text"] and "Resting orders" in m["text"]
+                                        and "ETH" in m["text"] for m in dc.sent))
             from tests.test_e2e import PIN
             dc.say("/liveclose ETH 0000")
             assert wait_for(lambda: any("Usage: /liveclose" in m["text"] for m in dc.sent))
