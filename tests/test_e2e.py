@@ -114,7 +114,7 @@ def test_only_the_invo_commands_exist_and_prices_still_flow(env):
     hl, dc, data, cdir = env
     bot, th = start_bot(env)
     try:
-        assert wait_for(lambda: any("Copybot started" in m["text"] and "Invo is off" in m["text"] for m in dc.sent))
+        assert wait_for(lambda: any("Lockstep started" in m["text"] and "Invo is off" in m["text"] for m in dc.sent))
         assert not bot.sides and not hl.subscribed_users()                  # no Hyperliquid wallet is followed
         assert wait_for(lambda: dc.commands is not None)
         names = {c["name"] for c in dc.commands}
@@ -206,7 +206,7 @@ def wallet_dirs(data: Path) -> list[Path]:
 
 
 def started(dc, n):
-    return sum("Copybot started" in m["text"] for m in dc.sent) >= n
+    return sum("Lockstep started" in m["text"] for m in dc.sent) >= n
 
 
 def test_kill_minus_9_with_an_open_copy_its_stop_survives(proc_env):

@@ -170,7 +170,7 @@ def test_full_bot_on_discord(tmp_path):
     th.start()
     try:
         assert wait_for(lambda: bot.health().clock_ok and fake.connected())
-        assert wait_for(lambda: any("Copybot started" in m["description"] for m in fake.sent))
+        assert wait_for(lambda: any("Lockstep started" in m["description"] for m in fake.sent))
         fake.interact("follow", {"wallet": "nicush"})
         assert wait_for(lambda: bot.invo_watch.known.get("nicush") is not None, timeout=10)
         f.open_call(pid, "ETH", long=True, leverage=5, size=0.05, entry=3000.0)

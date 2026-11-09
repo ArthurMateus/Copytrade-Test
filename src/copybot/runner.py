@@ -410,7 +410,7 @@ class Bot:
         elif self.cfg.live.enabled:
             lines.append(f"💵 LIVE is off: {cardfmt.esc(self.live_off)}")
         mode = f"paper + LIVE {self.cfg.live.network}" if self.live is not None else "paper"
-        self.ui.send(f"🤖 <b>Copybot started</b> ({mode})\n" + "\n".join(lines))
+        self.ui.send(f"🤖 <b>Lockstep started</b> ({mode})\n" + "\n".join(lines))
 
     def boot_side(self, w) -> None:
         """Genesis, boot and restart repair of one wallet."""
@@ -1405,7 +1405,7 @@ class Bot:
         self.pub_seen = (sizes, len(w.st.closed))
         local = now_ms() + d.utc_offset_hours * 3_600_000
         day, hour = day_key(local), time.gmtime(local / 1000)
-        title = "LIVE wallet" if w is self.live else "Copy wallet"
+        title = "Lockstep · live wallet" if w is self.live else "Lockstep"
         if hour.tm_hour >= d.public_daily_hour and self.st.marks.get("public_daily", {}).get("key") != day:
             self.rec({"ev": "mark", "kind": "public_daily", "key": day, "equity": w.st.equity(w.pm.mids)})
             mark = w.st.marks.get("day")

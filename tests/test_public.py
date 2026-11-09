@@ -65,7 +65,7 @@ def test_without_signal_channels_nothing_is_posted_elsewhere(invo_env, monkeypat
     monkeypatch.delenv("DISCORD_PAID_CHANNEL_ID", raising=False)
     bot, th = start_with_invo((hl, dc, data, cdir), tok, monkeypatch)
     try:
-        assert wait_for(lambda: any("Copybot started" in m["text"] for m in dc.sent))
+        assert wait_for(lambda: any("Lockstep started" in m["text"] for m in dc.sent))
         bot.public_tick()
         assert not dc.public
     finally:

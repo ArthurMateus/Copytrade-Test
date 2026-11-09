@@ -51,7 +51,7 @@ def short_names(text: str) -> str:
     return _INVO_WORDS.sub(r"/\1", text)
 
 
-HELP = ("🤖 <b>Copybot (paper)</b> · 🧾 Invo calls (copied on Hyperliquid prices)\n\n"
+HELP = ("🤖 <b>Lockstep</b> · 🧾 Invo calls copied on Hyperliquid (paper wallets + the live one)\n\n"
         "status – the book at a glance (live)\n"
         "trades – open trades at live prices (live)\n"
         "traders – followed traders and what copying them made (live)\n"
