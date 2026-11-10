@@ -36,3 +36,9 @@ stops_pct = [3.0, 8.0, 0.0]
 main_stop_pct = 0.0
 aliases = {}              # Invo ticker -> Hyperliquid coin when the names differ, e.g. { MATIC = "POL" }
 # Every portfolio of a followed trader is copied; /block <user> <portfolio> stops one by hand.
+# Our trades as Invo "share predictions" (paper calls, no money on Invo), to build a track record there. The bot's OWN
+# Invo account (the one in INVO_TOKEN_FILE) posts them in one of its PAPER portfolios: make the portfolio in the app
+# while logged in as the bot's account, then put that account's username and the portfolio's title here. "" = off.
+post_username = ""        # e.g. "lockstep"
+post_portfolio = ""       # e.g. "Lockstep signals"
+post_wallet = ""          # whose trades: "" = the Discord signal wallet (discord.public_wallet), or e.g. "live"

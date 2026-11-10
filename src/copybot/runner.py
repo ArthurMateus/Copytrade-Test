@@ -33,6 +33,7 @@ from copybot import live as livemod
 from copybot.broker import PaperBroker
 from copybot.invo import (DELETED as INVO_DELETED, PREFIX as INVO, REPLACED_S as INVO_REPLACED_S,
                           RESIZE_MIN as INVO_RESIZE_MIN, InvoClient, Watcher as InvoWatcher)
+from copybot.invo_post import Poster as InvoPoster
 
 # the live wallet's liquidation sits at least 1.25x its stop distance away (values review 2026-11-03: at 1x a 25x coin's
 # isolated short liquidates at 7.84%, inside the 8% stop)
@@ -166,6 +167,12 @@ class Bot:
         self.started = time.time()
         self.pub_seen: tuple[dict, int] | None = None  # the signal wallet's open {pos_id: size} and closed count
         self.free_queue: list[dict] = self.load_free_queue()   # the free channel's posts waiting for their time
+        # our trades as Invo share predictions (owner request 2026-11-10), on the watcher's login (one account)
+        self.invo_poster: InvoPoster | None = None
+        self.post_seen: dict | None = None     # the posted wallet's open {pos_id: size} at the last look
+        if self.invo_watch is not None and cfg.invo.post_username and cfg.invo.post_portfolio:
+            self.invo_poster = InvoPoster(self.invo_watch.client, cfg.invo.post_username, cfg.invo.post_portfolio,
+                                          self.data / "invo_posts.json", self.stop, alert=self.ui.send)
         self.health_problems: dict[str, str] = {}   # what the watchdog found wrong (alerted once, then "back")
 
     def invo_set(self, primary_kw: dict) -> tuple:
@@ -433,6 +440,8 @@ class Bot:
         if self.invo_watch:
             self.sync_invo_extras()
             self.invo_watch.start()
+        if self.invo_poster is not None:
+            self.invo_poster.start()
 
     def invo_record_rows(self) -> dict:
         """Invo's own numbers for the copied portfolios of each followed trader (from the watcher's last read)."""
@@ -1064,6 +1073,7 @@ class Bot:
                 if time.time() - last_ui >= 1.0:
                     self.refresh_ui()
                     self.public_tick()
+                    self.invo_post_tick()
                     last_ui = time.time()
                 if time.time() - last_beat >= 60:
                     self.heartbeat()
@@ -1414,6 +1424,49 @@ class Bot:
                 self.ui.send_to(ch, text)
             if hour.tm_wday == d.weekly_report_day and cfg.dc_paid_channel_id:
                 self.ui.send_to(cfg.dc_paid_channel_id, cardfmt.public_weekly(w.st, now_ms() - 7 * 86_400_000, title))
+
+    # ---- our trades as Invo share predictions (owner request 2026-11-10; copybot/invo_post.py) ------------------
+    def invo_post_wallet(self):
+        name = self.cfg.invo.post_wallet or self.cfg.discord.public_wallet
+        return next((w for w in self.invo_wallets() if w.name == name), None)
+
+    @staticmethod
+    def invo_ticker(coin: str) -> tuple[str, float]:
+        """Hyperliquid coin -> (Invo ticker, price factor): kPEPE is 1,000 PEPE (invo_trade_coin the other way)."""
+        if len(coin) > 1 and coin[0] == "k" and coin[1].isupper():
+            return coin[1:], 1000.0
+        return coin, 1.0
+
+    def invo_post_tick(self) -> None:
+        """Every second: the posted wallet's new trades, size changes and closes go to the poster thread. The first
+        look after a start only remembers (and closes calls whose trade closed while the bot was off)."""
+        if self.invo_poster is None:
+            return
+        w = self.invo_post_wallet()
+        if w is None:
+            return
+        sizes = {p.pos_id: p.size for p in w.st.positions.values()}
+        if self.post_seen is None:
+            self.post_seen = sizes
+            return self.invo_poster.sync(set(sizes))
+        eq = w.st.equity(w.pm.mids)
+        aliases = {v.upper(): k for k, v in self.cfg.invo.aliases.items()}
+        for p in w.st.positions.values():
+            frac = cardfmt.margin_pct(p.size, p.entry_px, p.leverage, eq) / 100
+            ticker, fx = self.invo_ticker(p.coin)
+            ticker = aliases.get(p.coin.upper(), ticker)
+            stop = p.stop_px / fx if p.stop_px > 0 else None
+            seen = self.post_seen.get(p.pos_id)
+            if seen is None:
+                self.invo_poster.open(p.pos_id, ticker, p.side > 0, frac, stop, p.leverage)
+            elif abs(p.size - seen) > seen * 0.05:
+                self.invo_poster.resize(p.pos_id, frac, stop)
+            else:
+                sizes[p.pos_id] = seen                     # (small steps add up)
+        for pid in self.post_seen:
+            if pid not in sizes:
+                self.invo_poster.close(pid)
+        self.post_seen = sizes
 
     # ---- health and backups (docs/PRODUCTION_PLAN.md Phase 2, owner request 2026-11-03) ------------------------
     def health_check(self) -> dict[str, str]:

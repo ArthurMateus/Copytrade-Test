@@ -238,6 +238,26 @@ setx DISCORD_PUBLIC_CHANNEL_ID "<the #free-signals id>"
 `config/discord.toml`: `public_wallet` (the wallet shown: the 5% · 8% paper wallet, or `"live"` for the real-money
 one), `public_daily_hour`, `free_delay_min` (30), `weekly_report_day` (6 = Sunday), `public_show_traders`.
 
+## Posting our trades on Invo (share predictions)
+
+The bot can post the signal wallet's trades on Invo as **share predictions**: paper calls (no money on Invo) that
+Invo prices itself and shows as posts, so the account builds a public track record. The call's size is the trade's
+margin as a % of the wallet, in the portfolio's paper money. When the trade is resized or closed, the bot resizes or
+closes the call too, because Invo only counts closed calls in accuracy and P&L.
+
+It posts from the bot's OWN Invo account (the one in `INVO_TOKEN_FILE`). One login can't be used by the bot and a
+browser at the same time.
+
+1. Log in to Invo **as the bot's account** (a private window, so your own login stays), give it a public name (e.g.
+   "Lockstep") and create a **paper** portfolio (e.g. "Lockstep signals"). Log out of that window afterwards.
+2. In `config/invo.toml` set `post_username` (the bot account's username) and `post_portfolio` (the portfolio's
+   title). `post_wallet` = "" posts the Discord signal wallet's trades; `"live"` posts the real-money wallet's.
+3. `/restart` in Discord. The log shows `invo_post_portfolio` when it found the portfolio, then `invo_post_open` /
+   `invo_post_resize` / `invo_post_close` for each trade. If the portfolio can't be found, Discord says so once.
+
+Only trades opened after the start are posted. A call whose trade closed while the bot was off is closed at the next
+start. An entry that can't be posted within 2 minutes is skipped, since Invo would show a different entry price.
+
 ## Live trading (real money, Hyperliquid)
 
 One wallet, `live`, copies the paper wallet `copy_wallet` in `config/live.toml` (5% margin · 8% stop) with real orders:

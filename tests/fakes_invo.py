@@ -46,6 +46,8 @@ class FakeInvo:
         self.live: dict[str, dict] = {}                  # portfolio id -> overview numbers
         self.live_pos: dict[str, list[dict]] = {}        # portfolio id -> raw positions (open and closed), newest first
         self.refuse_live = False                         # /dex/ views answer 403 (our account may not see them)
+        self.sims: dict[str, float] = {}                 # portfolio id -> paper money not in a call (10,000 at start)
+        self.refuse_posts = False                        # our predictions' create and sell answer success: false
         self._n = itertools.count(1)
         self.lock = threading.Lock()
         fake = self
@@ -157,6 +159,51 @@ class FakeInvo:
             r = copy.deepcopy(fixture("invo_investments_open.json"))
             r["investmentsTicker"] = calls
             return r
+        # our own share predictions (copybot/invo_post.py): shapes from the web app's code, not recorded answers
+        if path == "/investments/get_investments_sims":
+            with self.lock:
+                return {"success": True, "error": None,
+                        "portfolioRemainingSim": self.sims.get(body["portfolioId"], 10_000.0)}
+        if path == "/investments/ticker/create":
+            if self.refuse_posts:
+                return {"success": False, "error": {"code": "refused"}, "baseIds": None}
+            pid, sims = body["portfolioId"], float(body["entrySim"])
+            with self.lock:
+                free = self.sims.get(pid, 10_000.0)
+                if sims > free + 1e-6:
+                    return {"success": False, "error": {"code": "insufficient_sims"}, "baseIds": None}
+                self.sims[pid] = free - sims
+            cid = self.open_call(pid, body["ticker"], long=body["directionLong"], leverage=body["leverage"],
+                                 stop=body["stopLoss"])
+            with self.lock:
+                for c in self.calls[pid]:
+                    if c["id"] == cid:
+                        c.update(baseId=f"base-{cid}", entrySim=sims, lastSim=sims)
+            return {"success": True, "error": None, "baseIds": [f"base-{cid}"]}
+        if path == "/investments/ticker/modify":
+            with self.lock:
+                for pid, calls in self.calls.items():
+                    for c in calls:
+                        if c.get("baseId") == body["baseId"]:
+                            d = float(body["simDifference"]) * (1 if body["simIncrease"] else -1)
+                            self.sims[pid] = self.sims.get(pid, 10_000.0) - d
+                            c.update(lastSim=c["lastSim"] + d, stopLoss=body["stopLoss"])
+                            return {"success": True, "error": None, "postId": "post-1",
+                                    "remainingSim": self.sims[pid]}
+            return {"success": False, "error": {"code": "not_found"}}
+        if path == "/investments/sell":
+            if self.refuse_posts:
+                return {"success": False, "error": {"code": "refused"}}
+            with self.lock:
+                hit = [(pid, c) for pid, calls in self.calls.items() for c in calls
+                       if c.get("baseId") == body["baseId"]]
+            if not hit:
+                return {"success": False, "error": {"code": "not_found"}}
+            pid, c = hit[0]
+            with self.lock:
+                self.sims[pid] = self.sims.get(pid, 10_000.0) + c["lastSim"]
+            self.close_call(pid, c["id"])
+            return {"success": True, "error": None, "closingPrice": c["entryPrice"], "postId": "post-2"}
         return {"success": False}
 
     def answer_get(self, path: str) -> dict:

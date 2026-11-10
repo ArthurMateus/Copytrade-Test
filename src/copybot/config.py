@@ -113,6 +113,12 @@ class Invo:
     main_stop_pct: float = 3.0
     # Invo ticker -> Hyperliquid coin when the names differ (checked against Hyperliquid's list at each use)
     aliases: dict = field(default_factory=dict)
+    # our trades as Invo share predictions (owner request 2026-11-10; copybot/invo_post.py): the bot account's
+    # username and the title of its PAPER portfolio to post in ("" = off), and the wallet whose trades are posted
+    # ("" = discord.public_wallet, what the signal channels show)
+    post_username: str = ""
+    post_portfolio: str = ""
+    post_wallet: str = ""
 
 
 @dataclass
